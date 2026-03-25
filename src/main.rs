@@ -11,10 +11,10 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "fuzz", about = "Fast fuzzy search engine")]
+#[command(name = "ruzz", about = "Fast fuzzy search engine")]
 struct Cli {
     /// Path to config file
-    #[arg(short, long, default_value = "fuzz.toml")]
+    #[arg(short, long, default_value = "ruzz.toml")]
     config: String,
 
     #[command(subcommand)]
@@ -66,7 +66,7 @@ async fn serve(config: Arc<config::Config>) -> anyhow::Result<()> {
     let app = server::create_router(state);
 
     let addr = format!("0.0.0.0:{}", port);
-    println!("⚡ fuzz server listening on http://localhost:{}", port);
+    println!("⚡ ruzz server listening on http://localhost:{}", port);
     println!("  /search?q=abax&country_code=NO&limit=20");
     println!("  /lookup?country_code=NO&org_number=936512054");
     println!("  /stats");
