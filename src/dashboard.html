@@ -56,17 +56,14 @@
     margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border);
   }
 
-  .logo { display: flex; align-items: center; gap: 0.75rem; }
+  .logo { display: flex; align-items: baseline; gap: 0.6rem; }
 
-  .logo-mark {
-    width: 32px; height: 32px; border-radius: 10px;
-    background: linear-gradient(135deg, var(--accent), #818cf8);
-    display: flex; align-items: center; justify-content: center;
-    font-family: var(--mono); font-weight: 700; font-size: 14px; color: white;
-    box-shadow: 0 0 20px var(--accent-glow);
+  .logo-text { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; letter-spacing: 0.05em; }
+
+  .logo-tagline {
+    font-size: 0.8rem; font-weight: 400; font-style: italic;
+    color: var(--text-dim); letter-spacing: 0.01em;
   }
-
-  .logo-text { font-family: var(--mono); font-size: 1.1rem; font-weight: 600; letter-spacing: 0.05em; }
 
   .status-pill {
     display: flex; align-items: center; gap: 0.5rem;
@@ -91,7 +88,7 @@
 
   .stat-value { font-family: var(--mono); font-size: 1.15rem; font-weight: 600; }
 
-  .search-wrap { position: relative; margin-bottom: 1rem; }
+  .search-wrap { position: relative; margin-bottom: 1.5rem; }
 
   .search-icon {
     position: absolute; left: 1.25rem; top: 50%; transform: translateY(-50%);
@@ -99,7 +96,7 @@
   }
 
   .search-input {
-    width: 100%; padding: 1rem 1.25rem 1rem 3.25rem;
+    width: 100%; padding: 1rem 3.5rem 1rem 3.25rem;
     background: var(--surface); border: 1.5px solid var(--border); border-radius: 16px;
     color: var(--text); font-family: var(--font); font-size: 1rem; outline: none;
     transition: border-color 0.2s, box-shadow 0.2s;
@@ -112,7 +109,37 @@
     box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 30px rgba(0,0,0,0.1);
   }
 
-  .filters { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .settings-btn {
+    position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%);
+    width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-muted); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+
+  .settings-btn:hover { color: var(--text); border-color: var(--accent); background: var(--accent-glow); }
+  .settings-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
+
+  .advanced-panel {
+    display: none; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem;
+    animation: slideDown 0.15s ease-out;
+  }
+
+  .advanced-panel.open { display: block; }
+
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .advanced-title {
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.75rem;
+  }
+
+  .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .filters + .filters { margin-top: 0.75rem; }
 
   .filter-group { display: flex; flex-direction: column; gap: 0.25rem; }
 
@@ -122,7 +149,7 @@
   }
 
   .filter-input {
-    padding: 0.5rem 0.75rem; background: var(--surface); border: 1px solid var(--border);
+    padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border);
     border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem;
     outline: none; width: 120px; transition: border-color 0.2s;
   }
@@ -189,6 +216,7 @@
     .filters { gap: 0.4rem; }
     .filter-input { width: 100% !important; }
     .filter-group { flex: 1; min-width: calc(50% - 0.25rem); }
+    .logo-tagline { display: none; }
   }
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -200,8 +228,8 @@
 <div class="container">
   <div class="header">
     <div class="logo">
-      <div class="logo-mark">r</div>
       <span class="logo-text">ruzz</span>
+      <span class="logo-tagline">damn, that's fast..</span>
     </div>
     <div class="status-pill">
       <span class="status-dot"></span>
@@ -219,11 +247,17 @@
   <div class="search-wrap">
     <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
     <input class="search-input" id="search" type="text" placeholder="Search..." autofocus>
+    <button class="settings-btn" id="settings-btn" title="Search settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
   </div>
 
-  <!-- Dynamically generated from schema -->
-  <div class="filters" id="filters-row"></div>
-  <div class="filters" id="sort-row"></div>
+  <div class="advanced-panel" id="advanced-panel">
+    <div class="advanced-title">Filters</div>
+    <div class="filters" id="filters-row"></div>
+    <div class="advanced-title" style="margin-top:1rem">Rerank by</div>
+    <div class="filters" id="sort-row"></div>
+  </div>
 
   <div class="query-meta" id="query-meta" style="display:none">
     <span><span id="result-count">0</span> results</span>
@@ -243,7 +277,14 @@ const API = '';
 let schema = [];
 let fuzzyField = null;
 
-// ── Bootstrap: load schema, build UI ──
+// Settings toggle
+document.getElementById('settings-btn').addEventListener('click', () => {
+  const panel = document.getElementById('advanced-panel');
+  const btn = document.getElementById('settings-btn');
+  panel.classList.toggle('open');
+  btn.classList.toggle('active');
+});
+
 async function init() {
   try {
     const res = await fetch(`${API}/stats`);
@@ -268,127 +309,71 @@ function updateStats(d) {
   document.getElementById('stat-uptime').textContent = d.uptime_human;
 }
 
-// Refresh stats periodically
 setInterval(async () => {
-  try {
-    const res = await fetch(`${API}/stats`);
-    updateStats(await res.json());
-    document.getElementById('status-text').textContent = 'online';
-  } catch {
-    document.getElementById('status-text').textContent = 'offline';
-  }
+  try { const r = await fetch(`${API}/stats`); updateStats(await r.json()); document.getElementById('status-text').textContent = 'online'; }
+  catch { document.getElementById('status-text').textContent = 'offline'; }
 }, 5000);
 
-// ── Build filter inputs from schema ──
 function buildFilters() {
   const row = document.getElementById('filters-row');
   row.innerHTML = '';
-
   for (const field of schema) {
-    // Skip the fuzzy search field (that's the main search box)
     if (field.search === 'fuzzy') continue;
-
     if (field.type === 'keyword') {
-      // Exact match filter
       const group = el('div', 'filter-group');
       group.appendChild(label(field.name));
       const input = el('input', 'filter-input');
-      input.type = 'text';
-      input.placeholder = field.name;
-      input.dataset.field = field.name;
-      input.dataset.kind = 'exact';
+      input.type = 'text'; input.placeholder = field.name; input.dataset.field = field.name; input.dataset.kind = 'exact';
       input.addEventListener('input', scheduleSearch);
-      group.appendChild(input);
-      row.appendChild(group);
+      group.appendChild(input); row.appendChild(group);
     } else if (field.type === 'number') {
-      // Range filters (min + max)
-      const gMin = el('div', 'filter-group');
-      gMin.appendChild(label(field.name + ' min'));
-      const inputMin = el('input', 'filter-input narrow');
-      inputMin.type = 'number';
-      inputMin.placeholder = 'min';
-      inputMin.dataset.field = field.name + '_min';
-      inputMin.dataset.kind = 'range';
-      inputMin.addEventListener('input', scheduleSearch);
-      gMin.appendChild(inputMin);
-      row.appendChild(gMin);
-
-      const gMax = el('div', 'filter-group');
-      gMax.appendChild(label(field.name + ' max'));
-      const inputMax = el('input', 'filter-input narrow');
-      inputMax.type = 'number';
-      inputMax.placeholder = 'max';
-      inputMax.dataset.field = field.name + '_max';
-      inputMax.dataset.kind = 'range';
-      inputMax.addEventListener('input', scheduleSearch);
-      gMax.appendChild(inputMax);
-      row.appendChild(gMax);
+      for (const suffix of ['min', 'max']) {
+        const g = el('div', 'filter-group');
+        g.appendChild(label(field.name + ' ' + suffix));
+        const inp = el('input', 'filter-input narrow');
+        inp.type = 'number'; inp.placeholder = suffix; inp.dataset.field = field.name + '_' + suffix; inp.dataset.kind = 'range';
+        inp.addEventListener('input', scheduleSearch);
+        g.appendChild(inp); row.appendChild(g);
+      }
     }
   }
 }
 
-// ── Build sort controls from schema ──
 function buildSort() {
   const row = document.getElementById('sort-row');
   row.innerHTML = '';
 
-  // Sort field selector
   const gField = el('div', 'filter-group');
-  gField.appendChild(label('Sort by'));
+  gField.appendChild(label('Field'));
   const select = document.createElement('select');
-  select.className = 'filter-input wide';
-  select.id = 'sort-by';
-
+  select.className = 'filter-input wide'; select.id = 'sort-by';
   const defaultOpt = document.createElement('option');
-  defaultOpt.value = '';
-  defaultOpt.textContent = 'Relevance';
+  defaultOpt.value = ''; defaultOpt.textContent = 'Relevance';
   select.appendChild(defaultOpt);
-
   for (const field of schema) {
-    if (field.search === 'fuzzy') continue; // don't sort by fuzzy field
+    if (field.search === 'fuzzy') continue;
     const opt = document.createElement('option');
-    opt.value = field.name;
-    opt.textContent = field.name.replace(/_/g, ' ');
+    opt.value = field.name; opt.textContent = field.name.replace(/_/g, ' ');
     select.appendChild(opt);
   }
-
   select.addEventListener('change', scheduleSearch);
-  gField.appendChild(select);
-  row.appendChild(gField);
+  gField.appendChild(select); row.appendChild(gField);
 
-  // Sort order
   const gOrder = el('div', 'filter-group');
   gOrder.appendChild(label('Order'));
   const orderSel = document.createElement('select');
-  orderSel.className = 'filter-input narrow';
-  orderSel.id = 'sort-order';
+  orderSel.className = 'filter-input narrow'; orderSel.id = 'sort-order';
   orderSel.innerHTML = '<option value="desc">↓ Desc</option><option value="asc">↑ Asc</option>';
   orderSel.addEventListener('change', scheduleSearch);
-  gOrder.appendChild(orderSel);
-  row.appendChild(gOrder);
+  gOrder.appendChild(orderSel); row.appendChild(gOrder);
 }
 
-// ── Helpers ──
-function el(tag, cls) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  return e;
-}
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+function label(text) { const s = el('span', 'filter-label'); s.textContent = text.replace(/_/g, ' '); return s; }
 
-function label(text) {
-  const s = el('span', 'filter-label');
-  s.textContent = text.replace(/_/g, ' ');
-  return s;
-}
-
-// ── Search ──
 let debounceTimer = null;
 document.getElementById('search').addEventListener('input', scheduleSearch);
-
-function scheduleSearch() {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(doSearch, 30);
-}
+function scheduleSearch() { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); }
 
 async function doSearch() {
   const q = document.getElementById('search').value.trim();
@@ -396,27 +381,17 @@ async function doSearch() {
   if (q) params.set('q', q);
   params.set('limit', '30');
 
-  // Collect filter values
   let hasAnyFilter = false;
   document.querySelectorAll('#filters-row .filter-input').forEach(input => {
     const val = input.value.trim();
     if (!val) return;
     hasAnyFilter = true;
-    const field = input.dataset.field;
-    if (input.dataset.kind === 'exact') {
-      params.set(field, val.toUpperCase());
-    } else {
-      params.set(field, val);
-    }
+    params.set(input.dataset.field, input.dataset.kind === 'exact' ? val.toUpperCase() : val);
   });
 
-  // Sort
   const sortBy = document.getElementById('sort-by')?.value;
   const sortOrder = document.getElementById('sort-order')?.value;
-  if (sortBy) {
-    params.set('sort_by', sortBy);
-    params.set('sort_order', sortOrder || 'desc');
-  }
+  if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder || 'desc'); }
 
   if (!q && !hasAnyFilter) {
     document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search</div></div>';
@@ -427,46 +402,29 @@ async function doSearch() {
   try {
     const res = await fetch(`${API}/search?${params}`);
     const data = await res.json();
-
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
 
-    const el = document.getElementById('results');
+    const container = document.getElementById('results');
     if (!data.results || data.results.length === 0) {
-      el.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
+      container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
       return;
     }
 
-    el.innerHTML = data.results.map(r => {
-      // Find the display name (the fuzzy field, or first text field)
-      const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
+    const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
+    container.innerHTML = data.results.map(r => {
       const name = r[nameField] || '';
       const score = r._score?.toFixed(1) || '—';
+      const metaHtml = schema.filter(f => f.name !== nameField).map(f => {
+        const val = r[f.name];
+        if (!val || val === 'false') return '';
+        if (val === 'true') return `<span style="color:var(--amber)">⚠ ${esc(f.name.replace(/_/g, ' '))}</span>`;
+        if (f.type === 'keyword') return `<span><span class="tag">${esc(val)}</span> <span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span></span>`;
+        return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${esc(val)}</span>`;
+      }).filter(Boolean).join('');
 
-      // Build meta tags for all other fields
-      const metaHtml = schema
-        .filter(f => f.name !== nameField)
-        .map(f => {
-          const val = r[f.name];
-          if (!val || val === 'false') return '';
-          if (val === 'true') return `<span style="color:var(--amber)">⚠ ${esc(f.name.replace(/_/g, ' '))}</span>`;
-          if (f.type === 'keyword') {
-            return `<span><span class="tag">${esc(val)}</span> <span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span></span>`;
-          }
-          return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${esc(val)}</span>`;
-        })
-        .filter(Boolean)
-        .join('');
-
-      return `
-        <div class="result-card">
-          <div class="result-header">
-            <span class="result-name">${esc(name)}</span>
-            <span class="result-score">${score}</span>
-          </div>
-          <div class="result-meta">${metaHtml}</div>
-        </div>`;
+      return `<div class="result-card"><div class="result-header"><span class="result-name">${esc(name)}</span><span class="result-score">${score}</span></div><div class="result-meta">${metaHtml}</div></div>`;
     }).join('');
   } catch {
     document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>';
@@ -475,7 +433,6 @@ async function doSearch() {
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
-// ── Init ──
 init();
 </script>
 </body>
