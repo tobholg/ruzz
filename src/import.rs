@@ -105,6 +105,17 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     writer.commit()?;
     commit_pb.finish_with_message("Index committed.");
 
+    // Merge segments for faster queries — use the same writer
+    let merge_pb = multi.add(ProgressBar::new_spinner());
+    merge_pb.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
+    merge_pb.set_message("Merging segments (this improves query speed)...");
+    let segment_ids = index.searchable_segment_ids()?;
+    if segment_ids.len() > 1 {
+        let _ = writer.merge(&segment_ids);
+        writer.wait_merging_threads()?;
+    }
+    merge_pb.finish_with_message("Segments merged.");
+
     stats.total_duration_secs = start.elapsed().as_secs_f64();
 
     println!(
@@ -191,7 +202,7 @@ fn register_trigram_tokenizer(index: &tantivy::Index) {
 pub fn register_trigram_tokenizer_pub(index: &tantivy::Index) {
     use tantivy::tokenizer::*;
 
-    let tokenizer = TextAnalyzer::builder(NgramTokenizer::new(2, 4, false).unwrap())
+    let tokenizer = TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).unwrap())
         .filter(LowerCaser)
         .build();
 

@@ -74,11 +74,33 @@ impl SearchEngine {
 
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
+        // Exact filters FIRST as MUST clauses — narrows candidate set before fuzzy
+        for (key, value) in filters {
+            if let Some(&field) = self.field_map.get(key) {
+                // Support comma-separated values: country_code=NO,SE,DK
+                let values: Vec<&str> = value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                if values.len() == 1 {
+                    let term = Term::from_field_text(field, values[0]);
+                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+                    subqueries.push((Occur::Must, Box::new(term_query)));
+                } else if values.len() > 1 {
+                    // OR across multiple values
+                    let or_clauses: Vec<(Occur, Box<dyn Query>)> = values.iter()
+                        .map(|v| {
+                            let term = Term::from_field_text(field, v);
+                            let tq: Box<dyn Query> = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                            (Occur::Should, tq)
+                        })
+                        .collect();
+                    subqueries.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
+                }
+            }
+        }
+
+        // Fuzzy search with trigrams only (faster than 2-4 gram range)
         if !query_text.is_empty() && !fuzzy_fields.is_empty() {
-            // Generate ngrams from the query ourselves and search as individual SHOULD terms
-            // This gives us whole-string similarity scoring via BM25 over shared ngrams
             let normalized = query_text.to_lowercase();
-            let ngrams = generate_ngrams(&normalized, 2, 4);
+            let ngrams = generate_ngrams(&normalized, 3, 3);
             
             let mut ngram_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for field in &fuzzy_fields {
@@ -92,15 +114,6 @@ impl SearchEngine {
             if !ngram_queries.is_empty() {
                 let ngram_bool = BooleanQuery::new(ngram_queries);
                 subqueries.push((Occur::Must, Box::new(ngram_bool)));
-            }
-        }
-
-        // Exact filters on keyword fields
-        for (key, value) in filters {
-            if let Some(&field) = self.field_map.get(key) {
-                let term = Term::from_field_text(field, value);
-                let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                subqueries.push((Occur::Must, Box::new(term_query)));
             }
         }
 
