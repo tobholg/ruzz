@@ -1,0 +1,28 @@
+[server]
+port = 8888
+index_path = "./data/index"
+
+[schema]
+fields = [
+    { name = "name", type = "text", search = "fuzzy" },
+    { name = "country_code", type = "keyword" },
+    { name = "org_number", type = "keyword" },
+    { name = "org_form", type = "keyword" },
+    { name = "nace", type = "keyword" },
+    { name = "nace_desc", type = "text" },
+    { name = "employees", type = "keyword" },
+    { name = "founded", type = "keyword" },
+    { name = "registered", type = "keyword" },
+    { name = "address", type = "text" },
+    { name = "postal_code", type = "keyword" },
+    { name = "city", type = "keyword" },
+    { name = "municipality", type = "keyword" },
+    { name = "sector_code", type = "keyword" },
+    { name = "bankrupt", type = "keyword" },
+    { name = "dissolving", type = "keyword" },
+]
+
+[[sources]]
+path = "data/enheter_no.csv"
+defaults = { country_code = "NO" }
+mapping = { name = "organisasjonsnavn", org_number = "organisasjonsnummer", org_form = "organisasjonsform", nace = "naeringskode1", nace_desc = "naeringsbeskrivelse", employees = "antall_ansatte", founded = "stiftelsesdato", registered = "registreringsdato", address = "forretningsadresse", postal_code = "postnummer", city = "poststed", municipality = "kommune", sector_code = "institusjonell_sektorkode", bankrupt = "konkurs", dissolving = "under_avvikling" }

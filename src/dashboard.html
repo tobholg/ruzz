@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fuzz — search engine</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-2: #1a1a24;
+    --border: rgba(255,255,255,0.08);
+    --border-focus: rgba(99,102,241,0.5);
+    --text: #f4f4f5;
+    --text-muted: #71717a;
+    --text-dim: #52525b;
+    --accent: #6366f1;
+    --accent-glow: rgba(99,102,241,0.15);
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f8f9fa;
+      --surface: #ffffff;
+      --surface-2: #f1f5f9;
+      --border: rgba(15,23,42,0.08);
+      --border-focus: rgba(99,102,241,0.4);
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-dim: #94a3b8;
+      --accent: #6366f1;
+      --accent-glow: rgba(99,102,241,0.1);
+      --emerald: #059669;
+      --amber: #d97706;
+    }
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .logo-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), #818cf8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 14px;
+    color: white;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .logo-text {
+    font-family: var(--mono);
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text);
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 100px;
+    background: rgba(16,185,129,0.1);
+    border: 1px solid rgba(16,185,129,0.2);
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--emerald);
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--emerald);
+    box-shadow: 0 0 8px var(--emerald);
+  }
+
+  .stats-bar {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .stat-card {
+    flex: 1;
+    min-width: 120px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+  }
+
+  .stat-label {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 0.4rem;
+  }
+
+  .stat-value {
+    font-family: var(--mono);
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .search-wrap {
+    position: relative;
+    margin-bottom: 1rem;
+  }
+
+  .search-icon {
+    position: absolute;
+    left: 1.25rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+
+  .search-input {
+    width: 100%;
+    padding: 1rem 1.25rem 1rem 3.25rem;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 16px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .search-input::placeholder { color: var(--text-dim); }
+
+  .search-input:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 30px rgba(0,0,0,0.1);
+  }
+
+  .filters {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .filter-label {
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    padding-left: 0.25rem;
+  }
+
+  .filter-input {
+    padding: 0.5rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    outline: none;
+    width: 120px;
+    transition: border-color 0.2s;
+  }
+
+  .filter-input.narrow { width: 90px; }
+  .filter-input.wide { width: 150px; }
+
+  .filter-input::placeholder { color: var(--text-dim); }
+  .filter-input:focus { border-color: var(--border-focus); }
+
+  select.filter-input {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    padding-right: 2rem;
+    cursor: pointer;
+  }
+
+  .query-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .query-time {
+    font-family: var(--mono);
+    color: var(--emerald);
+    font-weight: 500;
+  }
+
+  .results {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+    transition: border-color 0.15s, background 0.15s;
+    cursor: default;
+  }
+
+  .result-card:hover {
+    border-color: rgba(99,102,241,0.2);
+    background: var(--surface-2);
+  }
+
+  .result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .result-name {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .result-score {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    background: var(--accent-glow);
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+  }
+
+  .result-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  .result-meta span {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .meta-label {
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .tag {
+    display: inline-flex;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+
+  .tag-org { background: rgba(99,102,241,0.12); color: #818cf8; }
+  .tag-nace { background: rgba(16,185,129,0.12); color: #34d399; }
+  .tag-form { background: rgba(245,158,11,0.12); color: #fbbf24; }
+
+  @media (prefers-color-scheme: light) {
+    .tag-org { background: rgba(99,102,241,0.08); color: #4f46e5; }
+    .tag-nace { background: rgba(16,185,129,0.08); color: #059669; }
+    .tag-form { background: rgba(245,158,11,0.08); color: #b45309; }
+  }
+
+  .empty {
+    text-align: center;
+    padding: 4rem 1rem;
+    color: var(--text-dim);
+  }
+
+  .empty-icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.3; }
+  .empty-text { font-size: 0.9rem; }
+
+  @media (max-width: 640px) {
+    .container { padding: 1.25rem 1rem; }
+    .stats-bar { gap: 0.5rem; }
+    .stat-card { padding: 0.75rem 1rem; min-width: 0; }
+    .stat-value { font-size: 0.95rem; }
+    .filters { gap: 0.4rem; }
+    .filter-input { width: 100% !important; }
+    .filter-group { flex: 1; min-width: calc(50% - 0.25rem); }
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="logo">
+      <div class="logo-mark">f</div>
+      <span class="logo-text">fuzz</span>
+    </div>
+    <div class="status-pill" id="status">
+      <span class="status-dot"></span>
+      <span id="status-text">connecting...</span>
+    </div>
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-card">
+      <div class="stat-label">Documents</div>
+      <div class="stat-value" id="stat-docs">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Index Size</div>
+      <div class="stat-value" id="stat-index">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Memory</div>
+      <div class="stat-value" id="stat-mem">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Uptime</div>
+      <div class="stat-value" id="stat-uptime">—</div>
+    </div>
+  </div>
+
+  <div class="search-wrap">
+    <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+    <input class="search-input" id="search" type="text" placeholder="Search companies..." autofocus>
+  </div>
+
+  <div class="filters">
+    <div class="filter-group">
+      <span class="filter-label">Country</span>
+      <input class="filter-input narrow" id="f-country" type="text" placeholder="NO">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">City</span>
+      <input class="filter-input" id="f-city" type="text" placeholder="OSLO">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">NACE</span>
+      <input class="filter-input narrow" id="f-nace" type="text" placeholder="62.010">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Org Form</span>
+      <input class="filter-input narrow" id="f-orgform" type="text" placeholder="AS">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Min Employees</span>
+      <input class="filter-input narrow" id="f-emp-min" type="number" placeholder="0">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Max Employees</span>
+      <input class="filter-input narrow" id="f-emp-max" type="number" placeholder="∞">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Sector</span>
+      <input class="filter-input narrow" id="f-sector" type="text" placeholder="2100">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Municipality</span>
+      <input class="filter-input wide" id="f-municipality" type="text" placeholder="STAVANGER">
+    </div>
+  </div>
+
+  <div class="filters" style="margin-bottom:1.5rem">
+    <div class="filter-group">
+      <span class="filter-label">Sort by</span>
+      <select class="filter-input wide" id="f-sort-by">
+        <option value="">Relevance</option>
+        <option value="employees">Employees</option>
+        <option value="founded">Founded</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Order</span>
+      <select class="filter-input narrow" id="f-sort-order">
+        <option value="desc">↓ Desc</option>
+        <option value="asc">↑ Asc</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="query-meta" id="query-meta" style="display:none">
+    <span><span id="result-count">0</span> results</span>
+    <span class="query-time" id="query-time">0ms</span>
+  </div>
+
+  <div class="results" id="results">
+    <div class="empty">
+      <div class="empty-icon">⚡</div>
+      <div class="empty-text">Start typing to search 1M+ companies</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function loadStats() {
+  try {
+    const res = await fetch(`${API}/stats`);
+    const d = await res.json();
+    document.getElementById('stat-docs').textContent = Number(d.documents).toLocaleString();
+    document.getElementById('stat-index').textContent = d.index.size_human;
+    document.getElementById('stat-mem').textContent = d.memory.rss_human;
+    document.getElementById('stat-uptime').textContent = d.uptime_human;
+    document.getElementById('status-text').textContent = 'online';
+  } catch {
+    document.getElementById('status-text').textContent = 'offline';
+  }
+}
+loadStats();
+setInterval(loadStats, 5000);
+
+let debounceTimer = null;
+const allInputs = document.querySelectorAll('.search-input, .filter-input, select');
+allInputs.forEach(el => {
+  el.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); });
+  el.addEventListener('change', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); });
+});
+
+async function doSearch() {
+  const q = document.getElementById('search').value.trim();
+  const country = document.getElementById('f-country').value.trim();
+  const city = document.getElementById('f-city').value.trim();
+  const nace = document.getElementById('f-nace').value.trim();
+  const orgform = document.getElementById('f-orgform').value.trim();
+  const empMin = document.getElementById('f-emp-min').value.trim();
+  const empMax = document.getElementById('f-emp-max').value.trim();
+  const sector = document.getElementById('f-sector').value.trim();
+  const municipality = document.getElementById('f-municipality').value.trim();
+  const sortBy = document.getElementById('f-sort-by').value;
+  const sortOrder = document.getElementById('f-sort-order').value;
+
+  const hasAny = q || country || city || nace || orgform || empMin || empMax || sector || municipality;
+  if (!hasAny) {
+    document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search</div></div>';
+    document.getElementById('query-meta').style.display = 'none';
+    return;
+  }
+
+  const p = new URLSearchParams();
+  if (q) p.set('q', q);
+  p.set('limit', '30');
+  if (country) p.set('country_code', country.toUpperCase());
+  if (city) p.set('city', city.toUpperCase());
+  if (nace) p.set('nace', nace);
+  if (orgform) p.set('org_form', orgform.toUpperCase());
+  if (sector) p.set('sector_code', sector);
+  if (municipality) p.set('municipality', municipality.toUpperCase());
+  if (empMin) p.set('employees_min', empMin);
+  if (empMax) p.set('employees_max', empMax);
+  if (sortBy) { p.set('sort_by', sortBy); p.set('sort_order', sortOrder); }
+
+  try {
+    const res = await fetch(`${API}/search?${p}`);
+    const data = await res.json();
+
+    document.getElementById('query-meta').style.display = 'flex';
+    document.getElementById('result-count').textContent = data.total;
+    document.getElementById('query-time').textContent = data.took_ms + 'ms';
+
+    const el = document.getElementById('results');
+    if (!data.results || data.results.length === 0) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
+      return;
+    }
+
+    el.innerHTML = data.results.map(r => `
+      <div class="result-card">
+        <div class="result-header">
+          <span class="result-name">${esc(r.name || '')}</span>
+          <span class="result-score">${r._score?.toFixed(1) || '—'}</span>
+        </div>
+        <div class="result-meta">
+          ${r.org_number ? `<span><span class="tag tag-org">${esc(r.org_number)}</span></span>` : ''}
+          ${r.org_form ? `<span><span class="tag tag-form">${esc(r.org_form)}</span></span>` : ''}
+          ${r.nace ? `<span><span class="tag tag-nace">${esc(r.nace)}</span></span>` : ''}
+          ${r.city ? `<span>${esc(r.city)}</span>` : ''}
+          ${r.municipality && r.municipality !== r.city ? `<span><span class="meta-label">mun.</span> ${esc(r.municipality)}</span>` : ''}
+          ${r.employees ? `<span><span class="meta-label">emp</span> ${Number(r.employees).toLocaleString()}</span>` : ''}
+          ${r.founded ? `<span><span class="meta-label">est.</span> ${r.founded.slice(0,4)}</span>` : ''}
+          ${r.sector_code ? `<span><span class="meta-label">sec</span> ${esc(r.sector_code)}</span>` : ''}
+          ${r.bankrupt === 'true' ? '<span style="color:#ef4444">⚠ bankrupt</span>' : ''}
+          ${r.dissolving === 'true' ? '<span style="color:#f59e0b">⚠ dissolving</span>' : ''}
+          ${r.nace_desc ? `<span style="color:var(--text-dim);font-size:0.72rem">${esc(r.nace_desc)}</span>` : ''}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>';
+  }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+</script>
+</body>
+</html>
