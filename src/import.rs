@@ -171,13 +171,16 @@ fn import_csv(
                 .or_else(|| defaults.get(&fc.name).cloned())
                 .unwrap_or_default();
 
-            if value.is_empty() {
-                continue;
-            }
-
             match fc.field_type {
                 FieldType::Text | FieldType::Keyword => {
-                    doc.add_text(field, &value);
+                    if !value.is_empty() {
+                        doc.add_text(field, &value);
+                    }
+                }
+                FieldType::Number => {
+                    // Parse to f64, store 0.0 for empty/invalid
+                    let num = value.parse::<f64>().unwrap_or(0.0);
+                    doc.add_f64(field, num);
                 }
             }
         }

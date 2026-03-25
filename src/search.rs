@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
-use tantivy::{Index, IndexReader, ReloadPolicy, Term};
+use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, Term};
 
 use crate::config::{Config, FieldType, SearchMode};
 
@@ -74,17 +74,15 @@ impl SearchEngine {
 
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-        // Exact filters FIRST as MUST clauses — narrows candidate set before fuzzy
+        // Exact filters FIRST as MUST clauses
         for (key, value) in filters {
             if let Some(&field) = self.field_map.get(key) {
-                // Support comma-separated values: country_code=NO,SE,DK
                 let values: Vec<&str> = value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 if values.len() == 1 {
                     let term = Term::from_field_text(field, values[0]);
                     let term_query = TermQuery::new(term, IndexRecordOption::Basic);
                     subqueries.push((Occur::Must, Box::new(term_query)));
                 } else if values.len() > 1 {
-                    // OR across multiple values
                     let or_clauses: Vec<(Occur, Box<dyn Query>)> = values.iter()
                         .map(|v| {
                             let term = Term::from_field_text(field, v);
@@ -97,11 +95,25 @@ impl SearchEngine {
             }
         }
 
-        // Fuzzy search with trigrams only (faster than 2-4 gram range)
+        // Native range filters on numeric fields
+        for rf in range_filters {
+            if let Some(&field) = self.field_map.get(&rf.field) {
+                let min = rf.min.unwrap_or(f64::MIN);
+                let max = rf.max.unwrap_or(f64::MAX);
+                let range_query = RangeQuery::new_f64_bounds(
+                    rf.field.clone(),
+                    std::ops::Bound::Included(min),
+                    std::ops::Bound::Included(max),
+                );
+                subqueries.push((Occur::Must, Box::new(range_query)));
+            }
+        }
+
+        // Fuzzy search with trigrams
         if !query_text.is_empty() && !fuzzy_fields.is_empty() {
             let normalized = query_text.to_lowercase();
             let ngrams = generate_ngrams(&normalized, 3, 3);
-            
+
             let mut ngram_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for field in &fuzzy_fields {
                 for ng in &ngrams {
@@ -110,97 +122,108 @@ impl SearchEngine {
                     ngram_queries.push((Occur::Should, Box::new(tq)));
                 }
             }
-            
+
             if !ngram_queries.is_empty() {
                 let ngram_bool = BooleanQuery::new(ngram_queries);
                 subqueries.push((Occur::Must, Box::new(ngram_bool)));
             }
         }
 
-        if subqueries.is_empty() {
-            let took = start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(SearchResult { took_ms: (took * 100.0).round() / 100.0, total: 0, results: vec![] });
-        }
+        // If no subqueries at all (browse mode), use AllQuery
+        let query: Box<dyn Query> = if subqueries.is_empty() {
+            Box::new(AllQuery)
+        } else {
+            Box::new(BooleanQuery::new(subqueries))
+        };
 
-        let query = BooleanQuery::new(subqueries);
+        // Determine sort field for numeric fast-field sorting
+        let sort_field_name = match sort {
+            SortOrder::FieldAsc(f) | SortOrder::FieldDesc(f) => Some(f.as_str()),
+            SortOrder::Relevance => None,
+        };
 
-        // Over-fetch when we need post-filtering or re-ranking
-        let has_range = !range_filters.is_empty();
-        let has_sort = !matches!(sort, SortOrder::Relevance);
-        let fetch_limit = if has_range || has_sort { (limit * 10).max(200) } else { limit };
+        // Check if the sort field is a numeric field
+        let is_numeric_sort = sort_field_name.map(|name| {
+            self.config.schema.fields.iter().any(|fc| fc.name == name && fc.field_type == FieldType::Number)
+        }).unwrap_or(false);
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(fetch_limit))?;
+        // Execute query with appropriate collector
+        let docs: Vec<(f64, DocAddress)> = if is_numeric_sort {
+            let field_name = sort_field_name.unwrap();
+            let order = match sort {
+                SortOrder::FieldAsc(_) => Order::Asc,
+                _ => Order::Desc,
+            };
+            let collector = TopDocs::with_limit(limit).order_by_fast_field::<f64>(field_name, order);
+            searcher.search(&*query, &collector)?
+                .into_iter()
+                .map(|(val, addr)| (val, addr))
+                .collect()
+        } else {
+            let collector = TopDocs::with_limit(limit);
+            searcher.search(&*query, &collector)?
+                .into_iter()
+                .map(|(score, addr)| (score as f64, addr))
+                .collect()
+        };
 
-        let mut results: Vec<serde_json::Value> = Vec::with_capacity(top_docs.len());
+        // Build results
+        let mut results: Vec<serde_json::Value> = Vec::with_capacity(docs.len());
 
-        for (score, doc_address) in &top_docs {
+        for (score_or_val, doc_address) in &docs {
             let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
             let mut obj = serde_json::Map::new();
 
             for fc in &self.config.schema.fields {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
                     if let Some(value) = doc.get_first(field) {
-                        if let Some(text) = value.as_str() {
-                            obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        match fc.field_type {
+                            FieldType::Text | FieldType::Keyword => {
+                                if let Some(text) = value.as_str() {
+                                    obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                                }
+                            }
+                            FieldType::Number => {
+                                if let Some(num) = value.as_f64() {
+                                    if num != 0.0 {
+                                        obj.insert(fc.name.clone(), serde_json::json!(num));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            obj.insert("_score".to_string(), serde_json::json!(score));
+            obj.insert("_score".to_string(), serde_json::json!(score_or_val));
             results.push(serde_json::Value::Object(obj));
         }
 
-        // Apply range filters
-        if has_range {
-            results.retain(|r| {
-                for rf in range_filters {
-                    let val = r.get(&rf.field)
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<f64>().ok());
-
-                    match val {
-                        Some(v) => {
-                            if let Some(min) = rf.min {
-                                if v < min { return false; }
-                            }
-                            if let Some(max) = rf.max {
-                                if v > max { return false; }
-                            }
-                        }
-                        None => {
-                            // If field is empty/missing and we have a min filter, exclude it
-                            if rf.min.is_some() { return false; }
-                        }
+        // For non-numeric sort on text fields, do post-sort
+        if !is_numeric_sort {
+            if let Some(field_name) = sort_field_name {
+                let fname = field_name.to_string();
+                match sort {
+                    SortOrder::FieldAsc(_) => {
+                        results.sort_by(|a, b| {
+                            let va = a.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
+                            let vb = b.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
+                            va.cmp(vb)
+                        });
                     }
+                    SortOrder::FieldDesc(_) => {
+                        results.sort_by(|a, b| {
+                            let va = a.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
+                            let vb = b.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
+                            vb.cmp(va)
+                        });
+                    }
+                    _ => {}
                 }
-                true
-            });
-        }
-
-        // Apply sort
-        match sort {
-            SortOrder::Relevance => {} // already sorted by score
-            SortOrder::FieldAsc(field_name) => {
-                results.sort_by(|a, b| {
-                    let va = a.get(field_name).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::MIN);
-                    let vb = b.get(field_name).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::MIN);
-                    va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::FieldDesc(field_name) => {
-                results.sort_by(|a, b| {
-                    let va = a.get(field_name).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::MIN);
-                    let vb = b.get(field_name).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(f64::MIN);
-                    vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
-                });
             }
         }
 
-        // Trim to requested limit
-        results.truncate(limit);
         let total = results.len();
-
         let took = start.elapsed().as_secs_f64() * 1000.0;
 
         Ok(SearchResult {
@@ -237,8 +260,19 @@ impl SearchEngine {
             for fc in &self.config.schema.fields {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
                     if let Some(value) = doc.get_first(field) {
-                        if let Some(text) = value.as_str() {
-                            obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        match fc.field_type {
+                            FieldType::Text | FieldType::Keyword => {
+                                if let Some(text) = value.as_str() {
+                                    obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                                }
+                            }
+                            FieldType::Number => {
+                                if let Some(num) = value.as_f64() {
+                                    if num != 0.0 {
+                                        obj.insert(fc.name.clone(), serde_json::json!(num));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -259,9 +293,7 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut ngrams = Vec::new();
     for n in min_n..=max_n {
-        if chars.len() < n {
-            continue;
-        }
+        if chars.len() < n { continue; }
         for i in 0..=(chars.len() - n) {
             let ng: String = chars[i..i + n].iter().collect();
             ngrams.push(ng);

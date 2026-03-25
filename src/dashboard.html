@@ -393,7 +393,7 @@ async function doSearch() {
   const sortOrder = document.getElementById('sort-order')?.value;
   if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder || 'desc'); }
 
-  if (!q && !hasAnyFilter) {
+  if (!q && !hasAnyFilter && !sortBy) {
     document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search</div></div>';
     document.getElementById('query-meta').style.display = 'none';
     return;
@@ -421,6 +421,11 @@ async function doSearch() {
         if (!val || val === 'false') return '';
         if (val === 'true') return `<span style="color:var(--amber)">⚠ ${esc(f.name.replace(/_/g, ' '))}</span>`;
         if (f.type === 'keyword') return `<span><span class="tag">${esc(val)}</span> <span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span></span>`;
+        if (f.type === 'number') {
+          const num = typeof val === 'number' ? val : parseFloat(val);
+          if (isNaN(num) || num === 0) return '';
+          return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${num.toLocaleString()}</span>`;
+        }
         return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${esc(val)}</span>`;
       }).filter(Boolean).join('');
 

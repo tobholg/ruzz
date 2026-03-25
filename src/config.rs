@@ -49,6 +49,7 @@ pub struct FieldConfig {
 pub enum FieldType {
     Text,
     Keyword,
+    Number,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]

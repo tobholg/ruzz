@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use tantivy::schema::*;
 
-use crate::config::{FieldConfig, FieldType, SchemaConfig, SearchMode};
+use crate::config::{FieldType, SchemaConfig, SearchMode};
 
 /// Build a Tantivy schema from config, return (Schema, field_name → Field map)
 pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
@@ -12,7 +12,6 @@ pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
         let field = match fc.field_type {
             FieldType::Text => {
                 if fc.search == Some(SearchMode::Fuzzy) {
-                    // Fuzzy text: index with trigram tokenizer + store for retrieval
                     let options = TextOptions::default()
                         .set_indexing_options(
                             TextFieldIndexing::default()
@@ -22,12 +21,10 @@ pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
                         .set_stored();
                     builder.add_text_field(&fc.name, options)
                 } else {
-                    // Regular text: default tokenizer + stored
                     builder.add_text_field(&fc.name, TEXT | STORED)
                 }
             }
             FieldType::Keyword => {
-                // Keyword: indexed as-is (no tokenization) + stored + fast field for filtering
                 builder.add_text_field(
                     &fc.name,
                     TextOptions::default()
@@ -39,6 +36,11 @@ pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
                         .set_stored()
                         .set_fast(None),
                 )
+            }
+            FieldType::Number => {
+                // Store as f64 for flexibility (revenue, ratios, etc.)
+                // FAST for columnar access (sort/range), STORED for retrieval
+                builder.add_f64_field(&fc.name, NumericOptions::default().set_fast().set_stored().set_indexed())
             }
         };
         field_map.insert(fc.name.clone(), field);
