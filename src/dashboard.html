@@ -12,12 +12,12 @@
     --surface: #12121a;
     --surface-2: #1a1a24;
     --border: rgba(255,255,255,0.08);
-    --border-focus: rgba(99,102,241,0.5);
+    --border-focus: rgba(14,165,233,0.5);
     --text: #f4f4f5;
     --text-muted: #71717a;
     --text-dim: #52525b;
-    --accent: #6366f1;
-    --accent-glow: rgba(99,102,241,0.15);
+    --accent: #0ea5e9;
+    --accent-glow: rgba(14,165,233,0.15);
     --emerald: #10b981;
     --amber: #f59e0b;
     --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -30,12 +30,12 @@
       --surface: #ffffff;
       --surface-2: #f1f5f9;
       --border: rgba(15,23,42,0.08);
-      --border-focus: rgba(99,102,241,0.4);
+      --border-focus: rgba(14,165,233,0.4);
       --text: #0f172a;
       --text-muted: #64748b;
       --text-dim: #94a3b8;
-      --accent: #6366f1;
-      --accent-glow: rgba(99,102,241,0.1);
+      --accent: #0284c7;
+      --accent-glow: rgba(2,132,199,0.1);
       --emerald: #059669;
       --amber: #d97706;
     }
@@ -61,8 +61,8 @@
   .logo-text { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; letter-spacing: 0.05em; }
 
   .logo-tagline {
-    font-size: 0.8rem; font-weight: 400; font-style: italic;
-    color: var(--text-dim); letter-spacing: 0.01em;
+    font-family: var(--mono); font-size: 1.2rem; font-weight: 400;
+    color: var(--text-dim); letter-spacing: 0.05em;
   }
 
   .status-pill {
@@ -180,7 +180,7 @@
     padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default;
   }
 
-  .result-card:hover { border-color: rgba(99,102,241,0.2); background: var(--surface-2); }
+  .result-card:hover { border-color: rgba(14,165,233,0.2); background: var(--surface-2); }
 
   .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
   .result-name { font-size: 1rem; font-weight: 600; }
@@ -197,11 +197,11 @@
   .tag {
     display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px;
     font-family: var(--mono); font-size: 0.7rem; font-weight: 500;
-    background: rgba(99,102,241,0.12); color: #818cf8;
+    background: rgba(14,165,233,0.12); color: #38bdf8;
   }
 
   @media (prefers-color-scheme: light) {
-    .tag { background: rgba(99,102,241,0.08); color: #4f46e5; }
+    .tag { background: rgba(14,165,233,0.08); color: #0369a1; }
   }
 
   .empty { text-align: center; padding: 4rem 1rem; color: var(--text-dim); }
