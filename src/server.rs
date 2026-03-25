@@ -150,6 +150,7 @@ async fn handle_stats(
             "rss_human": format_bytes(process_memory),
             "virtual_bytes": process_virtual,
             "virtual_human": format_bytes(process_virtual),
+            "budget": state.engine.config.server.memory_budget,
         },
         "system": {
             "total_memory_bytes": sys.total_memory(),

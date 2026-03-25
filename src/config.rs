@@ -16,6 +16,14 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     pub index_path: PathBuf,
+    /// Memory budget for index pages. Examples: "512MB", "2GB", "100%"
+    /// Default: "100%" (no limit, keep everything warm)
+    #[serde(default = "default_memory_budget")]
+    pub memory_budget: String,
+}
+
+fn default_memory_budget() -> String {
+    "100%".to_string()
 }
 
 fn default_port() -> u16 {

@@ -1,6 +1,7 @@
 mod config;
 mod dashboard;
 mod import;
+mod memory;
 mod schema;
 mod search;
 mod server;
@@ -56,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn serve(config: Arc<config::Config>) -> anyhow::Result<()> {
     let engine = search::SearchEngine::open(config.clone())?;
+
+    // Apply memory budget
+    memory::apply_memory_budget(&config.server.index_path, &config.server.memory_budget);
+
     let port = config.server.port;
 
     let state = Arc::new(server::AppState {

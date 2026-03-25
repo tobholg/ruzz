@@ -1,6 +1,7 @@
 [server]
 port = 8888
 index_path = "./data/index"
+memory_budget = "50MB"
 
 [schema]
 fields = [
