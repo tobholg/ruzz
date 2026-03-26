@@ -368,10 +368,19 @@ async function buildDocs() {
   // Build lookup example from sample keyword values
   const lookupParams = keywordFields.slice(0, 2).map(f => sv(f) ? `${f}=${encodeURIComponent(sv(f))}` : '').filter(Boolean).join('&');
 
-  // Example response from sample
-  const sampleResponse = sample
-    ? JSON.stringify({ took_ms: 3.5, total: 1, results: [sample] }, null, 2)
-    : '{ "took_ms": 0, "total": 0, "results": [] }';
+  // Example response — always show all schema fields
+  const fullSample = {};
+  for (const f of fields) {
+    if (sample && sample[f.name] !== undefined) {
+      fullSample[f.name] = sample[f.name];
+    } else if (f.type === 'number') {
+      fullSample[f.name] = null;
+    } else {
+      fullSample[f.name] = "";
+    }
+  }
+  fullSample['_score'] = sample?._score || 0;
+  const sampleResponse = JSON.stringify({ took_ms: 3.5, total: 1, results: [fullSample] }, null, 2);
 
   // Build examples using real field names and values
   const examples = [];
