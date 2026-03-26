@@ -337,19 +337,56 @@ async function doSearch() {
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ── Docs tab ──
-function buildDocs() {
+async function buildDocs() {
   if (!statsData || !schema.length) return;
   const baseUrl = window.location.origin;
   const fields = schema;
   const keywordFields = fields.filter(f => f.type === 'keyword').map(f => f.name);
   const numberFields = fields.filter(f => f.type === 'number').map(f => f.name);
   const fuzzyFields = fields.filter(f => f.search === 'fuzzy').map(f => f.name);
+  const fuzzyName = fuzzyFields[0] || 'name';
+  const firstKeyword = keywordFields[0] || '';
+  const firstNumber = numberFields[0] || '';
+
+  // Fetch a live sample to generate realistic examples
+  let sample = null;
+  let sampleQuery = '';
+  try {
+    // Try to get a result with data by sorting by the first number field
+    const sortParam = firstNumber ? `&sort_by=${firstNumber}&sort_order=desc` : '';
+    const res = await fetch(`${API}/search?limit=1${sortParam}`);
+    const data = await res.json();
+    if (data.results?.length) sample = data.results[0];
+  } catch {}
+
+  // Build example values from the sample
+  const sv = (field) => sample?.[field] || '';
+  const exFuzzy = sv(fuzzyName) ? sv(fuzzyName).split(/\s+/)[0].toLowerCase() : 'test';
+  const exKeyword = sv(firstKeyword) || 'VALUE';
+  const exKeyword2 = firstKeyword && keywordFields[1] ? sv(keywordFields[1]) : '';
+
+  // Build lookup example from sample keyword values
+  const lookupParams = keywordFields.slice(0, 2).map(f => sv(f) ? `${f}=${encodeURIComponent(sv(f))}` : '').filter(Boolean).join('&');
+
+  // Example response from sample
+  const sampleResponse = sample
+    ? JSON.stringify({ took_ms: 3.5, total: 1, results: [sample] }, null, 2)
+    : '{ "took_ms": 0, "total": 0, "results": [] }';
+
+  // Build examples using real field names and values
+  const examples = [];
+  if (fuzzyFields.length && firstKeyword) examples.push(`# Fuzzy search with filter\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)}&limit=10`);
+  if (keywordFields.length >= 2) examples.push(`# Multi-value filter\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)},${encodeURIComponent(exKeyword2 || 'OTHER')}&limit=20`);
+  if (firstNumber) examples.push(`# Sort by ${firstNumber} (browse mode)\nGET /search?sort_by=${firstNumber}&sort_order=desc&limit=20`);
+  if (firstNumber && firstKeyword) examples.push(`# Range filter + sort\nGET /search?q=${exFuzzy}&${firstNumber}_min=1000&sort_by=${firstNumber}&sort_order=desc&limit=10`);
+  if (keywordFields.length && numberFields.length >= 2) examples.push(`# Combined filters\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)}&${numberFields[0]}_min=100&sort_by=${numberFields[1] || numberFields[0]}&sort_order=desc&limit=10`);
+
+  const examplesHtml = examples.map(e => esc(e)).join('\n\n');
+  const examplesMd = examples.join('\n\n');
 
   const fieldRows = fields.map(f =>
     `<tr><td><code>${f.name}</code></td><td>${f.type}</td><td>${f.search || '—'}</td></tr>`
   ).join('');
-
-  const md = generateMarkdownDocs(baseUrl, fields, keywordFields, numberFields, fuzzyFields);
 
   document.getElementById('docs-content').innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
@@ -367,7 +404,6 @@ function buildDocs() {
 
     <h3>GET /search</h3>
     <p>Fuzzy search with optional filters, range queries, and sorting.</p>
-    <pre>GET ${baseUrl}/search?q=volkswagen&amp;country_code=DE&amp;limit=10</pre>
 
     <p><strong>Query parameters:</strong></p>
     <table>
@@ -377,68 +413,31 @@ function buildDocs() {
         <tr><td><code>limit</code></td><td>Max results (default 20)</td></tr>
         <tr><td><code>sort_by</code></td><td>Field to sort by (any field name)</td></tr>
         <tr><td><code>sort_order</code></td><td><code>asc</code> or <code>desc</code> (default desc)</td></tr>
-        ${keywordFields.map(f => `<tr><td><code>${f}</code></td><td>Exact filter. Comma-separated for OR: <code>${f}=NO,SE,DK</code></td></tr>`).join('')}
+        ${keywordFields.map(f => `<tr><td><code>${f}</code></td><td>Exact filter. Comma-separated for OR: <code>${f}=A,B,C</code></td></tr>`).join('')}
         ${numberFields.map(f => `<tr><td><code>${f}_min</code> / <code>${f}_max</code></td><td>Range filter on ${f}</td></tr>`).join('')}
       </tbody>
     </table>
 
     <h3>Examples</h3>
-    <pre># Fuzzy search with country filter
-GET /search?q=equinor&amp;country_code=NO&amp;limit=10
-
-# Multi-country filter
-GET /search?q=bank&amp;country_code=NO,SE,DK&amp;limit=20
-
-# Sort by revenue (no search query = browse mode)
-GET /search?sort_by=revenue&amp;sort_order=desc&amp;limit=20
-
-# Range filter + sort
-GET /search?q=tech&amp;employees_min=100&amp;revenue_min=1000000&amp;sort_by=revenue&amp;sort_order=desc
-
-# Combined
-GET /search?q=energy&amp;country_code=DE,FR,UK&amp;employees_min=500&amp;sort_by=total_assets&amp;sort_order=desc&amp;limit=10</pre>
+    <pre>${examplesHtml}</pre>
 
     <h3>GET /lookup</h3>
     <p>Exact match lookup by keyword fields.</p>
-    <pre>GET ${baseUrl}/lookup?country_code=NO&amp;org_number=923609016</pre>
+    <pre>GET /lookup?${lookupParams || 'field=value'}</pre>
 
     <h3>GET /stats</h3>
     <p>Runtime stats: document count, index size, memory usage, uptime, schema.</p>
-    <pre>GET ${baseUrl}/stats</pre>
 
     <h3>GET /health</h3>
     <p>Health check. Returns <code>{"status": "ok"}</code>.</p>
 
-    <h2>Response format</h2>
-    <pre>{
-  "took_ms": 3.5,
-  "total": 10,
-  "results": [
-    {
-      "name": "EQUINOR ASA",
-      "country_code": "NO",
-      "org_number": "923609016",
-      "revenue": 62615000,
-      "employees": 21000,
-      "_score": 107.2
-    }
-  ]
-}</pre>
-    <p>Number fields return as JSON numbers. Keyword/text fields as strings. <code>_score</code> is the relevance score (higher = better match).</p>
+    <h2>Example response</h2>
+    <pre>${esc(sampleResponse)}</pre>
+    <p>Number fields return as JSON numbers. Keyword/text fields as strings. <code>_score</code> is the relevance score (higher = better match). Fields with no data are omitted.</p>
   `;
 
-  document.getElementById('copy-llm-btn').addEventListener('click', () => {
-    navigator.clipboard.writeText(md).then(() => {
-      const btn = document.getElementById('copy-llm-btn');
-      btn.textContent = '✓ Copied!';
-      btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = '📋 Copy for LLM'; btn.classList.remove('copied'); }, 2000);
-    });
-  });
-}
-
-function generateMarkdownDocs(baseUrl, fields, keywordFields, numberFields, fuzzyFields) {
-  return `# ruzz API Documentation
+  // Generate markdown for copy
+  const md = `# ruzz API Documentation
 
 Base URL: ${baseUrl}
 Documents: ${Number(statsData.documents).toLocaleString()}
@@ -462,26 +461,13 @@ Fuzzy search with optional filters, range queries, and sorting.
 | \`limit\` | Max results (default 20) |
 | \`sort_by\` | Field to sort/rerank by |
 | \`sort_order\` | \`asc\` or \`desc\` (default desc) |
-${keywordFields.map(f => `| \`${f}\` | Exact filter. Comma-separated for OR: \`${f}=NO,SE,DK\` |`).join('\n')}
+${keywordFields.map(f => `| \`${f}\` | Exact filter. Comma-separated for OR: \`${f}=A,B,C\` |`).join('\n')}
 ${numberFields.map(f => `| \`${f}_min\` / \`${f}_max\` | Range filter on ${f} |`).join('\n')}
 
 ### Examples
 
 \`\`\`
-# Fuzzy search with country filter
-GET /search?q=equinor&country_code=NO&limit=10
-
-# Multi-country filter
-GET /search?q=bank&country_code=NO,SE,DK&limit=20
-
-# Sort by revenue (browse mode, no search query needed)
-GET /search?sort_by=revenue&sort_order=desc&limit=20
-
-# Range filter + sort
-GET /search?q=tech&employees_min=100&revenue_min=1000000&sort_by=revenue&sort_order=desc
-
-# Combined
-GET /search?q=energy&country_code=DE,FR,UK&employees_min=500&sort_by=total_assets&sort_order=desc&limit=10
+${examplesMd}
 \`\`\`
 
 ## GET /lookup
@@ -489,7 +475,7 @@ GET /search?q=energy&country_code=DE,FR,UK&employees_min=500&sort_by=total_asset
 Exact match lookup. Returns single result.
 
 \`\`\`
-GET /lookup?country_code=NO&org_number=923609016
+GET /lookup?${lookupParams || 'field=value'}
 \`\`\`
 
 ## GET /stats
@@ -500,27 +486,24 @@ Runtime stats: document count, index size, memory, uptime, schema.
 
 Returns \`{"status": "ok"}\`.
 
-## Response format
+## Example response
 
 \`\`\`json
-{
-  "took_ms": 3.5,
-  "total": 10,
-  "results": [
-    {
-      "name": "EQUINOR ASA",
-      "country_code": "NO",
-      "org_number": "923609016",
-      "revenue": 62615000,
-      "employees": 21000,
-      "_score": 107.2
-    }
-  ]
-}
+${sampleResponse}
 \`\`\`
 
-Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\` is the relevance score (higher = better match). Fields with no data for a document are omitted from the response.
+Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\` is the relevance score (higher = better match). Fields with no data are omitted from the response.
 `;
+
+  document.getElementById('copy-llm-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(md).then(() => {
+      const btn = document.getElementById('copy-llm-btn');
+      btn.textContent = '✓ Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = '📋 Copy for LLM'; btn.classList.remove('copied'); }, 2000);
+    });
+  });
+}
 }
 
 init();
