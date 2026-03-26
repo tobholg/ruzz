@@ -73,18 +73,25 @@
   .search-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 30px rgba(0,0,0,0.1); }
 
   .settings-btn { position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: color 0.15s, border-color 0.15s, background 0.15s; }
-  .settings-btn:hover { color: var(--text); border-color: var(--accent); background: var(--accent-glow); }
-  .settings-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
+  .settings-btn:hover { color: var(--text); border-color: rgba(255,255,255,0.15); }
+  .settings-btn.active { color: var(--text); border-color: rgba(255,255,255,0.2); background: var(--surface); }
+  @media (prefers-color-scheme: light) {
+    .settings-btn:hover { border-color: rgba(0,0,0,0.15); }
+    .settings-btn.active { color: var(--text); border-color: rgba(0,0,0,0.2); background: var(--surface-2); }
+  }
 
   .advanced-panel { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; animation: slideDown 0.15s ease-out; }
   .advanced-panel.open { display: block; }
   @keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
-  .advanced-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.75rem; }
+  .advanced-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text); opacity: 0.5; margin-bottom: 0.75rem; }
   .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .filters + .filters { margin-top: 0.75rem; }
   .filter-group { display: flex; flex-direction: column; gap: 0.25rem; }
-  .filter-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); padding-left: 0.25rem; }
+  .filter-range-pair { display: flex; gap: 0.35rem; align-items: flex-end; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 0.35rem; }
+  .filter-range-pair .filter-input { border: none; background: transparent; width: 72px; padding: 0.4rem 0.5rem; }
+  .filter-range-pair .range-sep { color: var(--text-dim); font-size: 0.7rem; padding-bottom: 0.45rem; }
+  .filter-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.45; padding-left: 0.25rem; }
   .filter-input { padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem; outline: none; width: 120px; transition: border-color 0.2s; }
   .filter-input.narrow { width: 90px; }
   .filter-input.wide { width: 150px; }
@@ -124,9 +131,9 @@
   .docs td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text); opacity: 0.75; }
   .docs td code { font-size: 0.78rem; }
 
-  .copy-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.2rem; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent); border-radius: 10px; font-family: var(--font); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
-  .copy-btn:hover { background: var(--accent); color: white; }
-  .copy-btn.copied { background: rgba(16,185,129,0.15); color: var(--emerald); border-color: var(--emerald); }
+  .copy-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; background: var(--surface-2); color: var(--text); opacity: 0.7; border: 1px solid var(--border); border-radius: 10px; font-family: var(--font); font-size: 0.8rem; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+  .copy-btn:hover { opacity: 1; border-color: var(--text-muted); }
+  .copy-btn.copied { opacity: 1; color: var(--emerald); border-color: var(--emerald); background: rgba(16,185,129,0.08); }
 
   @media (max-width: 640px) {
     .container { padding: 1.25rem 1rem; }
@@ -266,11 +273,16 @@ function buildFilters() {
       const input = el('input', 'filter-input'); input.type = 'text'; input.placeholder = field.name; input.dataset.field = field.name; input.dataset.kind = 'exact'; input.autocomplete = 'off';
       input.addEventListener('input', scheduleSearch); group.appendChild(input); row.appendChild(group);
     } else if (field.type === 'number') {
-      for (const suffix of ['min', 'max']) {
-        const g = el('div', 'filter-group'); g.appendChild(label(field.name + ' ' + suffix));
-        const inp = el('input', 'filter-input narrow'); inp.type = 'number'; inp.placeholder = suffix; inp.dataset.field = field.name + '_' + suffix; inp.dataset.kind = 'range';
-        inp.addEventListener('input', scheduleSearch); g.appendChild(inp); row.appendChild(g);
-      }
+      const g = el('div', 'filter-group');
+      g.appendChild(label(field.name));
+      const pair = el('div', 'filter-range-pair');
+      const minInp = el('input', 'filter-input'); minInp.type = 'number'; minInp.placeholder = 'min'; minInp.dataset.field = field.name + '_min'; minInp.dataset.kind = 'range';
+      minInp.addEventListener('input', scheduleSearch);
+      const sep = el('span', 'range-sep'); sep.textContent = '–';
+      const maxInp = el('input', 'filter-input'); maxInp.type = 'number'; maxInp.placeholder = 'max'; maxInp.dataset.field = field.name + '_max'; maxInp.dataset.kind = 'range';
+      maxInp.addEventListener('input', scheduleSearch);
+      pair.appendChild(minInp); pair.appendChild(sep); pair.appendChild(maxInp);
+      g.appendChild(pair); row.appendChild(g);
     }
   }
 }
