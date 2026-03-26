@@ -176,19 +176,18 @@ impl SearchEngine {
 
             for fc in &self.config.schema.fields {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
-                    if let Some(value) = doc.get_first(field) {
-                        match fc.field_type {
-                            FieldType::Text | FieldType::Keyword => {
-                                if let Some(text) = value.as_str() {
-                                    obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
-                                }
-                            }
-                            FieldType::Number => {
-                                if let Some(num) = value.as_f64() {
-                                    if num != 0.0 {
-                                        obj.insert(fc.name.clone(), serde_json::json!(num));
-                                    }
-                                }
+                    let val = doc.get_first(field);
+                    match fc.field_type {
+                        FieldType::Text | FieldType::Keyword => {
+                            let text = val.and_then(|v| v.as_str()).unwrap_or("");
+                            obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        }
+                        FieldType::Number => {
+                            let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            if num != 0.0 {
+                                obj.insert(fc.name.clone(), serde_json::json!(num));
+                            } else {
+                                obj.insert(fc.name.clone(), serde_json::Value::Null);
                             }
                         }
                     }
@@ -259,19 +258,18 @@ impl SearchEngine {
             let mut obj = serde_json::Map::new();
             for fc in &self.config.schema.fields {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
-                    if let Some(value) = doc.get_first(field) {
-                        match fc.field_type {
-                            FieldType::Text | FieldType::Keyword => {
-                                if let Some(text) = value.as_str() {
-                                    obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
-                                }
-                            }
-                            FieldType::Number => {
-                                if let Some(num) = value.as_f64() {
-                                    if num != 0.0 {
-                                        obj.insert(fc.name.clone(), serde_json::json!(num));
-                                    }
-                                }
+                    let val = doc.get_first(field);
+                    match fc.field_type {
+                        FieldType::Text | FieldType::Keyword => {
+                            let text = val.and_then(|v| v.as_str()).unwrap_or("");
+                            obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        }
+                        FieldType::Number => {
+                            let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            if num != 0.0 {
+                                obj.insert(fc.name.clone(), serde_json::json!(num));
+                            } else {
+                                obj.insert(fc.name.clone(), serde_json::Value::Null);
                             }
                         }
                     }
