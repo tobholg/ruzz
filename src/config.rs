@@ -20,6 +20,10 @@ pub struct ServerConfig {
     /// Default: "100%" (no limit, keep everything warm)
     #[serde(default = "default_memory_budget")]
     pub memory_budget: String,
+    /// Optional auth token. When set, all API requests (except /health)
+    /// require Authorization: Bearer <token> header or ?token=<token> param.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 fn default_memory_budget() -> String {

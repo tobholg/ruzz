@@ -215,6 +215,39 @@ const API = '';
 let schema = [];
 let fuzzyField = null;
 let statsData = null;
+let authToken = sessionStorage.getItem('ruzz_token') || '';
+
+function authHeaders() {
+  const h = {};
+  if (authToken) h['Authorization'] = 'Bearer ' + authToken;
+  return h;
+}
+
+function authFetch(url) {
+  return fetch(url, { headers: authHeaders() });
+}
+
+function showAuthPrompt() {
+  document.getElementById('tab-search').innerHTML = `
+    <div class="empty" style="padding:2rem">
+      <div class="empty-icon">🔒</div>
+      <div class="empty-text" style="margin-bottom:1.5rem">This instance requires authentication</div>
+      <div style="display:flex;gap:0.5rem;justify-content:center;max-width:400px;margin:0 auto">
+        <input type="password" id="auth-input" placeholder="Enter API token" class="search-input" style="padding:0.75rem 1rem;font-size:0.9rem" autocomplete="off">
+        <button onclick="submitAuth()" style="padding:0.75rem 1.5rem;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;color:var(--text);font-weight:600;cursor:pointer">Connect</button>
+      </div>
+    </div>`;
+  document.getElementById('auth-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') submitAuth(); });
+  document.getElementById('auth-input')?.focus();
+}
+
+async function submitAuth() {
+  const input = document.getElementById('auth-input');
+  authToken = input?.value?.trim() || '';
+  sessionStorage.setItem('ruzz_token', authToken);
+  document.getElementById('tab-search').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Connecting...</div></div>';
+  await init();
+}
 
 // ── Tabs ──
 document.querySelectorAll('.tab').forEach(tab => {
@@ -236,19 +269,28 @@ document.getElementById('settings-btn').addEventListener('click', () => {
 // ── Stats + init ──
 async function init() {
   try {
-    const res = await fetch(`${API}/stats`);
+    const res = await authFetch(`${API}/stats`);
+    if (res.status === 401) {
+      showAuthPrompt();
+      document.getElementById('status-text').textContent = 'auth required';
+      return;
+    }
     statsData = await res.json();
     updateStats(statsData);
     schema = statsData.schema?.fields || [];
     fuzzyField = schema.find(f => f.search === 'fuzzy');
-    buildFilters();
-    buildSort();
-    document.getElementById('results').innerHTML =
-      `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData.documents).toLocaleString()} records</div></div>`;
+    buildSearchTab();
     document.getElementById('status-text').textContent = 'online';
   } catch {
     document.getElementById('status-text').textContent = 'offline';
   }
+}
+
+function buildSearchTab() {
+    buildFilters();
+    buildSort();
+    document.getElementById('results').innerHTML =
+      `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData.documents).toLocaleString()} records</div></div>`;
 }
 
 function updateStats(d) {
@@ -259,7 +301,7 @@ function updateStats(d) {
 }
 
 setInterval(async () => {
-  try { const r = await fetch(`${API}/stats`); statsData = await r.json(); updateStats(statsData); document.getElementById('status-text').textContent = 'online'; }
+  try { const r = await authFetch(`${API}/stats`); statsData = await r.json(); updateStats(statsData); document.getElementById('status-text').textContent = 'online'; }
   catch { document.getElementById('status-text').textContent = 'offline'; }
 }, 5000);
 
@@ -326,7 +368,7 @@ async function doSearch() {
     document.getElementById('query-meta').style.display = 'none'; return;
   }
   try {
-    const res = await fetch(`${API}/search?${params}`); const data = await res.json();
+    const res = await authFetch(`${API}/search?${params}`); const data = await res.json();
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
@@ -367,7 +409,7 @@ async function buildDocs() {
   try {
     // Try to get a result with data by sorting by the first number field
     const sortParam = firstNumber ? `&sort_by=${firstNumber}&sort_order=desc` : '';
-    const res = await fetch(`${API}/search?limit=1${sortParam}`);
+    const res = await authFetch(`${API}/search?limit=1${sortParam}`);
     const data = await res.json();
     if (data.results?.length) sample = data.results[0];
   } catch {}
@@ -418,6 +460,7 @@ async function buildDocs() {
 
     <p>Base URL: <code>${baseUrl}</code></p>
     <p>Documents indexed: <strong>${Number(statsData.documents).toLocaleString()}</strong> | Index size: <strong>${statsData.index.size_human}</strong></p>
+    ${authToken ? '<p><strong>Authentication:</strong> Include <code>Authorization: Bearer &lt;token&gt;</code> header with every request, or append <code>?token=&lt;token&gt;</code> to the URL.</p>' : ''}
 
     <h2>Schema</h2>
     <table><thead><tr><th>Field</th><th>Type</th><th>Search</th></tr></thead><tbody>${fieldRows}</tbody></table>
@@ -464,6 +507,7 @@ async function buildDocs() {
 Base URL: ${baseUrl}
 Documents: ${Number(statsData.documents).toLocaleString()}
 Index size: ${statsData.index.size_human}
+${authToken ? '\n## Authentication\n\nAll requests (except `/health`) require authentication.\n\nOption 1: Header `Authorization: Bearer <token>`\nOption 2: Query param `?token=<token>`\n' : ''}
 
 ## Schema
 

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Query, State};
-use axum::response::Json;
+use axum::extract::{Query, Request, State};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use sysinfo::System;
@@ -17,14 +18,57 @@ pub struct AppState {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let auth_token = state.engine.config.server.auth_token.clone();
+
+    let mut app = Router::new()
         .route("/", get(handle_dashboard))
         .route("/search", get(handle_search))
         .route("/lookup", get(handle_lookup))
         .route("/stats", get(handle_stats))
         .route("/health", get(handle_health))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(token) = auth_token {
+        app = app.layer(middleware::from_fn(move |req, next| {
+            let token = token.clone();
+            auth_middleware(token, req, next)
+        }));
+    }
+
+    app.layer(CorsLayer::permissive())
+}
+
+async fn auth_middleware(token: String, req: Request, next: Next) -> Response {
+    // Skip auth for /health (load balancer probes)
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+
+    // Check Authorization: Bearer <token> header
+    if let Some(auth_header) = req.headers().get("authorization") {
+        if let Ok(val) = auth_header.to_str() {
+            if val.strip_prefix("Bearer ").map(|t| t.trim()) == Some(token.as_str()) {
+                return next.run(req).await;
+            }
+        }
+    }
+
+    // Check ?token=<token> query param
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some(val) = pair.strip_prefix("token=") {
+                if val == token {
+                    return next.run(req).await;
+                }
+            }
+        }
+    }
+
+    // Unauthorized
+    let body = serde_json::json!({"error": "unauthorized", "message": "Provide Authorization: Bearer <token> header or ?token=<token> param"});
+    let mut resp = axum::response::Json(body).into_response();
+    *resp.status_mut() = axum::http::StatusCode::UNAUTHORIZED;
+    resp
 }
 
 async fn handle_dashboard() -> axum::response::Html<&'static str> {
