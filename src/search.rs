@@ -97,7 +97,7 @@ impl SearchEngine {
 
         // Native range filters on numeric fields
         for rf in range_filters {
-            if let Some(&field) = self.field_map.get(&rf.field) {
+            if self.field_map.contains_key(&rf.field) {
                 let min = rf.min.unwrap_or(f64::MIN);
                 let max = rf.max.unwrap_or(f64::MAX);
                 let range_query = RangeQuery::new_f64_bounds(

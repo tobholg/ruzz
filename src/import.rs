@@ -6,7 +6,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tantivy::schema::Schema;
 use tantivy::{IndexWriter, TantivyDocument};
 
-use crate::config::{Config, FieldType, SourceConfig};
+use crate::config::{Config, FieldType};
 use crate::schema::build_schema;
 
 pub struct ImportStats {
@@ -15,6 +15,7 @@ pub struct ImportStats {
     pub per_source: Vec<SourceStats>,
 }
 
+#[allow(dead_code)]
 pub struct SourceStats {
     pub path: String,
     pub rows: u64,
@@ -132,7 +133,7 @@ fn import_csv(
     path: &Path,
     mapping: &HashMap<String, String>,
     defaults: &HashMap<String, String>,
-    schema: &Schema,
+    _schema: &Schema,
     field_map: &HashMap<String, tantivy::schema::Field>,
     field_configs: &[crate::config::FieldConfig],
     writer: &mut IndexWriter,
