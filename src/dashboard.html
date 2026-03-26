@@ -101,9 +101,9 @@
   .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
   .result-name { font-size: 1rem; font-weight: 600; }
   .result-score { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px; }
-  .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text-muted); }
+  .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text); opacity: 0.7; }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
-  .meta-label { color: var(--text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .meta-label { color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .tag { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; background: rgba(14,165,233,0.12); color: #38bdf8; }
   @media (prefers-color-scheme: light) { .tag { background: rgba(14,165,233,0.08); color: #0369a1; } }
 
@@ -116,17 +116,17 @@
   .docs h2 { font-size: 1.3rem; font-weight: 700; margin: 2rem 0 0.75rem 0; letter-spacing: -0.01em; }
   .docs h2:first-child { margin-top: 0; }
   .docs h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.5rem 0; color: var(--text); }
-  .docs p { font-size: 0.9rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 0.75rem; }
+  .docs p { font-size: 0.9rem; color: var(--text); line-height: 1.7; margin-bottom: 0.75rem; opacity: 0.85; }
   .docs code { font-family: var(--mono); font-size: 0.82rem; background: var(--surface); border: 1px solid var(--border); padding: 0.15rem 0.4rem; border-radius: 5px; }
-  .docs pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; overflow-x: auto; margin-bottom: 1rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; color: var(--text-muted); }
+  .docs pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; overflow-x: auto; margin-bottom: 1rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; color: var(--text); opacity: 0.8; }
   .docs table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: 0.85rem; }
-  .docs th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
-  .docs td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+  .docs th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text); opacity: 0.5; }
+  .docs td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text); opacity: 0.75; }
   .docs td code { font-size: 0.78rem; }
 
-  .copy-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.2rem; background: var(--accent); color: white; border: none; border-radius: 10px; font-family: var(--font); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
-  .copy-btn:hover { opacity: 0.85; }
-  .copy-btn.copied { background: var(--emerald); }
+  .copy-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.2rem; background: var(--accent-glow); color: var(--accent); border: 1px solid var(--accent); border-radius: 10px; font-family: var(--font); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .copy-btn:hover { background: var(--accent); color: white; }
+  .copy-btn.copied { background: rgba(16,185,129,0.15); color: var(--emerald); border-color: var(--emerald); }
 
   @media (max-width: 640px) {
     .container { padding: 1.25rem 1rem; }
