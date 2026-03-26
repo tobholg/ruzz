@@ -41,172 +41,92 @@
     }
   }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font);
-    min-height: 100vh;
-    -webkit-font-smoothing: antialiased;
-  }
-
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; -webkit-font-smoothing: antialiased; }
   .container { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem; }
 
-  .header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border);
-  }
-
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
   .logo { display: flex; align-items: baseline; gap: 1rem; }
-
   .logo-text { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; letter-spacing: 0.05em; }
+  .logo-tagline { font-family: var(--mono); font-size: 1.2rem; font-weight: 400; color: var(--text-dim); letter-spacing: 0.05em; }
 
-  .logo-tagline {
-    font-family: var(--mono); font-size: 1.2rem; font-weight: 400;
-    color: var(--text-dim); letter-spacing: 0.05em;
-  }
-
-  .status-pill {
-    display: flex; align-items: center; gap: 0.5rem;
-    padding: 0.4rem 0.85rem; border-radius: 100px;
-    background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2);
-    font-size: 0.75rem; font-weight: 500; color: var(--emerald);
-  }
-
+  .status-pill { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.85rem; border-radius: 100px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); font-size: 0.75rem; font-weight: 500; color: var(--emerald); }
   .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--emerald); box-shadow: 0 0 8px var(--emerald); }
 
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  .tab { padding: 0.6rem 1.25rem; font-size: 0.85rem; font-weight: 500; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
+  .tab:hover { color: var(--text-muted); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
   .stats-bar { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-
-  .stat-card {
-    flex: 1; min-width: 120px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem;
-  }
-
-  .stat-label {
-    font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.4rem;
-  }
-
+  .stat-card { flex: 1; min-width: 120px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; }
+  .stat-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.4rem; }
   .stat-value { font-family: var(--mono); font-size: 1.15rem; font-weight: 600; }
 
   .search-wrap { position: relative; margin-bottom: 1.5rem; }
-
-  .search-icon {
-    position: absolute; left: 1.25rem; top: 50%; transform: translateY(-50%);
-    color: var(--text-dim); pointer-events: none;
-  }
-
-  .search-input {
-    width: 100%; padding: 1rem 3.5rem 1rem 3.25rem;
-    background: var(--surface); border: 1.5px solid var(--border); border-radius: 16px;
-    color: var(--text); font-family: var(--font); font-size: 1rem; outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
-  }
-
+  .search-icon { position: absolute; left: 1.25rem; top: 50%; transform: translateY(-50%); color: var(--text-dim); pointer-events: none; }
+  .search-input { width: 100%; padding: 1rem 3.5rem 1rem 3.25rem; background: var(--surface); border: 1.5px solid var(--border); border-radius: 16px; color: var(--text); font-family: var(--font); font-size: 1rem; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
   .search-input::placeholder { color: var(--text-dim); }
+  .search-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 30px rgba(0,0,0,0.1); }
 
-  .search-input:focus {
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 30px rgba(0,0,0,0.1);
-  }
-
-  .settings-btn {
-    position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%);
-    width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--surface-2); color: var(--text-muted); cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
-  }
-
+  .settings-btn { position: absolute; right: 0.75rem; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: color 0.15s, border-color 0.15s, background 0.15s; }
   .settings-btn:hover { color: var(--text); border-color: var(--accent); background: var(--accent-glow); }
   .settings-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-glow); }
 
-  .advanced-panel {
-    display: none; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem;
-    animation: slideDown 0.15s ease-out;
-  }
-
+  .advanced-panel { display: none; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; animation: slideDown 0.15s ease-out; }
   .advanced-panel.open { display: block; }
+  @keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
-  @keyframes slideDown {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .advanced-title {
-    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.75rem;
-  }
-
+  .advanced-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 0.75rem; }
   .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .filters + .filters { margin-top: 0.75rem; }
-
   .filter-group { display: flex; flex-direction: column; gap: 0.25rem; }
-
-  .filter-label {
-    font-size: 0.6rem; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--text-dim); padding-left: 0.25rem;
-  }
-
-  .filter-input {
-    padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border);
-    border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem;
-    outline: none; width: 120px; transition: border-color 0.2s;
-  }
-
+  .filter-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); padding-left: 0.25rem; }
+  .filter-input { padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem; outline: none; width: 120px; transition: border-color 0.2s; }
   .filter-input.narrow { width: 90px; }
   .filter-input.wide { width: 150px; }
   .filter-input::placeholder { color: var(--text-dim); }
   .filter-input:focus { border-color: var(--border-focus); }
+  select.filter-input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 2rem; cursor: pointer; }
 
-  select.filter-input {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-    background-repeat: no-repeat; background-position: right 0.6rem center;
-    padding-right: 2rem; cursor: pointer;
-  }
-
-  .query-meta {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-muted);
-  }
-
+  .query-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-muted); }
   .query-time { font-family: var(--mono); color: var(--emerald); font-weight: 500; }
 
   .results { display: flex; flex-direction: column; gap: 0.5rem; }
-
-  .result-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-    padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default;
-  }
-
+  .result-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default; }
   .result-card:hover { border-color: rgba(14,165,233,0.2); background: var(--surface-2); }
-
   .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
   .result-name { font-size: 1rem; font-weight: 600; }
-
-  .result-score {
-    font-family: var(--mono); font-size: 0.7rem; color: var(--accent);
-    background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px;
-  }
-
+  .result-score { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px; }
   .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text-muted); }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
   .meta-label { color: var(--text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
-
-  .tag {
-    display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px;
-    font-family: var(--mono); font-size: 0.7rem; font-weight: 500;
-    background: rgba(14,165,233,0.12); color: #38bdf8;
-  }
-
-  @media (prefers-color-scheme: light) {
-    .tag { background: rgba(14,165,233,0.08); color: #0369a1; }
-  }
+  .tag { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; background: rgba(14,165,233,0.12); color: #38bdf8; }
+  @media (prefers-color-scheme: light) { .tag { background: rgba(14,165,233,0.08); color: #0369a1; } }
 
   .empty { text-align: center; padding: 4rem 1rem; color: var(--text-dim); }
   .empty-icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.3; }
   .empty-text { font-size: 0.9rem; }
+
+  /* Docs tab */
+  .docs { max-width: 720px; }
+  .docs h2 { font-size: 1.3rem; font-weight: 700; margin: 2rem 0 0.75rem 0; letter-spacing: -0.01em; }
+  .docs h2:first-child { margin-top: 0; }
+  .docs h3 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 0.5rem 0; color: var(--text); }
+  .docs p { font-size: 0.9rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 0.75rem; }
+  .docs code { font-family: var(--mono); font-size: 0.82rem; background: var(--surface); border: 1px solid var(--border); padding: 0.15rem 0.4rem; border-radius: 5px; }
+  .docs pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; overflow-x: auto; margin-bottom: 1rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; color: var(--text-muted); }
+  .docs table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: 0.85rem; }
+  .docs th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
+  .docs td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+  .docs td code { font-size: 0.78rem; }
+
+  .copy-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.2rem; background: var(--accent); color: white; border: none; border-radius: 10px; font-family: var(--font); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .copy-btn:hover { opacity: 0.85; }
+  .copy-btn.copied { background: var(--emerald); }
 
   @media (max-width: 640px) {
     .container { padding: 1.25rem 1rem; }
@@ -237,38 +157,48 @@
     </div>
   </div>
 
-  <div class="stats-bar">
-    <div class="stat-card"><div class="stat-label">Documents</div><div class="stat-value" id="stat-docs">—</div></div>
-    <div class="stat-card"><div class="stat-label">Index Size</div><div class="stat-value" id="stat-index">—</div></div>
-    <div class="stat-card"><div class="stat-label">Memory</div><div class="stat-value" id="stat-mem">—</div></div>
-    <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="stat-uptime">—</div></div>
+  <div class="tabs">
+    <div class="tab active" data-tab="search">Search</div>
+    <div class="tab" data-tab="docs">Docs</div>
   </div>
 
-  <div class="search-wrap">
-    <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
-    <input class="search-input" id="search" type="text" placeholder="Search..." autofocus>
-    <button class="settings-btn" id="settings-btn" title="Search settings">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-    </button>
-  </div>
-
-  <div class="advanced-panel" id="advanced-panel">
-    <div class="advanced-title">Filters</div>
-    <div class="filters" id="filters-row"></div>
-    <div class="advanced-title" style="margin-top:1rem">Rerank by</div>
-    <div class="filters" id="sort-row"></div>
-  </div>
-
-  <div class="query-meta" id="query-meta" style="display:none">
-    <span><span id="result-count">0</span> results</span>
-    <span class="query-time" id="query-time">0ms</span>
-  </div>
-
-  <div class="results" id="results">
-    <div class="empty">
-      <div class="empty-icon">⚡</div>
-      <div class="empty-text">Loading schema...</div>
+  <!-- ═══ SEARCH TAB ═══ -->
+  <div class="tab-content active" id="tab-search">
+    <div class="stats-bar">
+      <div class="stat-card"><div class="stat-label">Documents</div><div class="stat-value" id="stat-docs">—</div></div>
+      <div class="stat-card"><div class="stat-label">Index Size</div><div class="stat-value" id="stat-index">—</div></div>
+      <div class="stat-card"><div class="stat-label">Memory</div><div class="stat-value" id="stat-mem">—</div></div>
+      <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="stat-uptime">—</div></div>
     </div>
+
+    <div class="search-wrap">
+      <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+      <input class="search-input" id="search" type="text" placeholder="Search..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" autofocus>
+      <button class="settings-btn" id="settings-btn" title="Search settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+
+    <div class="advanced-panel" id="advanced-panel">
+      <div class="advanced-title">Filters</div>
+      <div class="filters" id="filters-row"></div>
+      <div class="advanced-title" style="margin-top:1rem">Rerank by</div>
+      <div class="filters" id="sort-row"></div>
+    </div>
+
+    <div class="query-meta" id="query-meta" style="display:none">
+      <span><span id="result-count">0</span> results</span>
+      <span class="query-time" id="query-time">0ms</span>
+    </div>
+
+    <div class="results" id="results">
+      <div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Loading schema...</div></div>
+    </div>
+  </div>
+
+  <!-- ═══ DOCS TAB ═══ -->
+  <div class="tab-content" id="tab-docs">
+    <div class="docs" id="docs-content"></div>
   </div>
 </div>
 
@@ -276,26 +206,37 @@
 const API = '';
 let schema = [];
 let fuzzyField = null;
+let statsData = null;
 
-// Settings toggle
-document.getElementById('settings-btn').addEventListener('click', () => {
-  const panel = document.getElementById('advanced-panel');
-  const btn = document.getElementById('settings-btn');
-  panel.classList.toggle('open');
-  btn.classList.toggle('active');
+// ── Tabs ──
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'docs') buildDocs();
+  });
 });
 
+// ── Settings toggle ──
+document.getElementById('settings-btn').addEventListener('click', () => {
+  document.getElementById('advanced-panel').classList.toggle('open');
+  document.getElementById('settings-btn').classList.toggle('active');
+});
+
+// ── Stats + init ──
 async function init() {
   try {
     const res = await fetch(`${API}/stats`);
-    const data = await res.json();
-    updateStats(data);
-    schema = data.schema?.fields || [];
+    statsData = await res.json();
+    updateStats(statsData);
+    schema = statsData.schema?.fields || [];
     fuzzyField = schema.find(f => f.search === 'fuzzy');
     buildFilters();
     buildSort();
     document.getElementById('results').innerHTML =
-      `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(data.documents).toLocaleString()} records</div></div>`;
+      `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData.documents).toLocaleString()} records</div></div>`;
     document.getElementById('status-text').textContent = 'online';
   } catch {
     document.getElementById('status-text').textContent = 'offline';
@@ -310,67 +251,46 @@ function updateStats(d) {
 }
 
 setInterval(async () => {
-  try { const r = await fetch(`${API}/stats`); updateStats(await r.json()); document.getElementById('status-text').textContent = 'online'; }
+  try { const r = await fetch(`${API}/stats`); statsData = await r.json(); updateStats(statsData); document.getElementById('status-text').textContent = 'online'; }
   catch { document.getElementById('status-text').textContent = 'offline'; }
 }, 5000);
 
+// ── Build filters/sort from schema ──
 function buildFilters() {
-  const row = document.getElementById('filters-row');
-  row.innerHTML = '';
+  const row = document.getElementById('filters-row'); row.innerHTML = '';
   for (const field of schema) {
     if (field.search === 'fuzzy') continue;
     if (field.type === 'keyword') {
-      const group = el('div', 'filter-group');
-      group.appendChild(label(field.name));
-      const input = el('input', 'filter-input');
-      input.type = 'text'; input.placeholder = field.name; input.dataset.field = field.name; input.dataset.kind = 'exact';
-      input.addEventListener('input', scheduleSearch);
-      group.appendChild(input); row.appendChild(group);
+      const group = el('div', 'filter-group'); group.appendChild(label(field.name));
+      const input = el('input', 'filter-input'); input.type = 'text'; input.placeholder = field.name; input.dataset.field = field.name; input.dataset.kind = 'exact'; input.autocomplete = 'off';
+      input.addEventListener('input', scheduleSearch); group.appendChild(input); row.appendChild(group);
     } else if (field.type === 'number') {
       for (const suffix of ['min', 'max']) {
-        const g = el('div', 'filter-group');
-        g.appendChild(label(field.name + ' ' + suffix));
-        const inp = el('input', 'filter-input narrow');
-        inp.type = 'number'; inp.placeholder = suffix; inp.dataset.field = field.name + '_' + suffix; inp.dataset.kind = 'range';
-        inp.addEventListener('input', scheduleSearch);
-        g.appendChild(inp); row.appendChild(g);
+        const g = el('div', 'filter-group'); g.appendChild(label(field.name + ' ' + suffix));
+        const inp = el('input', 'filter-input narrow'); inp.type = 'number'; inp.placeholder = suffix; inp.dataset.field = field.name + '_' + suffix; inp.dataset.kind = 'range';
+        inp.addEventListener('input', scheduleSearch); g.appendChild(inp); row.appendChild(g);
       }
     }
   }
 }
 
 function buildSort() {
-  const row = document.getElementById('sort-row');
-  row.innerHTML = '';
-
-  const gField = el('div', 'filter-group');
-  gField.appendChild(label('Field'));
-  const select = document.createElement('select');
-  select.className = 'filter-input wide'; select.id = 'sort-by';
-  const defaultOpt = document.createElement('option');
-  defaultOpt.value = ''; defaultOpt.textContent = 'Relevance';
-  select.appendChild(defaultOpt);
-  for (const field of schema) {
-    if (field.search === 'fuzzy') continue;
-    const opt = document.createElement('option');
-    opt.value = field.name; opt.textContent = field.name.replace(/_/g, ' ');
-    select.appendChild(opt);
-  }
-  select.addEventListener('change', scheduleSearch);
-  gField.appendChild(select); row.appendChild(gField);
-
-  const gOrder = el('div', 'filter-group');
-  gOrder.appendChild(label('Order'));
-  const orderSel = document.createElement('select');
-  orderSel.className = 'filter-input narrow'; orderSel.id = 'sort-order';
+  const row = document.getElementById('sort-row'); row.innerHTML = '';
+  const gField = el('div', 'filter-group'); gField.appendChild(label('Field'));
+  const select = document.createElement('select'); select.className = 'filter-input wide'; select.id = 'sort-by';
+  const defaultOpt = document.createElement('option'); defaultOpt.value = ''; defaultOpt.textContent = 'Relevance'; select.appendChild(defaultOpt);
+  for (const field of schema) { if (field.search === 'fuzzy') continue; const opt = document.createElement('option'); opt.value = field.name; opt.textContent = field.name.replace(/_/g, ' '); select.appendChild(opt); }
+  select.addEventListener('change', scheduleSearch); gField.appendChild(select); row.appendChild(gField);
+  const gOrder = el('div', 'filter-group'); gOrder.appendChild(label('Order'));
+  const orderSel = document.createElement('select'); orderSel.className = 'filter-input narrow'; orderSel.id = 'sort-order';
   orderSel.innerHTML = '<option value="desc">↓ Desc</option><option value="asc">↑ Asc</option>';
-  orderSel.addEventListener('change', scheduleSearch);
-  gOrder.appendChild(orderSel); row.appendChild(gOrder);
+  orderSel.addEventListener('change', scheduleSearch); gOrder.appendChild(orderSel); row.appendChild(gOrder);
 }
 
 function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
 function label(text) { const s = el('span', 'filter-label'); s.textContent = text.replace(/_/g, ' '); return s; }
 
+// ── Search ──
 let debounceTimer = null;
 document.getElementById('search').addEventListener('input', scheduleSearch);
 function scheduleSearch() { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); }
@@ -380,63 +300,228 @@ async function doSearch() {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   params.set('limit', '30');
-
   let hasAnyFilter = false;
   document.querySelectorAll('#filters-row .filter-input').forEach(input => {
-    const val = input.value.trim();
-    if (!val) return;
-    hasAnyFilter = true;
+    const val = input.value.trim(); if (!val) return; hasAnyFilter = true;
     params.set(input.dataset.field, input.dataset.kind === 'exact' ? val.toUpperCase() : val);
   });
-
   const sortBy = document.getElementById('sort-by')?.value;
   const sortOrder = document.getElementById('sort-order')?.value;
   if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder || 'desc'); }
-
   if (!q && !hasAnyFilter && !sortBy) {
     document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search</div></div>';
-    document.getElementById('query-meta').style.display = 'none';
-    return;
+    document.getElementById('query-meta').style.display = 'none'; return;
   }
-
   try {
-    const res = await fetch(`${API}/search?${params}`);
-    const data = await res.json();
+    const res = await fetch(`${API}/search?${params}`); const data = await res.json();
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
-
     const container = document.getElementById('results');
-    if (!data.results || data.results.length === 0) {
-      container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
-      return;
-    }
-
+    if (!data.results || data.results.length === 0) { container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>'; return; }
     const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
     container.innerHTML = data.results.map(r => {
-      const name = r[nameField] || '';
-      const score = r._score?.toFixed(1) || '—';
+      const name = r[nameField] || ''; const score = r._score?.toFixed(1) || '—';
       const metaHtml = schema.filter(f => f.name !== nameField).map(f => {
-        const val = r[f.name];
-        if (!val || val === 'false') return '';
+        const val = r[f.name]; if (!val || val === 'false') return '';
         if (val === 'true') return `<span style="color:var(--amber)">⚠ ${esc(f.name.replace(/_/g, ' '))}</span>`;
         if (f.type === 'keyword') return `<span><span class="tag">${esc(val)}</span> <span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span></span>`;
-        if (f.type === 'number') {
-          const num = typeof val === 'number' ? val : parseFloat(val);
-          if (isNaN(num) || num === 0) return '';
-          return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${num.toLocaleString()}</span>`;
-        }
+        if (f.type === 'number') { const num = typeof val === 'number' ? val : parseFloat(val); if (isNaN(num) || num === 0) return ''; return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${num.toLocaleString()}</span>`; }
         return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${esc(val)}</span>`;
       }).filter(Boolean).join('');
-
       return `<div class="result-card"><div class="result-header"><span class="result-name">${esc(name)}</span><span class="result-score">${score}</span></div><div class="result-meta">${metaHtml}</div></div>`;
     }).join('');
-  } catch {
-    document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>';
-  }
+  } catch { document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>'; }
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── Docs tab ──
+function buildDocs() {
+  if (!statsData || !schema.length) return;
+  const baseUrl = window.location.origin;
+  const fields = schema;
+  const keywordFields = fields.filter(f => f.type === 'keyword').map(f => f.name);
+  const numberFields = fields.filter(f => f.type === 'number').map(f => f.name);
+  const fuzzyFields = fields.filter(f => f.search === 'fuzzy').map(f => f.name);
+
+  const fieldRows = fields.map(f =>
+    `<tr><td><code>${f.name}</code></td><td>${f.type}</td><td>${f.search || '—'}</td></tr>`
+  ).join('');
+
+  const md = generateMarkdownDocs(baseUrl, fields, keywordFields, numberFields, fuzzyFields);
+
+  document.getElementById('docs-content').innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
+      <h2 style="margin:0">API Documentation</h2>
+      <button class="copy-btn" id="copy-llm-btn">📋 Copy for LLM</button>
+    </div>
+
+    <p>Base URL: <code>${baseUrl}</code></p>
+    <p>Documents indexed: <strong>${Number(statsData.documents).toLocaleString()}</strong> | Index size: <strong>${statsData.index.size_human}</strong></p>
+
+    <h2>Schema</h2>
+    <table><thead><tr><th>Field</th><th>Type</th><th>Search</th></tr></thead><tbody>${fieldRows}</tbody></table>
+
+    <h2>Endpoints</h2>
+
+    <h3>GET /search</h3>
+    <p>Fuzzy search with optional filters, range queries, and sorting.</p>
+    <pre>GET ${baseUrl}/search?q=volkswagen&amp;country_code=DE&amp;limit=10</pre>
+
+    <p><strong>Query parameters:</strong></p>
+    <table>
+      <thead><tr><th>Param</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>q</code></td><td>Fuzzy search query (searches: ${fuzzyFields.join(', ')})</td></tr>
+        <tr><td><code>limit</code></td><td>Max results (default 20)</td></tr>
+        <tr><td><code>sort_by</code></td><td>Field to sort by (any field name)</td></tr>
+        <tr><td><code>sort_order</code></td><td><code>asc</code> or <code>desc</code> (default desc)</td></tr>
+        ${keywordFields.map(f => `<tr><td><code>${f}</code></td><td>Exact filter. Comma-separated for OR: <code>${f}=NO,SE,DK</code></td></tr>`).join('')}
+        ${numberFields.map(f => `<tr><td><code>${f}_min</code> / <code>${f}_max</code></td><td>Range filter on ${f}</td></tr>`).join('')}
+      </tbody>
+    </table>
+
+    <h3>Examples</h3>
+    <pre># Fuzzy search with country filter
+GET /search?q=equinor&amp;country_code=NO&amp;limit=10
+
+# Multi-country filter
+GET /search?q=bank&amp;country_code=NO,SE,DK&amp;limit=20
+
+# Sort by revenue (no search query = browse mode)
+GET /search?sort_by=revenue&amp;sort_order=desc&amp;limit=20
+
+# Range filter + sort
+GET /search?q=tech&amp;employees_min=100&amp;revenue_min=1000000&amp;sort_by=revenue&amp;sort_order=desc
+
+# Combined
+GET /search?q=energy&amp;country_code=DE,FR,UK&amp;employees_min=500&amp;sort_by=total_assets&amp;sort_order=desc&amp;limit=10</pre>
+
+    <h3>GET /lookup</h3>
+    <p>Exact match lookup by keyword fields.</p>
+    <pre>GET ${baseUrl}/lookup?country_code=NO&amp;org_number=923609016</pre>
+
+    <h3>GET /stats</h3>
+    <p>Runtime stats: document count, index size, memory usage, uptime, schema.</p>
+    <pre>GET ${baseUrl}/stats</pre>
+
+    <h3>GET /health</h3>
+    <p>Health check. Returns <code>{"status": "ok"}</code>.</p>
+
+    <h2>Response format</h2>
+    <pre>{
+  "took_ms": 3.5,
+  "total": 10,
+  "results": [
+    {
+      "name": "EQUINOR ASA",
+      "country_code": "NO",
+      "org_number": "923609016",
+      "revenue": 62615000,
+      "employees": 21000,
+      "_score": 107.2
+    }
+  ]
+}</pre>
+    <p>Number fields return as JSON numbers. Keyword/text fields as strings. <code>_score</code> is the relevance score (higher = better match).</p>
+  `;
+
+  document.getElementById('copy-llm-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(md).then(() => {
+      const btn = document.getElementById('copy-llm-btn');
+      btn.textContent = '✓ Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = '📋 Copy for LLM'; btn.classList.remove('copied'); }, 2000);
+    });
+  });
+}
+
+function generateMarkdownDocs(baseUrl, fields, keywordFields, numberFields, fuzzyFields) {
+  return `# ruzz API Documentation
+
+Base URL: ${baseUrl}
+Documents: ${Number(statsData.documents).toLocaleString()}
+Index size: ${statsData.index.size_human}
+
+## Schema
+
+| Field | Type | Search |
+|-------|------|--------|
+${fields.map(f => `| \`${f.name}\` | ${f.type} | ${f.search || '—'} |`).join('\n')}
+
+## GET /search
+
+Fuzzy search with optional filters, range queries, and sorting.
+
+### Parameters
+
+| Param | Description |
+|-------|-------------|
+| \`q\` | Fuzzy search query (searches: ${fuzzyFields.join(', ')}) |
+| \`limit\` | Max results (default 20) |
+| \`sort_by\` | Field to sort/rerank by |
+| \`sort_order\` | \`asc\` or \`desc\` (default desc) |
+${keywordFields.map(f => `| \`${f}\` | Exact filter. Comma-separated for OR: \`${f}=NO,SE,DK\` |`).join('\n')}
+${numberFields.map(f => `| \`${f}_min\` / \`${f}_max\` | Range filter on ${f} |`).join('\n')}
+
+### Examples
+
+\`\`\`
+# Fuzzy search with country filter
+GET /search?q=equinor&country_code=NO&limit=10
+
+# Multi-country filter
+GET /search?q=bank&country_code=NO,SE,DK&limit=20
+
+# Sort by revenue (browse mode, no search query needed)
+GET /search?sort_by=revenue&sort_order=desc&limit=20
+
+# Range filter + sort
+GET /search?q=tech&employees_min=100&revenue_min=1000000&sort_by=revenue&sort_order=desc
+
+# Combined
+GET /search?q=energy&country_code=DE,FR,UK&employees_min=500&sort_by=total_assets&sort_order=desc&limit=10
+\`\`\`
+
+## GET /lookup
+
+Exact match lookup. Returns single result.
+
+\`\`\`
+GET /lookup?country_code=NO&org_number=923609016
+\`\`\`
+
+## GET /stats
+
+Runtime stats: document count, index size, memory, uptime, schema.
+
+## GET /health
+
+Returns \`{"status": "ok"}\`.
+
+## Response format
+
+\`\`\`json
+{
+  "took_ms": 3.5,
+  "total": 10,
+  "results": [
+    {
+      "name": "EQUINOR ASA",
+      "country_code": "NO",
+      "org_number": "923609016",
+      "revenue": 62615000,
+      "employees": 21000,
+      "_score": 107.2
+    }
+  ]
+}
+\`\`\`
+
+Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\` is the relevance score (higher = better match). Fields with no data for a document are omitted from the response.
+`;
+}
 
 init();
 </script>
