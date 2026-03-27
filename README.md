@@ -185,9 +185,6 @@ For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending 
 
 - [ ] Live index updates (append without full rebuild)
 - [ ] Direct Postgres/MySQL import
-- [ ] HTTP streaming for large result sets
-- [ ] Phonetic matching (Soundex/Metaphone)
-- [ ] Custom scoring functions
 - [ ] Disk-optimized tree index for reduced memory footprint
 
 ## Built with
@@ -198,4 +195,4 @@ For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending 
 
 ## License
 
-MIT. Do whatever you want.
+Apache 2.0.
