@@ -39,8 +39,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 async fn auth_middleware(token: String, req: Request, next: Next) -> Response {
-    // Skip auth for /health (load balancer probes)
-    if req.uri().path() == "/health" {
+    // Skip auth for /health and / (dashboard handles auth via JS)
+    let path = req.uri().path();
+    if path == "/health" || path == "/" {
         return next.run(req).await;
     }
 
