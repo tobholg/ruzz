@@ -11,25 +11,23 @@ $ ruzz run
 ⚡ ruzz server listening on http://localhost:8888
 ```
 
-Yeah. Under 3 seconds. Go make coffee with all that time you saved.
-
 ---
 
 ## What is this?
 
 ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files for breakfast and serves typo-tolerant search results before you finish typing.
 
-**The pitch:** You have 50 million company records across 13 countries in CSV files. You want to search them. Postgres `pg_trgm` takes 3 seconds on a bad query. Elasticsearch needs a PhD to configure. ruzz does it in 0.3ms and you set it up in 2 minutes.
+**The pitch:** You have millions of records in CSV files. You want to search them with typo tolerance. Postgres `pg_trgm` chokes on short queries. Elasticsearch needs a cluster and a weekend. ruzz does it in under a millisecond and you set it up in 2 minutes.
 
 ## Features
 
-- **🔍 Fuzzy search** — typos, partial matches, unicode. "potencon" finds "PROTENCON AS". Your users can't spell, and that's okay.
-- **⚡ Fast** — sub-millisecond to low-millisecond on 1M+ documents. No pathological cases. Every query is fast, not just the easy ones.
-- **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names per country? Handled.
-- **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. It figures out the rest. Run on a $5 VPS or a beefy server, same binary.
-- **🔎 Filters** — exact match on keywords, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by employees desc? One query.
-- **🖥 Web dashboard** — ships with a built-in search UI. Dark mode. Light mode. Looks nice. You're welcome.
-- **📊 Stats endpoint** — memory usage, index size, document count, uptime. Know exactly what your search engine is doing.
+- **🔍 Fuzzy search** — typos, partial matches, unicode normalization. "amzon" finds "Amazon". Your users can't spell, and that's okay.
+- **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
+- **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
+- **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
+- **🔎 Filters** — exact match on keywords, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by revenue desc? One query.
+- **🖥 Web dashboard** — ships with a built-in search UI. Dark mode. Light mode.
+- **📊 Stats & health endpoints** — memory usage, index size, document count, uptime. Ready for monitoring and load balancers.
 
 ## Quickstart
 
@@ -62,9 +60,9 @@ memory_budget = "2GB"  # or "50%", "100%", "unlimited"
 [schema]
 fields = [
     { name = "name", type = "text", search = "fuzzy" },
-    { name = "country_code", type = "keyword" },
-    { name = "org_number", type = "keyword" },
-    { name = "nace", type = "keyword" },
+    { name = "country", type = "keyword" },
+    { name = "id", type = "keyword" },
+    { name = "category", type = "keyword" },
     { name = "employees", type = "keyword" },
     { name = "city", type = "keyword" },
     { name = "address", type = "text" },
@@ -72,25 +70,25 @@ fields = [
 
 # Each source maps CSV columns to schema fields
 [[sources]]
-path = "data/norway.csv"
-defaults = { country_code = "NO" }
-mapping = { name = "organisasjonsnavn", org_number = "organisasjonsnummer", nace = "naeringskode1" }
+path = "data/companies_us.csv"
+defaults = { country = "US" }
+mapping = { name = "company_name", id = "ein", category = "naics_code" }
 
 [[sources]]
-path = "data/sweden.csv"
-defaults = { country_code = "SE" }
-mapping = { name = "företagsnamn", org_number = "organisationsnummer", nace = "sni_kod" }
+path = "data/companies_de.csv"
+defaults = { country = "DE" }
+mapping = { name = "firmenname", id = "handelsregisternummer", category = "wz_code" }
 
-# Reuse mappings for countries with the same CSV structure
+# Reuse mappings for sources with the same CSV structure
 [[sources]]
-path = "data/germany.csv"
-defaults = { country_code = "DE" }
-use_mapping = "eu_standard"
+path = "data/companies_uk.csv"
+defaults = { country = "UK" }
+use_mapping = "anglophone"
 
-[mappings.eu_standard]
+[mappings.anglophone]
 name = "company_name"
-org_number = "registration_number"
-nace = "nace_code"
+id = "registration_number"
+category = "sic_code"
 ```
 
 ## API
@@ -101,10 +99,10 @@ Fuzzy search with optional filters and sorting.
 
 ```bash
 # Basic fuzzy search
-curl 'localhost:8888/search?q=equinor&limit=10'
+curl 'localhost:8888/search?q=amazn&limit=10'
 
 # With filters
-curl 'localhost:8888/search?q=abax&country_code=NO&city=LARVIK'
+curl 'localhost:8888/search?q=stripe&country=US&city=SAN+FRANCISCO'
 
 # With numeric range
 curl 'localhost:8888/search?q=tech&employees_min=100&employees_max=5000'
@@ -118,7 +116,7 @@ curl 'localhost:8888/search?q=energy&sort_by=employees&sort_order=desc'
 Exact match lookup. Lightning fast.
 
 ```bash
-curl 'localhost:8888/lookup?country_code=NO&org_number=923609016'
+curl 'localhost:8888/lookup?country=US&id=123456789'
 ```
 
 ### `GET /stats`
@@ -149,7 +147,7 @@ When budget < index size, ruzz pre-warms the most important index pages (term di
 
 ## Performance
 
-Tested with 1.15M Norwegian companies (Brønnøysundregistrene open data):
+Tested on 1.15M records (single dataset):
 
 | Metric | Value |
 |---|---|
@@ -161,19 +159,27 @@ Tested with 1.15M Norwegian companies (Brønnøysundregistrene open data):
 | Fuzzy search (p99) | **< 12ms** |
 | Exact lookup | **< 0.1ms** |
 
-For comparison, Postgres `pg_trgm` on the same dataset: 2ms - 3000ms depending on query. The variance is the problem ruzz solves.
+Tested at scale on 54.6M records across 13 datasets:
+
+| Metric | Value |
+|---|---|
+| Import speed | **376 seconds** |
+| Index size | 29 GB |
+| Filtered fuzzy search | **5 - 40ms** |
+| Unfiltered fuzzy search | **45 - 280ms** |
+| Sort by numeric field | **10 - 33ms** |
+
+For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending on query. The variance is the problem ruzz solves.
 
 ## Why not just use...
 
-**Postgres pg_trgm?** — Great until you search "aba" and wait 3 seconds because the trigram posting lists are enormous. ruzz doesn't have pathological cases.
+**Postgres pg_trgm?** — Works until you hit a short or common query and wait 3 seconds. ruzz has no pathological cases — every query is bounded.
 
-**Elasticsearch?** — You need a JVM, a cluster, YAML files, and a therapist. ruzz is one binary.
+**Elasticsearch?** — Powerful, but you're running a JVM cluster with YAML config for what might be a single-binary problem.
 
-**MeiliSearch?** — Actually good! But RAM-only, no memory budget control, and you can't point it at a CSV.
+**MeiliSearch / Typesense?** — Both solid. But RAM-only (no memory budget), no CSV import, and MeiliSearch doesn't expose memory controls.
 
-**Typesense?** — Also good! Also RAM-only, also no CSV import, also priced by RAM tier.
-
-**SQLite FTS5?** — No fuzzy search. "protencon" won't find "PROTENCON".
+**SQLite FTS5?** — No fuzzy matching. Exact tokens only.
 
 ## Roadmap
 
@@ -182,18 +188,14 @@ For comparison, Postgres `pg_trgm` on the same dataset: 2ms - 3000ms depending o
 - [ ] HTTP streaming for large result sets
 - [ ] Phonetic matching (Soundex/Metaphone)
 - [ ] Custom scoring functions
-- [ ] Disk-based tree index with level-pinning (the real endgame)
+- [ ] Disk-optimized tree index for reduced memory footprint
 
 ## Built with
 
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — search engine library
-- [Axum](https://github.com/tokio-rs/axum) — web framework
-- [Rust](https://www.rust-lang.org/) — because life's too short for garbage collection pauses
+- [Tantivy](https://github.com/quickwit-oss/tantivy) — search engine library (the engine behind [Quickwit](https://quickwit.io))
+- [Axum](https://github.com/tokio-rs/axum) — async web framework
+- [Rust](https://www.rust-lang.org/)
 
 ## License
 
-MIT. Do whatever you want. If you build something cool with it, tell us.
-
----
-
-*Built by [Recursion Endeavours](https://recursion-endeavours.com). We make fast things faster.*
+MIT. Do whatever you want.
