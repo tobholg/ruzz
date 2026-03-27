@@ -429,6 +429,42 @@ async function doSearch() {
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+function setCopyButtonState(message, copied = false) {
+  const btn = document.getElementById('copy-llm-btn');
+  if (!btn) return;
+  btn.textContent = message;
+  btn.classList.toggle('copied', copied);
+}
+
+function legacyCopyText(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    return document.execCommand('copy');
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (!legacyCopyText(text)) {
+    throw new Error('Clipboard copy is not available in this browser');
+  }
+}
+
 // ── Docs tab ──
 async function buildDocs() {
   if (!statsData || !schema.length) return;
@@ -599,13 +635,15 @@ ${sampleResponse}
 Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\` is the relevance score (higher = better match). Fields with no data are omitted from the response.
 `;
 
-  document.getElementById('copy-llm-btn').addEventListener('click', () => {
-    navigator.clipboard.writeText(md).then(() => {
-      const btn = document.getElementById('copy-llm-btn');
-      btn.textContent = '✓ Copied!';
-      btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = '📋 Copy for LLM'; btn.classList.remove('copied'); }, 2000);
-    });
+  document.getElementById('copy-llm-btn').addEventListener('click', async () => {
+    try {
+      await copyText(md);
+      setCopyButtonState('✓ Copied!', true);
+    } catch {
+      setCopyButtonState('Copy failed');
+    } finally {
+      setTimeout(() => setCopyButtonState('📋 Copy for LLM'), 2000);
+    }
   });
 }
 
