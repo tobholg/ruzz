@@ -12,6 +12,9 @@ use tower_http::cors::CorsLayer;
 
 use crate::search::SearchEngine;
 
+const DEFAULT_SEARCH_LIMIT: usize = 20;
+const MAX_SEARCH_LIMIT: usize = 250;
+
 pub struct AppState {
     pub engine: SearchEngine,
     pub started_at: Instant,
@@ -91,7 +94,7 @@ async fn handle_search(
     Query(params): Query<SearchParams>,
 ) -> Json<serde_json::Value> {
     let query_text = params.q.unwrap_or_default();
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).clamp(1, MAX_SEARCH_LIMIT);
 
     let mut filters = params.extra.clone();
     filters.remove("limit");
@@ -204,15 +207,18 @@ async fn handle_stats(
             "available_memory_human": format_bytes(sys.available_memory()),
             "cpu_count": sys.cpus().len(),
         },
-        "schema": {
-            "fields": state.engine.config.schema.fields.iter().map(|f| {
-                serde_json::json!({
-                    "name": f.name,
-                    "type": format!("{:?}", f.field_type).to_lowercase(),
-                    "search": f.search.as_ref().map(|s| format!("{:?}", s).to_lowercase()),
-                })
-            }).collect::<Vec<_>>(),
-        },
+            "schema": {
+                "fields": state.engine.config.schema.fields.iter().map(|f| {
+                    let metadata = state.engine.field_metadata.get(&f.name);
+                    serde_json::json!({
+                        "name": f.name,
+                        "type": format!("{:?}", f.field_type).to_lowercase(),
+                        "search": f.search.as_ref().map(|s| format!("{:?}", s).to_lowercase()),
+                        "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
+                        "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
+                    })
+                }).collect::<Vec<_>>(),
+            },
     }))
 }
 
@@ -252,10 +258,21 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn format_duration(secs: u64) -> String {
+    let days = secs / 86_400;
     let hours = secs / 3600;
     let mins = (secs % 3600) / 60;
     let s = secs % 60;
-    if hours > 0 {
+    if days >= 60 {
+        let months = days / 30;
+        let rem_days = days % 30;
+        if rem_days > 0 {
+            format!("{}mo {}d", months, rem_days)
+        } else {
+            format!("{}mo", months)
+        }
+    } else if days > 0 {
+        format!("{}d {}h", days, hours % 24)
+    } else if hours > 0 {
         format!("{}h {}m {}s", hours, mins, s)
     } else if mins > 0 {
         format!("{}m {}s", mins, s)

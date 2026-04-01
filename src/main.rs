@@ -1,5 +1,6 @@
 mod config;
 mod dashboard;
+mod field_meta;
 mod import;
 mod memory;
 mod schema;

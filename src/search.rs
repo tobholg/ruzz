@@ -7,12 +7,18 @@ use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
 use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, Term};
 
 use crate::config::{Config, FieldType, SearchMode};
+use crate::field_meta::{
+    canonicalize_filter_value, json_boolean_value, load_stored_field_metadata,
+    runtime_metadata_for_field, RuntimeFieldMetadata,
+};
 
 pub struct SearchEngine {
     pub index: Index,
     pub reader: IndexReader,
     pub schema: Schema,
     pub field_map: HashMap<String, Field>,
+    pub field_configs: HashMap<String, crate::config::FieldConfig>,
+    pub field_metadata: HashMap<String, RuntimeFieldMetadata>,
     pub config: Arc<Config>,
 }
 
@@ -47,13 +53,24 @@ impl SearchEngine {
 
         let schema = index.schema();
         let mut field_map = HashMap::new();
+        let mut field_configs = HashMap::new();
         for fc in &config.schema.fields {
             if let Ok(field) = schema.get_field(&fc.name) {
                 field_map.insert(fc.name.clone(), field);
             }
+            field_configs.insert(fc.name.clone(), fc.clone());
         }
 
-        Ok(Self { index, reader, schema, field_map, config })
+        let stored_metadata = load_stored_field_metadata(&config.server.index_path)?;
+        let mut field_metadata = HashMap::new();
+        for fc in &config.schema.fields {
+            let meta = runtime_metadata_for_field(fc, stored_metadata.fields.get(&fc.name));
+            if !meta.values.is_empty() || meta.truncated {
+                field_metadata.insert(fc.name.clone(), meta);
+            }
+        }
+
+        Ok(Self { index, reader, schema, field_map, field_configs, field_metadata, config })
     }
 
     pub fn search(
@@ -76,10 +93,12 @@ impl SearchEngine {
 
         // Exact filters FIRST as MUST clauses
         for (key, value) in filters {
-            if let Some(&field) = self.field_map.get(key) {
-                let values: Vec<&str> = value.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            if let (Some(&field), Some(field_config)) = (self.field_map.get(key), self.field_configs.get(key)) {
+                let values: Vec<String> = value.split(',')
+                    .filter_map(|s| canonicalize_filter_value(&field_config.field_type, s))
+                    .collect();
                 if values.len() == 1 {
-                    let term = Term::from_field_text(field, values[0]);
+                    let term = Term::from_field_text(field, &values[0]);
                     let term_query = TermQuery::new(term, IndexRecordOption::Basic);
                     subqueries.push((Occur::Must, Box::new(term_query)));
                 } else if values.len() > 1 {
@@ -178,9 +197,16 @@ impl SearchEngine {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
                     let val = doc.get_first(field);
                     match fc.field_type {
-                        FieldType::Text | FieldType::Keyword => {
+                        FieldType::Text | FieldType::Keyword | FieldType::Enum => {
                             let text = val.and_then(|v| v.as_str()).unwrap_or("");
                             obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        }
+                        FieldType::Boolean => {
+                            if let Some(text) = val.and_then(|v| v.as_str()) {
+                                obj.insert(fc.name.clone(), json_boolean_value(text));
+                            } else {
+                                obj.insert(fc.name.clone(), serde_json::Value::Null);
+                            }
                         }
                         FieldType::Number => {
                             let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -242,10 +268,12 @@ impl SearchEngine {
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
         for (key, value) in filters {
-            if let Some(&field) = self.field_map.get(key) {
-                let term = Term::from_field_text(field, value);
-                let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                subqueries.push((Occur::Must, Box::new(term_query)));
+            if let (Some(&field), Some(field_config)) = (self.field_map.get(key), self.field_configs.get(key)) {
+                if let Some(normalized) = canonicalize_filter_value(&field_config.field_type, value) {
+                    let term = Term::from_field_text(field, &normalized);
+                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+                    subqueries.push((Occur::Must, Box::new(term_query)));
+                }
             }
         }
 
@@ -260,9 +288,16 @@ impl SearchEngine {
                 if let Ok(field) = self.schema.get_field(&fc.name) {
                     let val = doc.get_first(field);
                     match fc.field_type {
-                        FieldType::Text | FieldType::Keyword => {
+                        FieldType::Text | FieldType::Keyword | FieldType::Enum => {
                             let text = val.and_then(|v| v.as_str()).unwrap_or("");
                             obj.insert(fc.name.clone(), serde_json::Value::String(text.to_string()));
+                        }
+                        FieldType::Boolean => {
+                            if let Some(text) = val.and_then(|v| v.as_str()) {
+                                obj.insert(fc.name.clone(), json_boolean_value(text));
+                            } else {
+                                obj.insert(fc.name.clone(), serde_json::Value::Null);
+                            }
                         }
                         FieldType::Number => {
                             let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);

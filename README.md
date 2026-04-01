@@ -25,7 +25,7 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
 - **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
-- **🔎 Filters** — exact match on keywords, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by revenue desc? One query.
+- **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🖥 Web dashboard** — ships with a built-in search UI. Dark mode. Light mode.
 - **📊 Stats & health endpoints** — memory usage, index size, document count, uptime. Ready for monitoring and load balancers.
 
@@ -60,11 +60,12 @@ memory_budget = "2GB"  # or "50%", "100%", "unlimited"
 [schema]
 fields = [
     { name = "name", type = "text", search = "fuzzy" },
-    { name = "country", type = "keyword" },
+    { name = "country", type = "enum", values = ["US", "DE", "UK"] },
     { name = "id", type = "keyword" },
-    { name = "category", type = "keyword" },
+    { name = "category", type = "enum", values = "auto" },
     { name = "employees", type = "keyword" },
     { name = "city", type = "keyword" },
+    { name = "has_units", type = "boolean" },
     { name = "address", type = "text" },
 ]
 
@@ -91,6 +92,16 @@ id = "registration_number"
 category = "sic_code"
 ```
 
+Enum and boolean fields are indexed as exact-match filters with canonical uppercase values:
+
+```toml
+{ name = "currency", type = "enum", values = ["NOK", "SEK", "USD"] }
+{ name = "company_status", type = "enum", values = "auto", max_values = 128 }
+{ name = "is_active", type = "boolean" }
+```
+
+`values = "auto"` discovers low-cardinality enum values during import. The initial default cap is `128` distinct values per auto-enum field.
+
 ## API
 
 ### `GET /search`
@@ -113,7 +124,7 @@ curl 'localhost:8888/search?q=energy&sort_by=employees&sort_order=desc'
 
 ### `GET /lookup`
 
-Exact match lookup. Lightning fast.
+Exact match lookup. Lightning fast for keyword, enum, and boolean fields.
 
 ```bash
 curl 'localhost:8888/lookup?country=US&id=123456789'

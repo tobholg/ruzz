@@ -8,7 +8,7 @@ fields = [
     { name = "name", type = "text", search = "fuzzy" },
     { name = "country_code", type = "keyword" },
     { name = "org_number", type = "keyword" },
-    { name = "org_form", type = "keyword" },
+    { name = "org_form", type = "enum", values = "auto" },
     { name = "nace", type = "keyword" },
     { name = "nace_desc", type = "text" },
     { name = "employees", type = "keyword" },
@@ -19,8 +19,8 @@ fields = [
     { name = "city", type = "keyword" },
     { name = "municipality", type = "keyword" },
     { name = "sector_code", type = "keyword" },
-    { name = "bankrupt", type = "keyword" },
-    { name = "dissolving", type = "keyword" },
+    { name = "bankrupt", type = "boolean" },
+    { name = "dissolving", type = "boolean" },
 ]
 
 [[sources]]

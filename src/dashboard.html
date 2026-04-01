@@ -85,22 +85,83 @@
   @keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
   .advanced-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text); opacity: 0.5; margin-bottom: 0.75rem; }
+  .filter-toolbar { margin-bottom: 1rem; }
+  .filter-search-wrap { position: relative; }
+  .filter-search-icon { position: absolute; left: 0.85rem; top: 50%; transform: translateY(-50%); color: var(--text-dim); pointer-events: none; }
+  .filter-search { width: 100%; padding: 0.7rem 0.9rem 0.7rem 2.35rem; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-family: var(--font); font-size: 0.82rem; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+  .filter-search::placeholder { color: var(--text-dim); }
+  .filter-search:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
   .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .filters + .filters { margin-top: 0.75rem; }
-  .filter-group { display: flex; flex-direction: column; gap: 0.25rem; }
-  .filter-range-pair { display: flex; gap: 0.35rem; align-items: flex-end; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 0.35rem; }
-  .filter-range-pair .filter-input { border: none; background: transparent; width: 72px; padding: 0.4rem 0.5rem; }
-  .filter-range-pair .range-sep { color: var(--text-dim); font-size: 0.7rem; padding-bottom: 0.45rem; }
-  .filter-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.45; padding-left: 0.25rem; }
-  .filter-input { padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem; outline: none; width: 120px; transition: border-color 0.2s; }
-  .filter-input.narrow { width: 90px; }
-  .filter-input.wide { width: 150px; }
+  .filter-group { display: flex; flex-direction: column; gap: 0.25rem; width: 100%; min-width: 0; }
+  .filter-group.hidden { display: none; }
+  #sort-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(140px, 1fr); gap: 0.6rem; }
+  #filters-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.6rem; }
+  .filter-range-pair { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 0.1rem; align-items: center; width: 100%; min-height: 36px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 0 0.25rem; }
+  .filter-range-pair .filter-input { border: none; background: transparent; width: 100%; min-width: 0; min-height: 34px; padding: 0.45rem 0.45rem; }
+  .filter-range-pair .range-sep { color: var(--text-dim); font-size: 0.7rem; padding: 0; align-self: center; }
+  .filter-label { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.45; padding-left: 0.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .filter-input { min-height: 36px; width: 100%; min-width: 0; padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem; outline: none; transition: border-color 0.2s; }
+  .filter-input.narrow { width: 100%; }
+  .filter-input.wide { width: 100%; }
   .filter-input::placeholder { color: var(--text-dim); }
   .filter-input:focus { border-color: var(--border-focus); }
   select.filter-input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 2rem; cursor: pointer; }
+  .picker { position: relative; width: 100%; min-width: 0; }
+  .picker.wide { width: 100%; min-width: 0; }
+  .picker.narrow { width: 100%; min-width: 0; }
+  .picker.xwide { width: 100%; min-width: 0; }
+  .picker-hidden { position: absolute; inset: 0; width: 0; height: 0; opacity: 0; pointer-events: none; }
+  .picker-trigger { width: 100%; min-height: 36px; padding: 0.5rem 0.8rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.78rem; text-align: left; cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .picker-trigger:hover { border-color: var(--text-muted); }
+  .picker.open .picker-trigger { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .picker-trigger-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .picker-caret { flex-shrink: 0; color: var(--text-dim); }
+  .picker-menu { position: absolute; left: 0; right: 0; top: calc(100% + 0.4rem); z-index: 30; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 45px rgba(0,0,0,0.28); padding: 0.45rem; }
+  .picker-menu[hidden] { display: none; }
+  .picker-search-wrap-inner { position: relative; margin-bottom: 0.35rem; }
+  .picker-search-icon { position: absolute; left: 0.7rem; top: 50%; transform: translateY(-50%); color: var(--text-dim); pointer-events: none; }
+  .picker-search-input { width: 100%; padding: 0.6rem 0.75rem 0.6rem 2.05rem; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-family: var(--font); font-size: 0.78rem; outline: none; }
+  .picker-search-input:focus { border-color: var(--border-focus); }
+  .picker-options { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.2rem; }
+  .picker-option { width: 100%; padding: 0.6rem 0.7rem; border: none; border-radius: 9px; background: transparent; color: var(--text); font-family: var(--mono); font-size: 0.78rem; text-align: left; cursor: pointer; }
+  .picker-option:hover, .picker-option.active { background: var(--surface-2); }
+  .picker-option.hidden { display: none; }
+  .picker-empty { display: none; padding: 0.55rem 0.4rem 0.2rem 0.4rem; color: var(--text-dim); font-size: 0.76rem; }
+  .picker-empty.visible { display: block; }
+  .filters-empty { display: none; padding-top: 0.9rem; font-size: 0.78rem; color: var(--text-dim); }
+  .filters-empty.visible { display: block; }
+  .filters-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.9rem; flex-wrap: wrap; }
+  .filters-footer-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .reset-search-btn { display: inline-flex; align-items: center; min-height: 34px; padding: 0.55rem 0.9rem; border-radius: 10px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-family: var(--font); font-size: 0.78rem; cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s; }
+  .reset-search-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--surface-2); }
+  .filters-toggle { display: none; padding: 0.55rem 0.9rem; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.78rem; cursor: pointer; }
+  .filters-toggle.visible { display: inline-flex; }
+  .enum-details { margin-top: 0.2rem; }
+  .enum-details summary { cursor: pointer; color: var(--accent); font-size: 0.75rem; }
+  .enum-details-list { margin-top: 0.55rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
 
-  .query-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-muted); }
+  .query-meta { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1rem; font-size: 0.8rem; color: var(--text-muted); }
+  .query-stats { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+  .query-dot { color: var(--text-dim); }
+  .query-tools { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
   .query-time { font-family: var(--mono); color: var(--emerald); font-weight: 500; }
+  .view-toggle { padding: 0.42rem 0.72rem; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; }
+  .view-toggle:hover { border-color: var(--text-muted); }
+  .limit-control { position: relative; }
+  .limit-toggle { min-height: 32px; padding: 0.42rem 0.72rem; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; display: inline-flex; align-items: center; gap: 0.45rem; }
+  .limit-toggle:hover, .limit-control.open .limit-toggle { border-color: var(--text-muted); }
+  .limit-toggle-text { white-space: nowrap; }
+  .limit-menu { position: absolute; top: calc(100% + 0.45rem); right: 0; z-index: 35; width: min(240px, calc(100vw - 2rem)); padding: 0.6rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 45px rgba(0,0,0,0.28); }
+  .limit-menu[hidden] { display: none; }
+  .limit-title { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text); opacity: 0.5; margin-bottom: 0.55rem; }
+  .limit-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.45rem; margin-bottom: 0.55rem; }
+  .limit-input { min-height: 36px; width: 100%; padding: 0.5rem 0.7rem; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--mono); font-size: 0.8rem; outline: none; }
+  .limit-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .limit-apply { min-height: 36px; padding: 0.5rem 0.8rem; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; }
+  .limit-presets { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .limit-preset { min-height: 30px; padding: 0.35rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--mono); font-size: 0.74rem; cursor: pointer; }
+  .limit-preset.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
 
   .results { display: flex; flex-direction: column; gap: 0.5rem; }
   .result-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default; }
@@ -110,6 +171,7 @@
   .result-score { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px; }
   .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text); opacity: 0.7; }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
+  .result-meta.compact { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta-label { color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .tag { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; background: rgba(14,165,233,0.12); color: #38bdf8; }
   @media (prefers-color-scheme: light) { .tag { background: rgba(14,165,233,0.08); color: #0369a1; } }
@@ -143,9 +205,17 @@
     .stat-value { font-size: 0.95rem; }
     .filters { gap: 0.4rem; }
     .filter-input { width: 100% !important; }
-    .filter-group { flex: 1; min-width: calc(50% - 0.25rem); }
+    .filter-group { min-width: 0; }
+    #sort-row, #filters-row { grid-template-columns: 1fr; }
+    .picker, .picker.wide, .picker.narrow, .picker.xwide { min-width: 0; width: 100%; }
+    .query-meta { align-items: flex-start; flex-direction: column; }
+    .query-tools { width: 100%; justify-content: flex-start; }
+    .filters-footer { align-items: stretch; }
     .logo-tagline { display: none; }
     .logo-dot { display: none; }
+  }
+  @media (max-width: 920px) {
+    #filters-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -190,15 +260,55 @@
     </div>
 
     <div class="advanced-panel" id="advanced-panel">
-      <div class="advanced-title">Filters</div>
-      <div class="filters" id="filters-row"></div>
-      <div class="advanced-title" style="margin-top:1rem">Rerank by</div>
+      <div class="filter-toolbar">
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+          <input class="filter-search" id="filter-search" type="text" placeholder="Find field..." autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="advanced-title">Sort Results</div>
       <div class="filters" id="sort-row"></div>
+      <div class="advanced-title" style="margin-top:1rem">Filters</div>
+      <div class="filters" id="filters-row"></div>
+      <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
+      <div class="filters-footer">
+        <div class="filters-footer-actions">
+          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
+          <button class="filters-toggle" id="filters-toggle" type="button">Show more filters</button>
+        </div>
+      </div>
     </div>
 
     <div class="query-meta" id="query-meta" style="display:none">
-      <span><span id="result-count">0</span> results</span>
-      <span class="query-time" id="query-time">0ms</span>
+      <div class="query-stats">
+        <span><span id="result-count">0</span> results</span>
+        <span class="query-dot">·</span>
+        <span class="query-time" id="query-time">0ms</span>
+      </div>
+      <div class="query-tools">
+        <button class="view-toggle" id="view-toggle" type="button">Compressed view</button>
+        <div class="limit-control" id="limit-control">
+          <button class="limit-toggle" id="limit-toggle" type="button" aria-expanded="false">
+            <span class="limit-toggle-text" id="limit-toggle-text">30 results</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="limit-menu" id="limit-menu" hidden>
+            <div class="limit-title">Results Per Search</div>
+            <div class="limit-input-row">
+              <input class="limit-input" id="limit-input" type="number" min="1" max="250" step="1" value="30" inputmode="numeric">
+              <button class="limit-apply" id="limit-apply" type="button">Apply</button>
+            </div>
+            <div class="limit-presets" id="limit-presets">
+              <button class="limit-preset" type="button" data-limit="10">10</button>
+              <button class="limit-preset" type="button" data-limit="20">20</button>
+              <button class="limit-preset active" type="button" data-limit="30">30</button>
+              <button class="limit-preset" type="button" data-limit="50">50</button>
+              <button class="limit-preset" type="button" data-limit="100">100</button>
+              <button class="limit-preset" type="button" data-limit="250">250</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="results" id="results">
@@ -218,6 +328,14 @@ let schema = [];
 let fuzzyField = null;
 let statsData = null;
 let authToken = sessionStorage.getItem('ruzz_token') || '';
+const DEFAULT_VISIBLE_FILTERS = 12;
+const DEFAULT_RESULT_LIMIT = 30;
+const MIN_RESULT_LIMIT = 1;
+const MAX_RESULT_LIMIT = 250;
+let filtersExpanded = false;
+let compactResults = sessionStorage.getItem('ruzz_results_view') === 'compact';
+let resultLimit = loadStoredResultLimit();
+let lastSearchData = null;
 
 function authHeaders() {
   const h = {};
@@ -227,6 +345,16 @@ function authHeaders() {
 
 function authFetch(url) {
   return fetch(url, { headers: authHeaders() });
+}
+
+function clampResultLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_RESULT_LIMIT;
+  return Math.min(MAX_RESULT_LIMIT, Math.max(MIN_RESULT_LIMIT, parsed));
+}
+
+function loadStoredResultLimit() {
+  return clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
 }
 
 function showAuthPrompt() {
@@ -264,25 +392,60 @@ async function submitAuth() {
       </button>
     </div>
     <div class="advanced-panel" id="advanced-panel">
-      <div class="advanced-title">Filters</div>
-      <div class="filters" id="filters-row"></div>
-      <div class="advanced-title" style="margin-top:1rem">Rerank by</div>
+      <div class="filter-toolbar">
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+          <input class="filter-search" id="filter-search" type="text" placeholder="Find field..." autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="advanced-title">Sort Results</div>
       <div class="filters" id="sort-row"></div>
+      <div class="advanced-title" style="margin-top:1rem">Filters</div>
+      <div class="filters" id="filters-row"></div>
+      <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
+      <div class="filters-footer">
+        <div class="filters-footer-actions">
+          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
+          <button class="filters-toggle" id="filters-toggle" type="button">Show more filters</button>
+        </div>
+      </div>
     </div>
     <div class="query-meta" id="query-meta" style="display:none">
-      <span><span id="result-count">0</span> results</span>
-      <span class="query-time" id="query-time">0ms</span>
+      <div class="query-stats">
+        <span><span id="result-count">0</span> results</span>
+        <span class="query-dot">·</span>
+        <span class="query-time" id="query-time">0ms</span>
+      </div>
+      <div class="query-tools">
+        <button class="view-toggle" id="view-toggle" type="button">Compressed view</button>
+        <div class="limit-control" id="limit-control">
+          <button class="limit-toggle" id="limit-toggle" type="button" aria-expanded="false">
+            <span class="limit-toggle-text" id="limit-toggle-text">30 results</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="limit-menu" id="limit-menu" hidden>
+            <div class="limit-title">Results Per Search</div>
+            <div class="limit-input-row">
+              <input class="limit-input" id="limit-input" type="number" min="1" max="250" step="1" value="30" inputmode="numeric">
+              <button class="limit-apply" id="limit-apply" type="button">Apply</button>
+            </div>
+            <div class="limit-presets" id="limit-presets">
+              <button class="limit-preset" type="button" data-limit="10">10</button>
+              <button class="limit-preset" type="button" data-limit="20">20</button>
+              <button class="limit-preset active" type="button" data-limit="30">30</button>
+              <button class="limit-preset" type="button" data-limit="50">50</button>
+              <button class="limit-preset" type="button" data-limit="100">100</button>
+              <button class="limit-preset" type="button" data-limit="250">250</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="results" id="results">
       <div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Connecting...</div></div>
     </div>`;
 
-  // Re-bind settings toggle
-  document.getElementById('settings-btn').addEventListener('click', () => {
-    document.getElementById('advanced-panel').classList.toggle('open');
-    document.getElementById('settings-btn').classList.toggle('active');
-  });
-  document.getElementById('search').addEventListener('input', scheduleSearch);
+  bindSearchTabEvents();
 
   await init();
 }
@@ -298,11 +461,40 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
-// ── Settings toggle ──
-document.getElementById('settings-btn').addEventListener('click', () => {
-  document.getElementById('advanced-panel').classList.toggle('open');
-  document.getElementById('settings-btn').classList.toggle('active');
-});
+function bindSearchTabEvents() {
+  document.getElementById('settings-btn')?.addEventListener('click', () => {
+    document.getElementById('advanced-panel')?.classList.toggle('open');
+    document.getElementById('settings-btn')?.classList.toggle('active');
+  });
+  document.getElementById('search')?.addEventListener('input', scheduleSearch);
+  document.getElementById('filter-search')?.addEventListener('input', applyFilterFieldSearch);
+  document.getElementById('filters-toggle')?.addEventListener('click', () => {
+    filtersExpanded = !filtersExpanded;
+    applyFilterFieldSearch();
+  });
+  document.getElementById('reset-search-btn')?.addEventListener('click', resetSearchState);
+  document.getElementById('view-toggle')?.addEventListener('click', () => {
+    compactResults = !compactResults;
+    sessionStorage.setItem('ruzz_results_view', compactResults ? 'compact' : 'full');
+    updateViewToggle();
+    if (lastSearchData) renderResults(lastSearchData);
+  });
+  document.getElementById('limit-toggle')?.addEventListener('click', () => {
+    const opening = document.getElementById('limit-menu')?.hidden !== false;
+    closeLimitMenu();
+    if (opening) openLimitMenu();
+  });
+  document.getElementById('limit-input')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') applyResultLimit();
+    if (event.key === 'Escape') closeLimitMenu();
+  });
+  document.getElementById('limit-apply')?.addEventListener('click', applyResultLimit);
+  document.querySelectorAll('#limit-presets .limit-preset').forEach(button => {
+    button.addEventListener('click', () => applyResultLimit(button.dataset.limit));
+  });
+  updateViewToggle();
+  updateLimitControls();
+}
 
 // ── Stats + init ──
 async function init() {
@@ -325,10 +517,13 @@ async function init() {
 }
 
 function buildSearchTab() {
-    buildFilters();
-    buildSort();
-    document.getElementById('results').innerHTML =
-      `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData.documents).toLocaleString()} records</div></div>`;
+  filtersExpanded = false;
+  lastSearchData = null;
+  buildFilters();
+  buildSort();
+  updateViewToggle();
+  updateLimitControls();
+  renderIdleResultsState();
 }
 
 function updateStats(d) {
@@ -348,13 +543,11 @@ function buildFilters() {
   const row = document.getElementById('filters-row'); row.innerHTML = '';
   for (const field of schema) {
     if (field.search === 'fuzzy') continue;
-    if (field.type === 'keyword') {
-      const group = el('div', 'filter-group'); group.appendChild(label(field.name));
-      const input = el('input', 'filter-input'); input.type = 'text'; input.placeholder = field.name; input.dataset.field = field.name; input.dataset.kind = 'exact'; input.autocomplete = 'off';
-      input.addEventListener('input', scheduleSearch); group.appendChild(input); row.appendChild(group);
-    } else if (field.type === 'number') {
-      const g = el('div', 'filter-group');
-      g.appendChild(label(field.name));
+    const group = el('div', 'filter-group');
+    group.dataset.fieldLabel = formatFieldName(field.name).toLowerCase();
+    group.appendChild(label(field.name));
+
+    if (field.type === 'number') {
       const pair = el('div', 'filter-range-pair');
       const minInp = el('input', 'filter-input'); minInp.type = 'number'; minInp.placeholder = 'min'; minInp.dataset.field = field.name + '_min'; minInp.dataset.kind = 'range';
       minInp.addEventListener('input', scheduleSearch);
@@ -362,69 +555,414 @@ function buildFilters() {
       const maxInp = el('input', 'filter-input'); maxInp.type = 'number'; maxInp.placeholder = 'max'; maxInp.dataset.field = field.name + '_max'; maxInp.dataset.kind = 'range';
       maxInp.addEventListener('input', scheduleSearch);
       pair.appendChild(minInp); pair.appendChild(sep); pair.appendChild(maxInp);
-      g.appendChild(pair); row.appendChild(g);
+      group.appendChild(pair);
+    } else if (field.type === 'boolean') {
+      group.appendChild(buildPicker({
+        fieldName: field.name,
+        kind: 'exact',
+        width: 'wide',
+      }, [
+        ['', 'Any'],
+        ['TRUE', 'True'],
+        ['FALSE', 'False'],
+      ]));
+    } else if (field.type === 'enum' && Array.isArray(field.values) && field.values.length && !field.values_truncated) {
+      group.appendChild(buildPicker({
+        fieldName: field.name,
+        kind: 'exact',
+        width: 'wide',
+        searchable: field.values.length > 8,
+        searchPlaceholder: `Search ${formatFieldName(field.name)}...`,
+      }, [['', 'Any'], ...field.values.map(value => [value, value])]));
+    } else {
+      const input = el('input', 'filter-input');
+      input.type = 'text';
+      input.placeholder = field.name;
+      input.dataset.field = field.name;
+      input.dataset.kind = 'exact';
+      input.autocomplete = 'off';
+      input.addEventListener('input', scheduleSearch);
+      group.appendChild(input);
     }
+
+    row.appendChild(group);
   }
+  applyFilterFieldSearch();
 }
 
 function buildSort() {
   const row = document.getElementById('sort-row'); row.innerHTML = '';
   const gField = el('div', 'filter-group'); gField.appendChild(label('Field'));
-  const select = document.createElement('select'); select.className = 'filter-input wide'; select.id = 'sort-by';
-  const defaultOpt = document.createElement('option'); defaultOpt.value = ''; defaultOpt.textContent = 'Relevance'; select.appendChild(defaultOpt);
-  for (const field of schema) { if (field.search === 'fuzzy') continue; const opt = document.createElement('option'); opt.value = field.name; opt.textContent = field.name.replace(/_/g, ' '); select.appendChild(opt); }
-  select.addEventListener('change', scheduleSearch); gField.appendChild(select); row.appendChild(gField);
+  const fieldOptions = [['', 'Relevance'], ...schema.filter(field => field.search !== 'fuzzy').map(field => [field.name, formatFieldName(field.name)])];
+  gField.appendChild(buildPicker({
+    id: 'sort-by',
+    width: 'xwide',
+    searchable: true,
+    searchPlaceholder: 'Search fields...',
+  }, fieldOptions));
+  row.appendChild(gField);
   const gOrder = el('div', 'filter-group'); gOrder.appendChild(label('Order'));
-  const orderSel = document.createElement('select'); orderSel.className = 'filter-input narrow'; orderSel.id = 'sort-order';
-  orderSel.innerHTML = '<option value="desc">↓ Desc</option><option value="asc">↑ Asc</option>';
-  orderSel.addEventListener('change', scheduleSearch); gOrder.appendChild(orderSel); row.appendChild(gOrder);
+  gOrder.appendChild(buildPicker({
+    id: 'sort-order',
+    width: 'narrow',
+    initialValue: 'desc',
+  }, [['desc', '↓ Desc'], ['asc', '↑ Asc']]));
+  row.appendChild(gOrder);
 }
 
 function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
-function label(text) { const s = el('span', 'filter-label'); s.textContent = text.replace(/_/g, ' '); return s; }
+function label(text) {
+  const formatted = formatFieldName(text);
+  const s = el('span', 'filter-label');
+  s.textContent = formatted;
+  s.title = formatted;
+  return s;
+}
+function formatFieldName(text) { return text.replace(/_/g, ' '); }
+
+function buildPicker(config, options) {
+  const picker = el('div', `picker ${config.width || 'wide'}`);
+  picker.dataset.picker = 'true';
+
+  const hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.className = 'filter-input picker-hidden';
+  if (config.id) hidden.id = config.id;
+  if (config.fieldName) hidden.dataset.field = config.fieldName;
+  if (config.kind) hidden.dataset.kind = config.kind;
+  hidden.value = config.initialValue || '';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'picker-trigger';
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.innerHTML = `
+    <span class="picker-trigger-text"></span>
+    <svg class="picker-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+  `;
+
+  const menu = el('div', 'picker-menu');
+  menu.hidden = true;
+
+  let searchInput = null;
+  if (config.searchable) {
+    const searchWrap = el('div', 'picker-search-wrap-inner');
+    searchWrap.innerHTML = `
+      <svg class="picker-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+      <input class="picker-search-input" type="text" autocomplete="off" spellcheck="false" placeholder="${esc(config.searchPlaceholder || 'Search...')}">
+    `;
+    searchInput = searchWrap.querySelector('input');
+    menu.appendChild(searchWrap);
+  }
+
+  const optionsWrap = el('div', 'picker-options');
+  const emptyState = el('div', 'picker-empty');
+  emptyState.textContent = 'No matches.';
+
+  options.forEach(([value, labelText]) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'picker-option';
+    option.dataset.value = value;
+    option.dataset.label = labelText;
+    option.dataset.search = String(labelText).toLowerCase();
+    option.textContent = labelText;
+    if (value === hidden.value) option.classList.add('active');
+    option.addEventListener('click', () => {
+      hidden.value = value;
+      optionsWrap.querySelectorAll('.picker-option').forEach(btn => btn.classList.toggle('active', btn === option));
+      updatePickerTrigger(trigger, labelText);
+      closePicker(picker);
+      hidden.dispatchEvent(new Event('change'));
+      scheduleSearch();
+    });
+    optionsWrap.appendChild(option);
+  });
+
+  hidden.addEventListener('change', () => {
+    const selected = [...optionsWrap.querySelectorAll('.picker-option')].find(btn => btn.dataset.value === hidden.value)
+      || optionsWrap.querySelector('.picker-option');
+    if (selected) {
+      optionsWrap.querySelectorAll('.picker-option').forEach(btn => btn.classList.toggle('active', btn === selected));
+      updatePickerTrigger(trigger, selected.dataset.label);
+    }
+  });
+
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      const needle = searchInput.value.trim().toLowerCase();
+      let visible = 0;
+      optionsWrap.querySelectorAll('.picker-option').forEach(option => {
+        const matches = !needle || option.dataset.search.includes(needle);
+        option.classList.toggle('hidden', !matches);
+        if (matches) visible += 1;
+      });
+      emptyState.classList.toggle('visible', visible === 0);
+    });
+  }
+
+  trigger.addEventListener('click', () => {
+    const opening = !picker.classList.contains('open');
+    closeAllPickers();
+    if (opening) openPicker(picker, searchInput);
+  });
+
+  menu.appendChild(optionsWrap);
+  menu.appendChild(emptyState);
+  picker.appendChild(hidden);
+  picker.appendChild(trigger);
+  picker.appendChild(menu);
+
+  hidden.dispatchEvent(new Event('change'));
+  return picker;
+}
+
+function updatePickerTrigger(trigger, label) {
+  trigger.querySelector('.picker-trigger-text').textContent = label || 'Select';
+}
+
+function openPicker(picker, searchInput) {
+  picker.classList.add('open');
+  const menu = picker.querySelector('.picker-menu');
+  const trigger = picker.querySelector('.picker-trigger');
+  if (menu) menu.hidden = false;
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+  if (searchInput) {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+    searchInput.focus();
+  }
+}
+
+function closePicker(picker) {
+  picker.classList.remove('open');
+  const menu = picker.querySelector('.picker-menu');
+  const trigger = picker.querySelector('.picker-trigger');
+  if (menu) menu.hidden = true;
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function closeAllPickers() {
+  document.querySelectorAll('.picker.open').forEach(closePicker);
+}
+
+function renderIdleResultsState() {
+  document.getElementById('results').innerHTML =
+    `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData.documents).toLocaleString()} records</div></div>`;
+  document.getElementById('query-meta').style.display = 'none';
+}
+
+function openLimitMenu() {
+  const control = document.getElementById('limit-control');
+  const menu = document.getElementById('limit-menu');
+  const toggle = document.getElementById('limit-toggle');
+  const input = document.getElementById('limit-input');
+  if (!control || !menu || !toggle || !input) return;
+  control.classList.add('open');
+  menu.hidden = false;
+  toggle.setAttribute('aria-expanded', 'true');
+  input.value = String(resultLimit);
+  input.focus();
+  input.select();
+}
+
+function closeLimitMenu() {
+  const control = document.getElementById('limit-control');
+  const menu = document.getElementById('limit-menu');
+  const toggle = document.getElementById('limit-toggle');
+  control?.classList.remove('open');
+  if (menu) menu.hidden = true;
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function updateLimitControls() {
+  document.getElementById('limit-toggle-text').textContent = `${resultLimit} results`;
+  const input = document.getElementById('limit-input');
+  if (input) input.value = String(resultLimit);
+  document.querySelectorAll('#limit-presets .limit-preset').forEach(button => {
+    button.classList.toggle('active', Number.parseInt(button.dataset.limit || '', 10) === resultLimit);
+  });
+}
+
+function applyResultLimit(nextValue) {
+  const input = document.getElementById('limit-input');
+  const nextLimit = clampResultLimit(nextValue ?? input?.value ?? resultLimit);
+  const changed = nextLimit !== resultLimit;
+  resultLimit = nextLimit;
+  sessionStorage.setItem('ruzz_result_limit', String(resultLimit));
+  updateLimitControls();
+  closeLimitMenu();
+  if (changed) doSearch();
+}
+
+function resetSearchState() {
+  document.getElementById('search').value = '';
+  document.getElementById('filter-search').value = '';
+  document.querySelectorAll('#filters-row .filter-input').forEach(input => {
+    input.value = '';
+    input.dispatchEvent(new Event('change'));
+  });
+  const sortBy = document.getElementById('sort-by');
+  const sortOrder = document.getElementById('sort-order');
+  if (sortBy) {
+    sortBy.value = '';
+    sortBy.dispatchEvent(new Event('change'));
+  }
+  if (sortOrder) {
+    sortOrder.value = 'desc';
+    sortOrder.dispatchEvent(new Event('change'));
+  }
+  filtersExpanded = false;
+  compactResults = false;
+  sessionStorage.setItem('ruzz_results_view', 'full');
+  resultLimit = DEFAULT_RESULT_LIMIT;
+  sessionStorage.setItem('ruzz_result_limit', String(resultLimit));
+  lastSearchData = null;
+  closeAllPickers();
+  closeLimitMenu();
+  updateViewToggle();
+  updateLimitControls();
+  applyFilterFieldSearch();
+  renderIdleResultsState();
+  document.getElementById('search')?.focus();
+}
+
+function applyFilterFieldSearch() {
+  const needle = (document.getElementById('filter-search')?.value || '').trim().toLowerCase();
+  const groups = [...document.querySelectorAll('#filters-row .filter-group')];
+  let visible = 0;
+  let matched = 0;
+  groups.forEach((group, index) => {
+    const matches = !needle || group.dataset.fieldLabel.includes(needle);
+    if (matches) matched += 1;
+    const collapsed = !needle && !filtersExpanded && index >= DEFAULT_VISIBLE_FILTERS;
+    const isVisible = matches && !collapsed;
+    group.classList.toggle('hidden', !isVisible);
+    if (isVisible) visible += 1;
+  });
+  document.getElementById('filters-empty')?.classList.toggle('visible', matched === 0 && schema.some(field => field.search !== 'fuzzy'));
+  const toggle = document.getElementById('filters-toggle');
+  const shouldShowToggle = !needle && groups.length > DEFAULT_VISIBLE_FILTERS;
+  toggle?.classList.toggle('visible', shouldShowToggle);
+  if (toggle) {
+    toggle.textContent = filtersExpanded ? 'Show fewer filters' : `Show ${groups.length - DEFAULT_VISIBLE_FILTERS} more filters`;
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element)) return;
+  if (!event.target.closest('.picker')) closeAllPickers();
+  if (!event.target.closest('.limit-control')) closeLimitMenu();
+});
 
 // ── Search ──
 let debounceTimer = null;
-document.getElementById('search').addEventListener('input', scheduleSearch);
 function scheduleSearch() { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); }
+function updateViewToggle() {
+  const button = document.getElementById('view-toggle');
+  if (!button) return;
+  button.textContent = compactResults ? 'Full view' : 'Compressed view';
+}
+
+function formatResultNumber(value) {
+  const num = typeof value === 'number' ? value : parseFloat(value);
+  if (isNaN(num)) return null;
+  return num.toLocaleString();
+}
+
+function buildResultMetaItems(record, nameField) {
+  return schema.filter(field => field.name !== nameField).map(field => {
+    const label = formatFieldName(field.name);
+    const value = record[field.name];
+    if (field.type === 'boolean') {
+      if (value == null) return null;
+      return `${label}: ${value ? 'True' : 'False'}`;
+    }
+    if (value == null || value === '') return null;
+    if (field.type === 'number') {
+      const formatted = formatResultNumber(value);
+      if (!formatted) return null;
+      return `${label}: ${formatted}`;
+    }
+    return `${label}: ${String(value)}`;
+  }).filter(Boolean);
+}
+
+function renderFullMeta(field, value) {
+  if (field.type === 'boolean') {
+    if (value === true) return `<span style="color:var(--amber)">⚠ ${esc(formatFieldName(field.name))}</span>`;
+    if (value === false || value == null) return '';
+    return `<span><span class="tag">${esc(String(value))}</span> <span class="meta-label">${esc(formatFieldName(field.name))}</span></span>`;
+  }
+  if (value == null || value === '') return '';
+  if (field.type === 'keyword' || field.type === 'enum') return `<span><span class="tag">${esc(String(value))}</span> <span class="meta-label">${esc(formatFieldName(field.name))}</span></span>`;
+  if (field.type === 'number') {
+    const formatted = formatResultNumber(value);
+    if (!formatted || formatted === '0') return '';
+    return `<span><span class="meta-label">${esc(formatFieldName(field.name))}</span> ${formatted}</span>`;
+  }
+  return `<span><span class="meta-label">${esc(formatFieldName(field.name))}</span> ${esc(String(value))}</span>`;
+}
+
+function renderResults(data) {
+  const container = document.getElementById('results');
+  if (!data.results || data.results.length === 0) {
+    container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
+    return;
+  }
+
+  const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
+  container.innerHTML = data.results.map(record => {
+    const name = record[nameField] || '';
+    const score = record._score?.toFixed(1) || '—';
+    const metaMarkup = compactResults
+      ? (() => {
+          const items = buildResultMetaItems(record, nameField);
+          return items.length ? `<div class="result-meta compact" title="${esc(items.join(' • '))}">${esc(items.join(' · '))}</div>` : '';
+        })()
+      : (() => {
+          const html = schema
+            .filter(field => field.name !== nameField)
+            .map(field => renderFullMeta(field, record[field.name]))
+            .filter(Boolean)
+            .join('');
+          return html ? `<div class="result-meta">${html}</div>` : '';
+        })();
+    return `<div class="result-card"><div class="result-header"><span class="result-name">${esc(name)}</span><span class="result-score">${score}</span></div>${metaMarkup}</div>`;
+  }).join('');
+}
 
 async function doSearch() {
   const q = document.getElementById('search').value.trim();
   const params = new URLSearchParams();
   if (q) params.set('q', q);
-  params.set('limit', '30');
+  params.set('limit', String(resultLimit));
   let hasAnyFilter = false;
   document.querySelectorAll('#filters-row .filter-input').forEach(input => {
     const val = input.value.trim(); if (!val) return; hasAnyFilter = true;
-    params.set(input.dataset.field, input.dataset.kind === 'exact' ? val.toUpperCase() : val);
+    params.set(input.dataset.field, val);
   });
   const sortBy = document.getElementById('sort-by')?.value;
   const sortOrder = document.getElementById('sort-order')?.value;
   if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder || 'desc'); }
   if (!q && !hasAnyFilter && !sortBy) {
-    document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search</div></div>';
-    document.getElementById('query-meta').style.display = 'none'; return;
+    lastSearchData = null;
+    renderIdleResultsState();
+    updateViewToggle();
+    return;
   }
   try {
     const res = await authFetch(`${API}/search?${params}`); const data = await res.json();
+    lastSearchData = data;
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
-    const container = document.getElementById('results');
-    if (!data.results || data.results.length === 0) { container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>'; return; }
-    const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
-    container.innerHTML = data.results.map(r => {
-      const name = r[nameField] || ''; const score = r._score?.toFixed(1) || '—';
-      const metaHtml = schema.filter(f => f.name !== nameField).map(f => {
-        const val = r[f.name]; if (!val || val === 'false') return '';
-        if (val === 'true') return `<span style="color:var(--amber)">⚠ ${esc(f.name.replace(/_/g, ' '))}</span>`;
-        if (f.type === 'keyword') return `<span><span class="tag">${esc(val)}</span> <span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span></span>`;
-        if (f.type === 'number') { const num = typeof val === 'number' ? val : parseFloat(val); if (isNaN(num) || num === 0) return ''; return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${num.toLocaleString()}</span>`; }
-        return `<span><span class="meta-label">${esc(f.name.replace(/_/g, ' '))}</span> ${esc(val)}</span>`;
-      }).filter(Boolean).join('');
-      return `<div class="result-card"><div class="result-header"><span class="result-name">${esc(name)}</span><span class="result-score">${score}</span></div><div class="result-meta">${metaHtml}</div></div>`;
-    }).join('');
-  } catch { document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>'; }
+    updateViewToggle();
+    renderResults(data);
+  } catch {
+    lastSearchData = null;
+    document.getElementById('results').innerHTML = '<div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Search failed</div></div>';
+  }
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -465,65 +1003,126 @@ async function copyText(text) {
   }
 }
 
+function renderFieldValues(field) {
+  if (field.type === 'boolean') return '<code>TRUE</code>, <code>FALSE</code>';
+  if (!Array.isArray(field.values) || field.values.length === 0) return '—';
+  if (field.values_truncated) {
+    const preview = field.values.slice(0, 6).map(value => `<code>${esc(value)}</code>`).join(', ');
+    return `${preview}${preview ? ', ' : ''}…`;
+  }
+  if (field.values.length <= 6) {
+    return field.values.map(value => `<code>${esc(value)}</code>`).join(', ');
+  }
+  const preview = field.values.slice(0, 4).map(value => `<code>${esc(value)}</code>`).join(', ');
+  const full = field.values.map(value => `<code>${esc(value)}</code>`).join('');
+  return `
+    <div>${preview}, …</div>
+    <details class="enum-details">
+      <summary>Show all ${field.values.length} values</summary>
+      <div class="enum-details-list">${full}</div>
+    </details>
+  `;
+}
+
+function fieldValuesMarkdown(field) {
+  if (field.type === 'boolean') return '`TRUE`, `FALSE`';
+  if (!Array.isArray(field.values) || field.values.length === 0) return '—';
+  if (field.values_truncated) {
+    const preview = field.values.slice(0, 6).map(value => `\`${value}\``).join(', ');
+    return `${preview}${preview ? ', ' : ''}…`;
+  }
+  return field.values.map(value => `\`${value}\``).join(', ');
+}
+
+function describeExactField(field) {
+  if (field.type === 'boolean') return 'Boolean filter. Allowed values: <code>TRUE</code> or <code>FALSE</code>.';
+  if (field.type === 'enum' && Array.isArray(field.values) && field.values.length) {
+    const rendered = field.values.slice(0, 6).map(value => `<code>${esc(value)}</code>`).join(', ');
+    return `Enum filter.${rendered ? ` Allowed values: ${rendered}${field.values_truncated ? ', …' : ''}.` : ''}`;
+  }
+  return `Exact filter. Comma-separated for OR: <code>${field.name}=A,B,C</code>`;
+}
+
+function describeExactFieldMarkdown(field) {
+  if (field.type === 'boolean') return 'Boolean filter. Allowed values: `TRUE` or `FALSE`.';
+  if (field.type === 'enum' && Array.isArray(field.values) && field.values.length) {
+    const rendered = field.values.slice(0, 6).map(value => `\`${value}\``).join(', ');
+    return `Enum filter.${rendered ? ` Allowed values: ${rendered}${field.values_truncated ? ', …' : ''}.` : ''}`;
+  }
+  return `Exact filter. Comma-separated for OR: \`${field.name}=A,B,C\``;
+}
+
+function sampleExactValue(field, sample) {
+  if (!field) return '';
+  const value = sample?.[field.name];
+  if (field.type === 'boolean') {
+    return value === true ? 'TRUE' : (value === false ? 'FALSE' : 'TRUE');
+  }
+  if (value !== undefined && value !== null && value !== '') return value;
+  if (Array.isArray(field.values) && field.values.length) return field.values[0];
+  return 'VALUE';
+}
+
 // ── Docs tab ──
 async function buildDocs() {
   if (!statsData || !schema.length) return;
   const baseUrl = window.location.origin;
   const fields = schema;
-  const keywordFields = fields.filter(f => f.type === 'keyword').map(f => f.name);
+  const exactFields = fields.filter(f => ['keyword', 'enum', 'boolean'].includes(f.type));
   const numberFields = fields.filter(f => f.type === 'number').map(f => f.name);
   const fuzzyFields = fields.filter(f => f.search === 'fuzzy').map(f => f.name);
   const fuzzyName = fuzzyFields[0] || 'name';
-  const firstKeyword = keywordFields[0] || '';
+  const firstExactField = exactFields[0] || null;
+  const secondExactField = exactFields[1] || null;
   const firstNumber = numberFields[0] || '';
 
-  // Fetch a live sample to generate realistic examples
   let sample = null;
-  let sampleQuery = '';
   try {
-    // Try to get a result with data by sorting by the first number field
     const sortParam = firstNumber ? `&sort_by=${firstNumber}&sort_order=desc` : '';
     const res = await authFetch(`${API}/search?limit=1${sortParam}`);
     const data = await res.json();
     if (data.results?.length) sample = data.results[0];
   } catch {}
 
-  // Build example values from the sample
-  const sv = (field) => sample?.[field] || '';
+  const sv = (field) => sample && sample[field] !== undefined && sample[field] !== null ? sample[field] : '';
   const exFuzzy = sv(fuzzyName) ? sv(fuzzyName).split(/\s+/)[0].toLowerCase() : 'test';
-  const exKeyword = sv(firstKeyword) || 'VALUE';
-  const exKeyword2 = firstKeyword && keywordFields[1] ? sv(keywordFields[1]) : '';
+  const exExactValue = sampleExactValue(firstExactField, sample);
+  const exExactValue2 = sampleExactValue(secondExactField, sample) || 'OTHER';
+  const lookupParams = exactFields.slice(0, 2)
+    .map(field => {
+      const value = sampleExactValue(field, sample);
+      return value ? `${field.name}=${encodeURIComponent(value)}` : '';
+    })
+    .filter(Boolean)
+    .join('&');
 
-  // Build lookup example from sample keyword values
-  const lookupParams = keywordFields.slice(0, 2).map(f => sv(f) ? `${f}=${encodeURIComponent(sv(f))}` : '').filter(Boolean).join('&');
-
-  // Example response — always show all schema fields
   const fullSample = {};
   for (const f of fields) {
     if (sample && sample[f.name] !== undefined) {
       fullSample[f.name] = sample[f.name];
-    } else if (f.type === 'number') {
+    } else if (f.type === 'number' || f.type === 'boolean') {
       fullSample[f.name] = null;
     } else {
-      fullSample[f.name] = "";
+      fullSample[f.name] = '';
     }
   }
   fullSample['_score'] = sample?._score || 0;
   const sampleResponse = JSON.stringify({ took_ms: 3.5, total: 1, results: [fullSample] }, null, 2);
 
-  // Build examples using real field names and values
   const examples = [];
-  if (fuzzyFields.length && firstKeyword) examples.push(`# Fuzzy search with filter\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)}&limit=10`);
-  if (keywordFields.length >= 2) examples.push(`# Multi-value filter\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)},${encodeURIComponent(exKeyword2 || 'OTHER')}&limit=20`);
+  if (fuzzyFields.length && firstExactField) examples.push(`# Fuzzy search with filter\nGET /search?q=${exFuzzy}&${firstExactField.name}=${encodeURIComponent(exExactValue)}&limit=10`);
+  if (firstExactField && secondExactField) examples.push(`# Multi-value filter\nGET /search?q=${exFuzzy}&${firstExactField.name}=${encodeURIComponent(exExactValue)},${encodeURIComponent(exExactValue2)}&limit=20`);
   if (firstNumber) examples.push(`# Sort by ${firstNumber} (browse mode)\nGET /search?sort_by=${firstNumber}&sort_order=desc&limit=20`);
-  if (firstNumber && firstKeyword) examples.push(`# Range filter + sort\nGET /search?q=${exFuzzy}&${firstNumber}_min=1000&sort_by=${firstNumber}&sort_order=desc&limit=10`);
-  if (keywordFields.length && numberFields.length >= 2) examples.push(`# Combined filters\nGET /search?q=${exFuzzy}&${firstKeyword}=${encodeURIComponent(exKeyword)}&${numberFields[0]}_min=100&sort_by=${numberFields[1] || numberFields[0]}&sort_order=desc&limit=10`);
+  if (firstNumber && firstExactField) examples.push(`# Range filter + sort\nGET /search?q=${exFuzzy}&${firstNumber}_min=1000&${firstExactField.name}=${encodeURIComponent(exExactValue)}&sort_by=${firstNumber}&sort_order=desc&limit=10`);
+  if (firstExactField && numberFields.length >= 2) examples.push(`# Combined filters\nGET /search?q=${exFuzzy}&${firstExactField.name}=${encodeURIComponent(exExactValue)}&${numberFields[0]}_min=100&sort_by=${numberFields[1] || numberFields[0]}&sort_order=desc&limit=10`);
 
   const examplesHtml = examples.map(e => esc(e)).join('\n\n');
   const examplesMd = examples.join('\n\n');
-
   const fieldRows = fields.map(f =>
-    `<tr><td><code>${f.name}</code></td><td>${f.type}</td><td>${f.search || '—'}</td></tr>`
+    `<tr><td><code>${f.name}</code></td><td>${f.type}</td><td>${f.search || '—'}</td><td>${renderFieldValues(f)}</td></tr>`
+  ).join('');
+  const exactParamRows = exactFields.map(f =>
+    `<tr><td><code>${f.name}</code></td><td>${describeExactField(f)}</td></tr>`
   ).join('');
 
   document.getElementById('docs-content').innerHTML = `
@@ -537,7 +1136,7 @@ async function buildDocs() {
     ${authToken ? '<p><strong>Authentication:</strong> Include <code>Authorization: Bearer &lt;token&gt;</code> header with every request, or append <code>?token=&lt;token&gt;</code> to the URL.</p>' : ''}
 
     <h2>Schema</h2>
-    <table><thead><tr><th>Field</th><th>Type</th><th>Search</th></tr></thead><tbody>${fieldRows}</tbody></table>
+    <table><thead><tr><th>Field</th><th>Type</th><th>Search</th><th>Values</th></tr></thead><tbody>${fieldRows}</tbody></table>
 
     <h2>Endpoints</h2>
 
@@ -549,10 +1148,10 @@ async function buildDocs() {
       <thead><tr><th>Param</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>q</code></td><td>Fuzzy search query (searches: ${fuzzyFields.join(', ')})</td></tr>
-        <tr><td><code>limit</code></td><td>Max results (default 20)</td></tr>
+        <tr><td><code>limit</code></td><td>Max results (default 20, max 250)</td></tr>
         <tr><td><code>sort_by</code></td><td>Field to sort by (any field name)</td></tr>
         <tr><td><code>sort_order</code></td><td><code>asc</code> or <code>desc</code> (default desc)</td></tr>
-        ${keywordFields.map(f => `<tr><td><code>${f}</code></td><td>Exact filter. Comma-separated for OR: <code>${f}=A,B,C</code></td></tr>`).join('')}
+        ${exactParamRows}
         ${numberFields.map(f => `<tr><td><code>${f}_min</code> / <code>${f}_max</code></td><td>Range filter on ${f}</td></tr>`).join('')}
       </tbody>
     </table>
@@ -561,7 +1160,7 @@ async function buildDocs() {
     <pre>${examplesHtml}</pre>
 
     <h3>GET /lookup</h3>
-    <p>Exact match lookup by keyword fields.</p>
+    <p>Exact match lookup by exact-match fields.</p>
     <pre>GET /lookup?${lookupParams || 'field=value'}</pre>
 
     <h3>GET /stats</h3>
@@ -572,10 +1171,9 @@ async function buildDocs() {
 
     <h2>Example response</h2>
     <pre>${esc(sampleResponse)}</pre>
-    <p>Number fields return as JSON numbers. Keyword/text fields as strings. <code>_score</code> is the relevance score (higher = better match). Fields with no data are omitted.</p>
+    <p>Number fields return as JSON numbers. Boolean fields return as JSON booleans or <code>null</code>. Enum/keyword/text fields return as strings. <code>_score</code> is the relevance score (higher = better match).</p>
   `;
 
-  // Generate markdown for copy
   const md = `# ruzz API Documentation
 
 Base URL: ${baseUrl}
@@ -585,9 +1183,9 @@ ${authToken ? '\n## Authentication\n\nAll requests (except `/health`) require au
 
 ## Schema
 
-| Field | Type | Search |
-|-------|------|--------|
-${fields.map(f => `| \`${f.name}\` | ${f.type} | ${f.search || '—'} |`).join('\n')}
+| Field | Type | Search | Values |
+|-------|------|--------|--------|
+${fields.map(f => `| \`${f.name}\` | ${f.type} | ${f.search || '—'} | ${fieldValuesMarkdown(f)} |`).join('\n')}
 
 ## GET /search
 
@@ -598,10 +1196,10 @@ Fuzzy search with optional filters, range queries, and sorting.
 | Param | Description |
 |-------|-------------|
 | \`q\` | Fuzzy search query (searches: ${fuzzyFields.join(', ')}) |
-| \`limit\` | Max results (default 20) |
+| \`limit\` | Max results (default 20, max 250) |
 | \`sort_by\` | Field to sort/rerank by |
 | \`sort_order\` | \`asc\` or \`desc\` (default desc) |
-${keywordFields.map(f => `| \`${f}\` | Exact filter. Comma-separated for OR: \`${f}=A,B,C\` |`).join('\n')}
+${exactFields.map(f => `| \`${f.name}\` | ${describeExactFieldMarkdown(f)} |`).join('\n')}
 ${numberFields.map(f => `| \`${f}_min\` / \`${f}_max\` | Range filter on ${f} |`).join('\n')}
 
 ### Examples
@@ -632,7 +1230,7 @@ Returns \`{"status": "ok"}\`.
 ${sampleResponse}
 \`\`\`
 
-Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\` is the relevance score (higher = better match). Fields with no data are omitted from the response.
+Number fields return as JSON numbers. Boolean fields return as JSON booleans or \`null\`. Enum/keyword/text fields return as strings. \`_score\` is the relevance score (higher = better match).
 `;
 
   document.getElementById('copy-llm-btn').addEventListener('click', async () => {
@@ -647,6 +1245,7 @@ Number fields return as JSON numbers. Keyword/text fields as strings. \`_score\`
   });
 }
 
+bindSearchTabEvents();
 init();
 </script>
 </body>

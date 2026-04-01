@@ -39,13 +39,17 @@ pub struct SchemaConfig {
     pub fields: Vec<FieldConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FieldConfig {
     pub name: String,
     #[serde(rename = "type")]
     pub field_type: FieldType,
     #[serde(default)]
     pub search: Option<SearchMode>,
+    #[serde(default)]
+    pub values: Option<EnumValuesConfig>,
+    #[serde(default)]
+    pub max_values: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -54,6 +58,15 @@ pub enum FieldType {
     Text,
     Keyword,
     Number,
+    Enum,
+    Boolean,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum EnumValuesConfig {
+    Auto(String),
+    List(Vec<String>),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]

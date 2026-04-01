@@ -7,6 +7,7 @@ use tantivy::schema::Schema;
 use tantivy::{IndexWriter, TantivyDocument};
 
 use crate::config::{Config, FieldType};
+use crate::field_meta::{canonicalize_stored_value, write_stored_field_metadata, ImportFieldMetadataCollector};
 use crate::schema::build_schema;
 
 pub struct ImportStats {
@@ -49,6 +50,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     register_trigram_tokenizer(&index);
 
     let mut writer: IndexWriter = index.writer(256_000_000)?; // 256MB heap
+    let mut metadata_collector = ImportFieldMetadataCollector::new(&config.schema.fields);
 
     let multi = MultiProgress::new();
     let style = ProgressStyle::with_template(
@@ -85,6 +87,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             &field_map,
             &config.schema.fields,
             &mut writer,
+            &mut metadata_collector,
             &pb,
         )?;
 
@@ -117,6 +120,8 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     }
     merge_pb.finish_with_message("Segments merged.");
 
+    write_stored_field_metadata(&config.server.index_path, &metadata_collector.into_stored())?;
+
     stats.total_duration_secs = start.elapsed().as_secs_f64();
 
     println!(
@@ -137,6 +142,7 @@ fn import_csv(
     field_map: &HashMap<String, tantivy::schema::Field>,
     field_configs: &[crate::config::FieldConfig],
     writer: &mut IndexWriter,
+    metadata_collector: &mut ImportFieldMetadataCollector,
     pb: &ProgressBar,
 ) -> anyhow::Result<u64> {
     let mut rdr = csv::ReaderBuilder::new()
@@ -173,9 +179,12 @@ fn import_csv(
                 .unwrap_or_default();
 
             match fc.field_type {
-                FieldType::Text | FieldType::Keyword => {
-                    if !value.is_empty() {
-                        doc.add_text(field, &value);
+                FieldType::Text | FieldType::Keyword | FieldType::Enum | FieldType::Boolean => {
+                    if let Some(normalized) = canonicalize_stored_value(fc, &value)? {
+                        if fc.field_type == FieldType::Enum {
+                            metadata_collector.observe(fc, &normalized);
+                        }
+                        doc.add_text(field, &normalized);
                     }
                 }
                 FieldType::Number => {

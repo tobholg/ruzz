@@ -37,6 +37,19 @@ pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
                         .set_fast(None),
                 )
             }
+            FieldType::Enum | FieldType::Boolean => {
+                builder.add_text_field(
+                    &fc.name,
+                    TextOptions::default()
+                        .set_indexing_options(
+                            TextFieldIndexing::default()
+                                .set_tokenizer("raw")
+                                .set_index_option(IndexRecordOption::Basic),
+                        )
+                        .set_stored()
+                        .set_fast(None),
+                )
+            }
             FieldType::Number => {
                 // Store as f64 for flexibility (revenue, ratios, etc.)
                 // FAST for columnar access (sort/range), STORED for retrieval
