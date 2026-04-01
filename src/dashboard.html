@@ -148,6 +148,8 @@
   .query-time { font-family: var(--mono); color: var(--emerald); font-weight: 500; }
   .view-toggle { padding: 0.42rem 0.72rem; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; }
   .view-toggle:hover { border-color: var(--text-muted); }
+  .export-btn { min-height: 32px; padding: 0.42rem 0.72rem; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; display: inline-flex; align-items: center; gap: 0.45rem; }
+  .export-btn:hover { border-color: var(--text-muted); }
   .limit-control { position: relative; }
   .limit-toggle { min-height: 32px; padding: 0.42rem 0.72rem; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--font); font-size: 0.76rem; cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; display: inline-flex; align-items: center; gap: 0.45rem; }
   .limit-toggle:hover, .limit-control.open .limit-toggle { border-color: var(--text-muted); }
@@ -165,10 +167,14 @@
 
   .results { display: flex; flex-direction: column; gap: 0.5rem; }
   .result-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default; }
+  .result-card.expandable { cursor: pointer; }
   .result-card:hover { border-color: rgba(14,165,233,0.2); background: var(--surface-2); }
   .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
+  .result-header-tools { display: flex; align-items: center; gap: 0.45rem; flex-shrink: 0; }
   .result-name { font-size: 1rem; font-weight: 600; }
   .result-score { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px; }
+  .result-collapse { min-height: 28px; padding: 0.28rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-family: var(--font); font-size: 0.7rem; cursor: pointer; }
+  .result-collapse:hover { color: var(--text); border-color: var(--text-muted); }
   .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text); opacity: 0.7; }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
   .result-meta.compact { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -179,6 +185,73 @@
   .empty { text-align: center; padding: 4rem 1rem; color: var(--text-dim); }
   .empty-icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.3; }
   .empty-text { font-size: 0.9rem; }
+
+  .modal-overlay { position: fixed; inset: 0; z-index: 70; display: none; align-items: center; justify-content: center; padding: 1.25rem; background: rgba(2,6,23,0.72); backdrop-filter: blur(10px); }
+  .modal-overlay.open { display: flex; }
+  .modal { width: min(980px, 100%); max-height: min(92vh, 980px); overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 22px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); }
+  .modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.25rem 1.25rem 0.9rem 1.25rem; border-bottom: 1px solid var(--border); }
+  .modal-title { font-size: 1.05rem; font-weight: 700; }
+  .modal-subtitle { margin-top: 0.3rem; font-size: 0.84rem; color: var(--text-muted); line-height: 1.5; }
+  .modal-close { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+  .modal-body { padding: 1.1rem 1.25rem 1.25rem 1.25rem; display: grid; gap: 1rem; }
+  .export-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
+  .export-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: 1rem; min-width: 0; }
+  .export-panel-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.5; margin-bottom: 0.7rem; }
+  .export-search-wrap { position: relative; margin-bottom: 0.75rem; }
+  .export-search-icon { position: absolute; left: 0.85rem; top: 50%; transform: translateY(-50%); color: var(--text-dim); pointer-events: none; }
+  .export-search-input { width: 100%; min-height: 38px; padding: 0.65rem 0.8rem 0.65rem 2.35rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-family: var(--font); font-size: 0.82rem; outline: none; }
+  .export-search-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .export-field-list { display: flex; flex-direction: column; gap: 0.35rem; max-height: 380px; overflow-y: auto; }
+  .export-field-btn { width: 100%; padding: 0.68rem 0.8rem; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; text-align: left; transition: border-color 0.15s, background 0.15s; }
+  .export-field-btn:hover { border-color: var(--text-muted); background: var(--surface-2); }
+  .export-field-btn.added { opacity: 0.55; }
+  .export-field-main { min-width: 0; }
+  .export-field-name { display: block; font-size: 0.82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .export-field-meta { display: block; margin-top: 0.18rem; font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .export-add-mark { flex-shrink: 0; font-size: 1rem; color: var(--accent); }
+  .export-empty { padding: 1rem; border: 1px dashed var(--border); border-radius: 12px; color: var(--text-dim); font-size: 0.8rem; text-align: center; }
+  .selected-columns { display: flex; flex-direction: column; gap: 0.45rem; margin-bottom: 0.85rem; }
+  .selected-column { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.55rem; align-items: center; padding: 0.7rem 0.8rem; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); }
+  .selected-index { width: 1.8rem; height: 1.8rem; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted); }
+  .selected-column-main { min-width: 0; }
+  .selected-column-name { font-size: 0.82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .selected-column-meta { margin-top: 0.18rem; font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .selected-column-actions { display: flex; align-items: center; gap: 0.35rem; }
+  .selected-action { width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+  .selected-action:disabled { opacity: 0.35; cursor: default; }
+  .export-hint { font-size: 0.78rem; color: var(--text-muted); line-height: 1.55; }
+  .export-settings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 0.9fr); gap: 1rem; }
+  .export-setting-card { background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: 1rem; min-width: 0; }
+  .export-setting-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.5; margin-bottom: 0.7rem; }
+  .export-limit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.55rem; align-items: start; }
+  .export-limit-input { min-height: 38px; width: 100%; padding: 0.6rem 0.75rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-family: var(--mono); font-size: 0.84rem; outline: none; }
+  .export-limit-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .export-limit-note { margin-top: 0.45rem; font-size: 0.76rem; color: var(--text-muted); }
+  .export-presets { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.7rem; }
+  .export-preset { min-height: 30px; padding: 0.35rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-family: var(--mono); font-size: 0.74rem; cursor: pointer; }
+  .export-preset.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+  .export-filename-input { width: 100%; min-height: 38px; padding: 0.68rem 0.8rem; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); font-family: var(--mono); font-size: 0.76rem; color: var(--text); outline: none; }
+  .export-filename-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .export-preview { background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: 1rem; }
+  .export-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.7rem; }
+  .export-preview-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text); opacity: 0.5; }
+  .export-preview-meta { font-size: 0.76rem; color: var(--text-muted); }
+  .export-preview-box { border-radius: 14px; border: 1px solid var(--border); background: var(--surface); overflow: auto; }
+  .export-preview-empty { padding: 1rem; font-size: 0.8rem; color: var(--text-dim); }
+  .export-preview-table { width: 100%; min-width: 480px; border-collapse: collapse; }
+  .export-preview-table th { padding: 0.75rem 0.85rem; text-align: left; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--border); background: var(--surface); white-space: nowrap; }
+  .export-preview-table td { padding: 0.8rem 0.85rem; font-size: 0.78rem; color: var(--text); border-bottom: 1px solid var(--border); vertical-align: top; }
+  .export-preview-table tbody tr:last-child td { border-bottom: none; }
+  .export-preview-table td code { font-family: var(--mono); font-size: 0.74rem; background: var(--surface-2); border: 1px solid var(--border); padding: 0.12rem 0.32rem; border-radius: 6px; }
+  .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding-top: 0.2rem; }
+  .modal-status { font-size: 0.78rem; color: var(--text-muted); min-height: 1.1rem; }
+  .modal-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .modal-secondary, .modal-primary { min-height: 38px; padding: 0.65rem 0.95rem; border-radius: 12px; border: 1px solid var(--border); font-family: var(--font); font-size: 0.8rem; cursor: pointer; }
+  .modal-secondary { background: transparent; color: var(--text-muted); }
+  .modal-secondary:hover { background: var(--surface-2); color: var(--text); }
+  .modal-primary { background: var(--surface-2); color: var(--text); }
+  .modal-primary:hover { border-color: var(--text-muted); }
+  .modal-primary:disabled, .modal-secondary:disabled { opacity: 0.5; cursor: default; }
 
   /* Docs tab */
   .docs { max-width: 720px; }
@@ -211,6 +284,12 @@
     .query-meta { align-items: flex-start; flex-direction: column; }
     .query-tools { width: 100%; justify-content: flex-start; }
     .filters-footer { align-items: stretch; }
+    .export-layout, .export-settings { grid-template-columns: 1fr; }
+    .modal { max-height: calc(100vh - 1.5rem); }
+    .modal-header, .modal-body { padding-left: 1rem; padding-right: 1rem; }
+    .modal-footer { flex-direction: column; align-items: stretch; }
+    .modal-actions { width: 100%; }
+    .modal-actions button { width: 100%; }
     .logo-tagline { display: none; }
     .logo-dot { display: none; }
   }
@@ -273,8 +352,8 @@
       <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       <div class="filters-footer">
         <div class="filters-footer-actions">
-          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
           <button class="filters-toggle" id="filters-toggle" type="button">Show more filters</button>
+          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
         </div>
       </div>
     </div>
@@ -295,7 +374,7 @@
           <div class="limit-menu" id="limit-menu" hidden>
             <div class="limit-title">Results Per Search</div>
             <div class="limit-input-row">
-              <input class="limit-input" id="limit-input" type="number" min="1" max="250" step="1" value="30" inputmode="numeric">
+              <input class="limit-input" id="limit-input" type="number" min="1" max="1000" step="1" value="30" inputmode="numeric">
               <button class="limit-apply" id="limit-apply" type="button">Apply</button>
             </div>
             <div class="limit-presets" id="limit-presets">
@@ -305,9 +384,11 @@
               <button class="limit-preset" type="button" data-limit="50">50</button>
               <button class="limit-preset" type="button" data-limit="100">100</button>
               <button class="limit-preset" type="button" data-limit="250">250</button>
+              <button class="limit-preset" type="button" data-limit="1000">1000</button>
             </div>
           </div>
         </div>
+        <button class="export-btn" id="export-btn" type="button">Export</button>
       </div>
     </div>
 
@@ -322,6 +403,73 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="export-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="export-modal-title">Export Results</div>
+        <div class="modal-subtitle">Download the current search as CSV. Choose columns, adjust the export size, and preview the generated file before downloading.</div>
+      </div>
+      <button class="modal-close" id="export-close-btn" type="button" aria-label="Close export dialog">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="export-layout">
+        <div class="export-panel">
+          <div class="export-panel-title">Add Columns</div>
+          <div class="export-search-wrap">
+            <svg class="export-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+            <input class="export-search-input" id="export-field-search" type="text" placeholder="Find column..." autocomplete="off" spellcheck="false">
+          </div>
+          <div class="export-field-list" id="export-available-fields"></div>
+        </div>
+        <div class="export-panel">
+          <div class="export-panel-title">Selected Columns</div>
+          <div class="selected-columns" id="export-selected-columns"></div>
+          <div class="export-hint">The leftmost column is exported first. The searchable field is added by default. Use the arrow buttons to reorder columns before downloading.</div>
+        </div>
+      </div>
+      <div class="export-settings">
+        <div class="export-setting-card">
+          <div class="export-setting-title">Export Size</div>
+          <div class="export-limit-row">
+            <input class="export-limit-input" id="export-limit-input" type="number" min="1" max="1000" step="1" value="30" inputmode="numeric">
+            <button class="limit-apply" id="export-preview-refresh" type="button">Refresh preview</button>
+          </div>
+          <div class="export-limit-note">Exports the current query, filters, and sort order. Maximum <span id="export-limit-max">1000</span> rows per file.</div>
+          <div class="export-presets" id="export-limit-presets">
+            <button class="export-preset" type="button" data-limit="30">30</button>
+            <button class="export-preset" type="button" data-limit="100">100</button>
+            <button class="export-preset" type="button" data-limit="250">250</button>
+            <button class="export-preset" type="button" data-limit="500">500</button>
+            <button class="export-preset" type="button" data-limit="1000">1000</button>
+          </div>
+        </div>
+        <div class="export-setting-card">
+          <div class="export-setting-title">Filename</div>
+          <input class="export-filename-input" id="export-filename" type="text" value="ruzz-export.csv" spellcheck="false" autocomplete="off">
+        </div>
+      </div>
+      <div class="export-preview">
+        <div class="export-preview-head">
+          <div class="export-preview-title">Preview</div>
+          <div class="export-preview-meta" id="export-preview-meta">First rows of the generated CSV</div>
+        </div>
+        <div class="export-preview-box" id="export-preview-box">
+          <div class="export-preview-empty">Choose columns to preview the file.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="modal-status" id="export-status"></div>
+        <div class="modal-actions">
+          <button class="modal-secondary" id="export-reset-columns" type="button">Reset columns</button>
+          <button class="modal-secondary" id="export-cancel-btn" type="button">Close</button>
+          <button class="modal-primary" id="export-download-btn" type="button">Download CSV</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '';
 let schema = [];
@@ -331,11 +479,19 @@ let authToken = sessionStorage.getItem('ruzz_token') || '';
 const DEFAULT_VISIBLE_FILTERS = 12;
 const DEFAULT_RESULT_LIMIT = 30;
 const MIN_RESULT_LIMIT = 1;
-const MAX_RESULT_LIMIT = 250;
+const MAX_RESULT_LIMIT = 1000;
 let filtersExpanded = false;
-let compactResults = sessionStorage.getItem('ruzz_results_view') === 'compact';
+let compactResults = sessionStorage.getItem('ruzz_results_view') !== 'full';
 let resultLimit = loadStoredResultLimit();
 let lastSearchData = null;
+let expandedResultIndexes = new Set();
+let exportColumns = [];
+let exportFieldSearch = '';
+let exportLimit = DEFAULT_RESULT_LIMIT;
+let exportFilename = '';
+let exportPreviewData = null;
+let exportPreviewLoading = false;
+let exportDownloadInFlight = false;
 
 function authHeaders() {
   const h = {};
@@ -355,6 +511,37 @@ function clampResultLimit(value) {
 
 function loadStoredResultLimit() {
   return clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
+}
+
+function getSearchParams(limitOverride = resultLimit) {
+  const q = document.getElementById('search')?.value.trim() || '';
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  params.set('limit', String(clampResultLimit(limitOverride)));
+  let hasAnyFilter = false;
+  document.querySelectorAll('#filters-row .filter-input').forEach(input => {
+    const val = input.value.trim();
+    if (!val) return;
+    hasAnyFilter = true;
+    params.set(input.dataset.field, val);
+  });
+  const sortBy = document.getElementById('sort-by')?.value;
+  const sortOrder = document.getElementById('sort-order')?.value;
+  if (sortBy) {
+    params.set('sort_by', sortBy);
+    params.set('sort_order', sortOrder || 'desc');
+  }
+  return {
+    params,
+    q,
+    sortBy,
+    hasAnyFilter,
+    hasSearch: Boolean(q || hasAnyFilter || sortBy),
+  };
+}
+
+function getPrimaryFieldName() {
+  return fuzzyField?.name || schema.find(field => field.type === 'text')?.name || schema[0]?.name || '';
 }
 
 function showAuthPrompt() {
@@ -405,8 +592,8 @@ async function submitAuth() {
       <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       <div class="filters-footer">
         <div class="filters-footer-actions">
-          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
           <button class="filters-toggle" id="filters-toggle" type="button">Show more filters</button>
+          <button class="reset-search-btn" id="reset-search-btn" type="button">Reset search</button>
         </div>
       </div>
     </div>
@@ -426,7 +613,7 @@ async function submitAuth() {
           <div class="limit-menu" id="limit-menu" hidden>
             <div class="limit-title">Results Per Search</div>
             <div class="limit-input-row">
-              <input class="limit-input" id="limit-input" type="number" min="1" max="250" step="1" value="30" inputmode="numeric">
+              <input class="limit-input" id="limit-input" type="number" min="1" max="1000" step="1" value="30" inputmode="numeric">
               <button class="limit-apply" id="limit-apply" type="button">Apply</button>
             </div>
             <div class="limit-presets" id="limit-presets">
@@ -436,9 +623,11 @@ async function submitAuth() {
               <button class="limit-preset" type="button" data-limit="50">50</button>
               <button class="limit-preset" type="button" data-limit="100">100</button>
               <button class="limit-preset" type="button" data-limit="250">250</button>
+              <button class="limit-preset" type="button" data-limit="1000">1000</button>
             </div>
           </div>
         </div>
+        <button class="export-btn" id="export-btn" type="button">Export</button>
       </div>
     </div>
     <div class="results" id="results">
@@ -460,6 +649,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'docs') buildDocs();
   });
 });
+
+bindExportModalEvents();
 
 function bindSearchTabEvents() {
   document.getElementById('settings-btn')?.addEventListener('click', () => {
@@ -492,8 +683,51 @@ function bindSearchTabEvents() {
   document.querySelectorAll('#limit-presets .limit-preset').forEach(button => {
     button.addEventListener('click', () => applyResultLimit(button.dataset.limit));
   });
+  document.getElementById('export-btn')?.addEventListener('click', openExportModal);
   updateViewToggle();
   updateLimitControls();
+}
+
+function bindExportModalEvents() {
+  document.getElementById('export-close-btn')?.addEventListener('click', closeExportModal);
+  document.getElementById('export-cancel-btn')?.addEventListener('click', closeExportModal);
+  document.getElementById('export-reset-columns')?.addEventListener('click', resetExportColumns);
+  document.getElementById('export-preview-refresh')?.addEventListener('click', () => {
+    exportLimit = clampResultLimit(document.getElementById('export-limit-input')?.value || exportLimit);
+    updateExportControls();
+    loadExportPreview(true);
+  });
+  document.getElementById('export-download-btn')?.addEventListener('click', downloadExportFile);
+  document.getElementById('export-field-search')?.addEventListener('input', event => {
+    exportFieldSearch = event.target.value.trim().toLowerCase();
+    renderExportAvailableFields();
+  });
+  document.getElementById('export-filename')?.addEventListener('input', event => {
+    exportFilename = event.target.value;
+  });
+  document.getElementById('export-limit-input')?.addEventListener('input', event => {
+    exportLimit = clampResultLimit(event.target.value || exportLimit);
+    updateExportControls();
+  });
+  document.getElementById('export-limit-input')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') loadExportPreview(true);
+    if (event.key === 'Escape') closeExportModal();
+  });
+  document.querySelectorAll('#export-limit-presets .export-preset').forEach(button => {
+    button.addEventListener('click', () => {
+      exportLimit = clampResultLimit(button.dataset.limit);
+      updateExportControls();
+      loadExportPreview(true);
+    });
+  });
+  document.getElementById('export-modal')?.addEventListener('click', event => {
+    if (event.target === document.getElementById('export-modal')) closeExportModal();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.getElementById('export-modal')?.classList.contains('open')) {
+      closeExportModal();
+    }
+  });
 }
 
 // ── Stats + init ──
@@ -519,6 +753,7 @@ async function init() {
 function buildSearchTab() {
   filtersExpanded = false;
   lastSearchData = null;
+  expandedResultIndexes = new Set();
   buildFilters();
   buildSort();
   updateViewToggle();
@@ -813,11 +1048,12 @@ function resetSearchState() {
     sortOrder.dispatchEvent(new Event('change'));
   }
   filtersExpanded = false;
-  compactResults = false;
-  sessionStorage.setItem('ruzz_results_view', 'full');
+  compactResults = true;
+  sessionStorage.setItem('ruzz_results_view', 'compact');
   resultLimit = DEFAULT_RESULT_LIMIT;
   sessionStorage.setItem('ruzz_result_limit', String(resultLimit));
   lastSearchData = null;
+  expandedResultIndexes = new Set();
   closeAllPickers();
   closeLimitMenu();
   updateViewToggle();
@@ -825,6 +1061,284 @@ function resetSearchState() {
   applyFilterFieldSearch();
   renderIdleResultsState();
   document.getElementById('search')?.focus();
+}
+
+function resetExportColumns() {
+  const primary = getPrimaryFieldName();
+  exportColumns = primary ? [primary] : [];
+  renderExportModal();
+  loadExportPreview(true);
+}
+
+function setExportStatus(message) {
+  const status = document.getElementById('export-status');
+  if (status) status.textContent = message || '';
+}
+
+function buildExportFilename() {
+  const query = (document.getElementById('search')?.value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+  const date = new Date().toISOString().slice(0, 10);
+  return query ? `ruzz-${query}-${date}.csv` : `ruzz-export-${date}.csv`;
+}
+
+function normalizeExportFilename(name) {
+  const trimmed = String(name || '').trim().replace(/[\\/:\0]/g, '-');
+  const base = trimmed || buildExportFilename();
+  return base.toLowerCase().endsWith('.csv') ? base : `${base}.csv`;
+}
+
+function describeField(field) {
+  if (!field) return '';
+  const parts = [field.type];
+  if (field.search) parts.push(field.search);
+  return parts.join(' • ');
+}
+
+function getFieldByName(name) {
+  return schema.find(field => field.name === name) || null;
+}
+
+function renderExportAvailableFields() {
+  const container = document.getElementById('export-available-fields');
+  if (!container) return;
+  const needle = exportFieldSearch;
+  const fields = schema.filter(field => {
+    if (!needle) return true;
+    const haystack = `${field.name} ${formatFieldName(field.name)} ${field.type} ${field.search || ''}`.toLowerCase();
+    return haystack.includes(needle);
+  });
+  if (!fields.length) {
+    container.innerHTML = '<div class="export-empty">No columns match that search.</div>';
+    return;
+  }
+  container.innerHTML = fields.map(field => {
+    const added = exportColumns.includes(field.name);
+    return `
+      <button class="export-field-btn${added ? ' added' : ''}" type="button" data-field="${esc(field.name)}">
+        <span class="export-field-main">
+          <span class="export-field-name">${esc(field.name)}</span>
+          <span class="export-field-meta">${esc(describeField(field))}</span>
+        </span>
+        <span class="export-add-mark">${added ? '✓' : '+'}</span>
+      </button>
+    `;
+  }).join('');
+  container.querySelectorAll('.export-field-btn').forEach(button => {
+    button.addEventListener('click', () => addExportColumn(button.dataset.field));
+  });
+}
+
+function renderExportSelectedColumns() {
+  const container = document.getElementById('export-selected-columns');
+  if (!container) return;
+  if (!exportColumns.length) {
+    container.innerHTML = '<div class="export-empty">Add at least one column to export.</div>';
+    return;
+  }
+  container.innerHTML = exportColumns.map((fieldName, index) => {
+    const field = getFieldByName(fieldName);
+    return `
+      <div class="selected-column">
+        <span class="selected-index">${index + 1}</span>
+        <div class="selected-column-main">
+          <div class="selected-column-name" title="${esc(fieldName)}">${esc(fieldName)}</div>
+          <div class="selected-column-meta">${esc(describeField(field))}</div>
+        </div>
+        <div class="selected-column-actions">
+          <button class="selected-action" type="button" data-action="up" data-field="${esc(fieldName)}" ${index === 0 ? 'disabled' : ''}>↑</button>
+          <button class="selected-action" type="button" data-action="down" data-field="${esc(fieldName)}" ${index === exportColumns.length - 1 ? 'disabled' : ''}>↓</button>
+          <button class="selected-action" type="button" data-action="remove" data-field="${esc(fieldName)}">×</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  container.querySelectorAll('.selected-action').forEach(button => {
+    button.addEventListener('click', () => {
+      const fieldName = button.dataset.field;
+      if (button.dataset.action === 'remove') removeExportColumn(fieldName);
+      if (button.dataset.action === 'up') moveExportColumn(fieldName, -1);
+      if (button.dataset.action === 'down') moveExportColumn(fieldName, 1);
+    });
+  });
+}
+
+function updateExportControls() {
+  const input = document.getElementById('export-limit-input');
+  if (input) input.value = String(exportLimit);
+  document.getElementById('export-limit-max').textContent = String(MAX_RESULT_LIMIT);
+  const filenameInput = document.getElementById('export-filename');
+  if (filenameInput) filenameInput.value = exportFilename;
+  document.querySelectorAll('#export-limit-presets .export-preset').forEach(button => {
+    button.classList.toggle('active', Number.parseInt(button.dataset.limit || '', 10) === exportLimit);
+  });
+  document.getElementById('export-download-btn').disabled = exportDownloadInFlight || exportColumns.length === 0;
+}
+
+function buildCsvCell(value) {
+  if (value == null) return '';
+  let text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  if (/[",\n\r]/.test(text)) text = `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function buildCsvText(rows, columns) {
+  const header = columns.map(buildCsvCell).join(',');
+  const body = rows.map(row => columns.map(column => buildCsvCell(row[column])).join(','));
+  return [header, ...body].join('\n');
+}
+
+function formatPreviewCell(value) {
+  if (value == null || value === '') return '<span style="color:var(--text-dim)">—</span>';
+  if (typeof value === 'boolean') return `<code>${value ? 'true' : 'false'}</code>`;
+  if (typeof value === 'number') return esc(value.toLocaleString());
+  if (Array.isArray(value) || typeof value === 'object') return `<code>${esc(JSON.stringify(value))}</code>`;
+  return esc(String(value));
+}
+
+function renderExportPreview() {
+  const previewBox = document.getElementById('export-preview-box');
+  const previewMeta = document.getElementById('export-preview-meta');
+  if (!previewBox || !previewMeta) return;
+  if (!exportColumns.length) {
+    previewMeta.textContent = 'Add at least one column to preview the file';
+    previewBox.innerHTML = '<div class="export-preview-empty">Choose columns to preview the file.</div>';
+    return;
+  }
+  if (exportPreviewLoading) {
+    previewMeta.textContent = 'Building preview...';
+    previewBox.innerHTML = '<div class="export-preview-empty">Loading preview...</div>';
+    return;
+  }
+  const rows = exportPreviewData?.results || [];
+  const rowCount = Math.min(rows.length, 5);
+  if (!rows.length) {
+    previewMeta.textContent = 'No matching rows for the current search';
+    previewBox.innerHTML = '<div class="export-preview-empty">No rows match the current search, filters, and sort.</div>';
+    return;
+  }
+  previewMeta.textContent = `Previewing ${rowCount} row${rowCount === 1 ? '' : 's'} of ${exportLimit}`;
+  const head = exportColumns.map(column => `<th>${esc(formatFieldName(column))}</th>`).join('');
+  const body = rows.slice(0, 5).map(row => `<tr>${exportColumns.map(column => `<td>${formatPreviewCell(row[column])}</td>`).join('')}</tr>`).join('');
+  previewBox.innerHTML = `<table class="export-preview-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderExportModal() {
+  renderExportAvailableFields();
+  renderExportSelectedColumns();
+  updateExportControls();
+  renderExportPreview();
+}
+
+async function loadExportPreview(force = false) {
+  const searchState = getSearchParams(Math.min(exportLimit, 5));
+  if (!searchState.hasSearch) {
+    exportPreviewData = { results: [] };
+    renderExportPreview();
+    setExportStatus('Run a search, filter, or sort before exporting.');
+    return;
+  }
+  if (!force && lastSearchData && exportPreviewData == null) {
+    exportPreviewData = { results: (lastSearchData.results || []).slice(0, 5) };
+    renderExportPreview();
+    return;
+  }
+  exportPreviewLoading = true;
+  renderExportPreview();
+  setExportStatus('');
+  try {
+    const response = await authFetch(`${API}/search?${searchState.params.toString()}`);
+    exportPreviewData = await response.json();
+  } catch {
+    exportPreviewData = { results: [] };
+    setExportStatus('Preview failed. Check the current search and try again.');
+  } finally {
+    exportPreviewLoading = false;
+    renderExportPreview();
+  }
+}
+
+function addExportColumn(fieldName) {
+  if (!fieldName || exportColumns.includes(fieldName)) return;
+  exportColumns = [...exportColumns, fieldName];
+  renderExportModal();
+}
+
+function removeExportColumn(fieldName) {
+  exportColumns = exportColumns.filter(name => name !== fieldName);
+  renderExportModal();
+}
+
+function moveExportColumn(fieldName, direction) {
+  const index = exportColumns.indexOf(fieldName);
+  if (index === -1) return;
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= exportColumns.length) return;
+  const nextColumns = [...exportColumns];
+  [nextColumns[index], nextColumns[nextIndex]] = [nextColumns[nextIndex], nextColumns[index]];
+  exportColumns = nextColumns;
+  renderExportModal();
+}
+
+function openExportModal() {
+  const searchState = getSearchParams(resultLimit);
+  exportLimit = clampResultLimit(resultLimit);
+  exportFilename = buildExportFilename();
+  if (!exportColumns.length) {
+    const primary = getPrimaryFieldName();
+    exportColumns = primary ? [primary] : [];
+  } else {
+    const primary = getPrimaryFieldName();
+    if (primary && exportColumns.includes(primary)) {
+      exportColumns = [primary, ...exportColumns.filter(name => name !== primary)];
+    }
+  }
+  exportFieldSearch = '';
+  exportPreviewData = lastSearchData ? { results: (lastSearchData.results || []).slice(0, 5) } : null;
+  document.getElementById('export-field-search').value = '';
+  document.getElementById('export-modal').classList.add('open');
+  document.getElementById('export-modal').setAttribute('aria-hidden', 'false');
+  setExportStatus(searchState.hasSearch ? '' : 'Run a search, filter, or sort before exporting.');
+  renderExportModal();
+  loadExportPreview(false);
+}
+
+function closeExportModal() {
+  document.getElementById('export-modal').classList.remove('open');
+  document.getElementById('export-modal').setAttribute('aria-hidden', 'true');
+  setExportStatus('');
+}
+
+async function downloadExportFile() {
+  if (!exportColumns.length || exportDownloadInFlight) return;
+  const searchState = getSearchParams(exportLimit);
+  if (!searchState.hasSearch) {
+    setExportStatus('Run a search, filter, or sort before exporting.');
+    return;
+  }
+  exportDownloadInFlight = true;
+  updateExportControls();
+  setExportStatus('Building CSV...');
+  try {
+    const response = await authFetch(`${API}/search?${searchState.params.toString()}`);
+    const data = await response.json();
+    const csv = buildCsvText(data.results || [], exportColumns);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = normalizeExportFilename(exportFilename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setExportStatus(`Downloaded ${Math.min(exportLimit, data.results?.length || 0)} row${(data.results?.length || 0) === 1 ? '' : 's'}.`);
+  } catch {
+    setExportStatus('Export failed. Please try again.');
+  } finally {
+    exportDownloadInFlight = false;
+    updateExportControls();
+  }
 }
 
 function applyFilterFieldSearch() {
@@ -862,6 +1376,32 @@ function updateViewToggle() {
   const button = document.getElementById('view-toggle');
   if (!button) return;
   button.textContent = compactResults ? 'Full view' : 'Compressed view';
+}
+
+function bindResultInteractions() {
+  const container = document.getElementById('results');
+  if (!container) return;
+  container.querySelectorAll('.result-card.expandable[data-index]').forEach(card => {
+    card.addEventListener('click', () => expandResult(Number.parseInt(card.dataset.index || '', 10)));
+  });
+  container.querySelectorAll('.result-collapse[data-index]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      collapseResult(Number.parseInt(button.dataset.index || '', 10));
+    });
+  });
+}
+
+function expandResult(index) {
+  if (!compactResults || !Number.isInteger(index)) return;
+  expandedResultIndexes.add(index);
+  if (lastSearchData) renderResults(lastSearchData);
+}
+
+function collapseResult(index) {
+  if (!compactResults || !Number.isInteger(index)) return;
+  expandedResultIndexes.delete(index);
+  if (lastSearchData) renderResults(lastSearchData);
 }
 
 function formatResultNumber(value) {
@@ -912,48 +1452,44 @@ function renderResults(data) {
   }
 
   const nameField = fuzzyField?.name || schema.find(f => f.type === 'text')?.name || '';
-  container.innerHTML = data.results.map(record => {
+  container.innerHTML = data.results.map((record, index) => {
     const name = record[nameField] || '';
     const score = record._score?.toFixed(1) || '—';
-    const metaMarkup = compactResults
+    const isExpanded = !compactResults || expandedResultIndexes.has(index);
+    const metaMarkup = isExpanded
       ? (() => {
-          const items = buildResultMetaItems(record, nameField);
-          return items.length ? `<div class="result-meta compact" title="${esc(items.join(' • '))}">${esc(items.join(' · '))}</div>` : '';
-        })()
-      : (() => {
           const html = schema
             .filter(field => field.name !== nameField)
             .map(field => renderFullMeta(field, record[field.name]))
             .filter(Boolean)
             .join('');
           return html ? `<div class="result-meta">${html}</div>` : '';
+        })()
+      : (() => {
+          const items = buildResultMetaItems(record, nameField);
+          return items.length ? `<div class="result-meta compact" title="${esc(items.join(' • '))}">${esc(items.join(' · '))}</div>` : '';
         })();
-    return `<div class="result-card"><div class="result-header"><span class="result-name">${esc(name)}</span><span class="result-score">${score}</span></div>${metaMarkup}</div>`;
+    const collapseButton = compactResults && isExpanded
+      ? `<button class="result-collapse" type="button" data-index="${index}">Collapse</button>`
+      : '';
+    return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}</div>`;
   }).join('');
+  bindResultInteractions();
 }
 
 async function doSearch() {
-  const q = document.getElementById('search').value.trim();
-  const params = new URLSearchParams();
-  if (q) params.set('q', q);
-  params.set('limit', String(resultLimit));
-  let hasAnyFilter = false;
-  document.querySelectorAll('#filters-row .filter-input').forEach(input => {
-    const val = input.value.trim(); if (!val) return; hasAnyFilter = true;
-    params.set(input.dataset.field, val);
-  });
-  const sortBy = document.getElementById('sort-by')?.value;
-  const sortOrder = document.getElementById('sort-order')?.value;
-  if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder || 'desc'); }
-  if (!q && !hasAnyFilter && !sortBy) {
+  const searchState = getSearchParams(resultLimit);
+  if (!searchState.hasSearch) {
     lastSearchData = null;
+    expandedResultIndexes = new Set();
     renderIdleResultsState();
     updateViewToggle();
     return;
   }
   try {
-    const res = await authFetch(`${API}/search?${params}`); const data = await res.json();
+    const res = await authFetch(`${API}/search?${searchState.params.toString()}`); const data = await res.json();
     lastSearchData = data;
+    expandedResultIndexes = new Set();
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
@@ -1148,7 +1684,7 @@ async function buildDocs() {
       <thead><tr><th>Param</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>q</code></td><td>Fuzzy search query (searches: ${fuzzyFields.join(', ')})</td></tr>
-        <tr><td><code>limit</code></td><td>Max results (default 20, max 250)</td></tr>
+        <tr><td><code>limit</code></td><td>Max results (default 20, max 1000)</td></tr>
         <tr><td><code>sort_by</code></td><td>Field to sort by (any field name)</td></tr>
         <tr><td><code>sort_order</code></td><td><code>asc</code> or <code>desc</code> (default desc)</td></tr>
         ${exactParamRows}
@@ -1196,7 +1732,7 @@ Fuzzy search with optional filters, range queries, and sorting.
 | Param | Description |
 |-------|-------------|
 | \`q\` | Fuzzy search query (searches: ${fuzzyFields.join(', ')}) |
-| \`limit\` | Max results (default 20, max 250) |
+| \`limit\` | Max results (default 20, max 1000) |
 | \`sort_by\` | Field to sort/rerank by |
 | \`sort_order\` | \`asc\` or \`desc\` (default desc) |
 ${exactFields.map(f => `| \`${f.name}\` | ${describeExactFieldMarkdown(f)} |`).join('\n')}

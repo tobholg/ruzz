@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use crate::search::SearchEngine;
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
-const MAX_SEARCH_LIMIT: usize = 250;
+const MAX_SEARCH_LIMIT: usize = 1000;
 
 pub struct AppState {
     pub engine: SearchEngine,
