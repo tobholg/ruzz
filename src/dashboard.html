@@ -180,7 +180,10 @@
   .result-meta.compact { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta-label { color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .tag { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; background: rgba(14,165,233,0.12); color: #38bdf8; }
-  @media (prefers-color-scheme: light) { .tag { background: rgba(14,165,233,0.08); color: #0369a1; } }
+  @media (prefers-color-scheme: light) {
+    .tag { background: rgba(14,165,233,0.08); color: #0369a1; }
+    .result-card:hover { background: var(--surface); }
+  }
 
   .empty { text-align: center; padding: 4rem 1rem; color: var(--text-dim); }
   .empty-icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.3; }
@@ -339,15 +342,15 @@
     </div>
 
     <div class="advanced-panel" id="advanced-panel">
+      <div class="advanced-title">Sort Results</div>
+      <div class="filters" id="sort-row"></div>
+      <div class="advanced-title" style="margin-top:1rem">Filters</div>
       <div class="filter-toolbar">
         <div class="filter-search-wrap">
           <svg class="filter-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
           <input class="filter-search" id="filter-search" type="text" placeholder="Find field..." autocomplete="off" spellcheck="false">
         </div>
       </div>
-      <div class="advanced-title">Sort Results</div>
-      <div class="filters" id="sort-row"></div>
-      <div class="advanced-title" style="margin-top:1rem">Filters</div>
       <div class="filters" id="filters-row"></div>
       <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       <div class="filters-footer">
@@ -579,15 +582,15 @@ async function submitAuth() {
       </button>
     </div>
     <div class="advanced-panel" id="advanced-panel">
+      <div class="advanced-title">Sort Results</div>
+      <div class="filters" id="sort-row"></div>
+      <div class="advanced-title" style="margin-top:1rem">Filters</div>
       <div class="filter-toolbar">
         <div class="filter-search-wrap">
           <svg class="filter-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
           <input class="filter-search" id="filter-search" type="text" placeholder="Find field..." autocomplete="off" spellcheck="false">
         </div>
       </div>
-      <div class="advanced-title">Sort Results</div>
-      <div class="filters" id="sort-row"></div>
-      <div class="advanced-title" style="margin-top:1rem">Filters</div>
       <div class="filters" id="filters-row"></div>
       <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       <div class="filters-footer">
