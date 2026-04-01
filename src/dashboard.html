@@ -168,6 +168,7 @@
   .results { display: flex; flex-direction: column; gap: 0.5rem; }
   .result-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; transition: border-color 0.15s, background 0.15s; cursor: default; }
   .result-card.expandable { cursor: pointer; }
+  .result-card.expanded { border-color: rgba(14,165,233,0.22); }
   .result-card:hover { border-color: rgba(14,165,233,0.2); background: var(--surface-2); }
   .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
   .result-header-tools { display: flex; align-items: center; gap: 0.45rem; flex-shrink: 0; }
@@ -182,6 +183,8 @@
   .tag { display: inline-flex; padding: 0.15rem 0.5rem; border-radius: 6px; font-family: var(--mono); font-size: 0.7rem; font-weight: 500; background: rgba(14,165,233,0.12); color: #38bdf8; }
   @media (prefers-color-scheme: light) {
     .tag { background: rgba(14,165,233,0.08); color: #0369a1; }
+    .result-card.expanded { border-color: rgba(14,165,233,0.28); }
+    .result-card:hover { border-color: rgba(14,165,233,0.3); }
     .result-card:hover { background: var(--surface); }
   }
 
@@ -1475,7 +1478,7 @@ function renderResults(data) {
     const collapseButton = compactResults && isExpanded
       ? `<button class="result-collapse" type="button" data-index="${index}">Collapse</button>`
       : '';
-    return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}</div>`;
+    return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}${compactResults && isExpanded ? ' expanded' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}</div>`;
   }).join('');
   bindResultInteractions();
 }
