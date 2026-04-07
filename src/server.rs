@@ -83,8 +83,10 @@ async fn handle_dashboard() -> axum::response::Html<&'static str> {
 struct SearchParams {
     q: Option<String>,
     limit: Option<usize>,
-    sort_by: Option<String>,      // field name to sort by
-    sort_order: Option<String>,   // "asc" or "desc"
+    offset: Option<usize>,
+    include_pagination: Option<bool>,
+    sort_by: Option<String>,    // field name to sort by
+    sort_order: Option<String>, // "asc" or "desc"
     #[serde(flatten)]
     extra: HashMap<String, String>,
 }
@@ -94,16 +96,34 @@ async fn handle_search(
     Query(params): Query<SearchParams>,
 ) -> Json<serde_json::Value> {
     let query_text = params.q.unwrap_or_default();
-    let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).clamp(1, MAX_SEARCH_LIMIT);
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .clamp(1, MAX_SEARCH_LIMIT);
+    let offset = params.offset.unwrap_or(0);
+    let include_pagination = params.include_pagination.unwrap_or(false);
+
+    if offset.saturating_add(limit) > crate::search::MAX_REPORTED_TOTAL {
+        return Json(serde_json::json!({
+            "error": "pagination_window_too_large",
+            "message": format!(
+                "offset + limit must be <= {}",
+                crate::search::MAX_REPORTED_TOTAL
+            ),
+        }));
+    }
 
     let mut filters = params.extra.clone();
     filters.remove("limit");
+    filters.remove("offset");
+    filters.remove("include_pagination");
     filters.remove("sort_by");
     filters.remove("sort_order");
 
     // Extract range filters: keys ending in _min or _max
     let mut range_filters: Vec<crate::search::RangeFilter> = Vec::new();
-    let range_keys: Vec<String> = filters.keys()
+    let range_keys: Vec<String> = filters
+        .keys()
         .filter(|k| k.ends_with("_min") || k.ends_with("_max"))
         .cloned()
         .collect();
@@ -135,7 +155,15 @@ async fn handle_search(
         _ => crate::search::SortOrder::Relevance,
     };
 
-    match state.engine.search(&query_text, &filters, &range_filters, &sort, limit) {
+    match state.engine.search(
+        &query_text,
+        &filters,
+        &range_filters,
+        &sort,
+        limit,
+        offset,
+        include_pagination,
+    ) {
         Ok(result) => Json(serde_json::to_value(result).unwrap()),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
@@ -157,9 +185,7 @@ async fn handle_lookup(
     }
 }
 
-async fn handle_stats(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut sys = System::new_all();
     sys.refresh_all();
 
@@ -176,7 +202,10 @@ async fn handle_stats(
     let index_size = dir_size(index_path).unwrap_or(0);
 
     // Count segments
-    let segment_count = state.engine.index.searchable_segment_metas()
+    let segment_count = state
+        .engine
+        .index
+        .searchable_segment_metas()
         .map(|s| s.len())
         .unwrap_or(0);
 

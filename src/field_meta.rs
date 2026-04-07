@@ -53,7 +53,10 @@ pub fn canonicalize_boolean_value(value: &str) -> Option<String> {
     }
 }
 
-pub fn canonicalize_stored_value(field: &FieldConfig, value: &str) -> anyhow::Result<Option<String>> {
+pub fn canonicalize_stored_value(
+    field: &FieldConfig,
+    value: &str,
+) -> anyhow::Result<Option<String>> {
     match field.field_type {
         FieldType::Text | FieldType::Keyword => {
             if value.is_empty() {
@@ -70,7 +73,11 @@ pub fn canonicalize_stored_value(field: &FieldConfig, value: &str) -> anyhow::Re
             if normalized == BOOLEAN_TRUE || normalized == BOOLEAN_FALSE {
                 Ok(Some(normalized))
             } else {
-                bail!("invalid boolean value '{}' for field '{}'", value, field.name);
+                bail!(
+                    "invalid boolean value '{}' for field '{}'",
+                    value,
+                    field.name
+                );
             }
         }
         FieldType::Number => Ok(None),
@@ -144,7 +151,10 @@ pub fn load_stored_field_metadata(index_path: &Path) -> anyhow::Result<StoredFie
     Ok(metadata)
 }
 
-pub fn write_stored_field_metadata(index_path: &Path, metadata: &StoredFieldMetadata) -> anyhow::Result<()> {
+pub fn write_stored_field_metadata(
+    index_path: &Path,
+    metadata: &StoredFieldMetadata,
+) -> anyhow::Result<()> {
     let path = metadata_path(index_path);
     let raw = serde_json::to_string_pretty(metadata)?;
     std::fs::write(&path, raw)
@@ -208,7 +218,8 @@ impl ImportFieldMetadataCollector {
     }
 
     pub fn into_stored(self) -> StoredFieldMetadata {
-        let fields = self.fields
+        let fields = self
+            .fields
             .into_iter()
             .map(|(name, collector)| (name, collector.into_stored()))
             .collect();
@@ -276,12 +287,21 @@ mod tests {
 
     #[test]
     fn canonicalizes_enum_to_uppercase() {
-        assert_eq!(canonicalize_enum_value("  board chair "), Some("BOARD CHAIR".to_string()));
+        assert_eq!(
+            canonicalize_enum_value("  board chair "),
+            Some("BOARD CHAIR".to_string())
+        );
     }
 
     #[test]
     fn canonicalizes_boolean_aliases() {
-        assert_eq!(canonicalize_boolean_value("yes"), Some(BOOLEAN_TRUE.to_string()));
-        assert_eq!(canonicalize_boolean_value("0"), Some(BOOLEAN_FALSE.to_string()));
+        assert_eq!(
+            canonicalize_boolean_value("yes"),
+            Some(BOOLEAN_TRUE.to_string())
+        );
+        assert_eq!(
+            canonicalize_boolean_value("0"),
+            Some(BOOLEAN_FALSE.to_string())
+        );
     }
 }

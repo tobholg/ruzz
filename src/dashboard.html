@@ -1649,7 +1649,19 @@ async function buildDocs() {
     }
   }
   fullSample['_score'] = sample?._score || 0;
-  const sampleResponse = JSON.stringify({ took_ms: 3.5, total: 1, results: [fullSample] }, null, 2);
+  const sampleResponse = JSON.stringify({
+    took_ms: 3.5,
+    total: 1,
+    pagination: {
+      offset: 200,
+      limit: 100,
+      returned: 1,
+      total: 18432,
+      total_relation: 'eq',
+      has_more: true
+    },
+    results: [fullSample]
+  }, null, 2);
 
   const examples = [];
   if (fuzzyFields.length && firstExactField) examples.push(`# Fuzzy search with filter\nGET /search?q=${exFuzzy}&${firstExactField.name}=${encodeURIComponent(exExactValue)}&limit=10`);
@@ -1657,6 +1669,7 @@ async function buildDocs() {
   if (firstNumber) examples.push(`# Sort by ${firstNumber} (browse mode)\nGET /search?sort_by=${firstNumber}&sort_order=desc&limit=20`);
   if (firstNumber && firstExactField) examples.push(`# Range filter + sort\nGET /search?q=${exFuzzy}&${firstNumber}_min=1000&${firstExactField.name}=${encodeURIComponent(exExactValue)}&sort_by=${firstNumber}&sort_order=desc&limit=10`);
   if (firstExactField && numberFields.length >= 2) examples.push(`# Combined filters\nGET /search?q=${exFuzzy}&${firstExactField.name}=${encodeURIComponent(exExactValue)}&${numberFields[0]}_min=100&sort_by=${numberFields[1] || numberFields[0]}&sort_order=desc&limit=10`);
+  if (firstExactField && firstNumber) examples.push(`# Pagination metadata for numeric/range queries\nGET /search?${firstExactField.name}=${encodeURIComponent(exExactValue)}&${firstNumber}_min=100&sort_by=${firstNumber}&sort_order=desc&limit=100&offset=200&include_pagination=true`);
 
   const examplesHtml = examples.map(e => esc(e)).join('\n\n');
   const examplesMd = examples.join('\n\n');
@@ -1691,12 +1704,15 @@ async function buildDocs() {
       <tbody>
         <tr><td><code>q</code></td><td>Fuzzy search query (searches: ${fuzzyFields.join(', ')})</td></tr>
         <tr><td><code>limit</code></td><td>Max results (default 20, max 1000)</td></tr>
+        <tr><td><code>offset</code></td><td>Number of matches to skip before returning results. Best used with numeric sorts and exact/range filters.</td></tr>
+        <tr><td><code>include_pagination</code></td><td>When <code>true</code>, include pagination metadata with capped total counts. Off by default to avoid unnecessary work.</td></tr>
         <tr><td><code>sort_by</code></td><td>Field to sort by (any field name)</td></tr>
         <tr><td><code>sort_order</code></td><td><code>asc</code> or <code>desc</code> (default desc)</td></tr>
         ${exactParamRows}
         ${numberFields.map(f => `<tr><td><code>${f}_min</code> / <code>${f}_max</code></td><td>Range filter on ${f}</td></tr>`).join('')}
       </tbody>
     </table>
+    <p><code>total</code> remains the number of returned rows for backward compatibility. When <code>include_pagination=true</code>, the response adds a <code>pagination</code> object with the total number of matches, capped at <code>100000</code>. The maximum pagination window is <code>offset + limit &lt;= 100000</code>.</p>
 
     <h3>Examples</h3>
     <pre>${examplesHtml}</pre>
@@ -1713,7 +1729,7 @@ async function buildDocs() {
 
     <h2>Example response</h2>
     <pre>${esc(sampleResponse)}</pre>
-    <p>Number fields return as JSON numbers. Boolean fields return as JSON booleans or <code>null</code>. Enum/keyword/text fields return as strings. <code>_score</code> is the relevance score (higher = better match).</p>
+    <p>Number fields return as JSON numbers. Boolean fields return as JSON booleans or <code>null</code>. Enum/keyword/text fields return as strings. <code>_score</code> is the relevance score (higher = better match). The optional <code>pagination</code> object is returned only when <code>include_pagination=true</code>.</p>
   `;
 
   const md = `# ruzz API Documentation
@@ -1739,10 +1755,14 @@ Fuzzy search with optional filters, range queries, and sorting.
 |-------|-------------|
 | \`q\` | Fuzzy search query (searches: ${fuzzyFields.join(', ')}) |
 | \`limit\` | Max results (default 20, max 1000) |
+| \`offset\` | Number of matches to skip before returning results. Best used with numeric sorts and exact/range filters. |
+| \`include_pagination\` | When \`true\`, include pagination metadata with capped total counts. Off by default to avoid unnecessary work. |
 | \`sort_by\` | Field to sort/rerank by |
 | \`sort_order\` | \`asc\` or \`desc\` (default desc) |
 ${exactFields.map(f => `| \`${f.name}\` | ${describeExactFieldMarkdown(f)} |`).join('\n')}
 ${numberFields.map(f => `| \`${f}_min\` / \`${f}_max\` | Range filter on ${f} |`).join('\n')}
+
+\`total\` remains the number of returned rows for backward compatibility. When \`include_pagination=true\`, the response adds a \`pagination\` object with the total number of matches, capped at \`100000\`. The maximum pagination window is \`offset + limit <= 100000\`.
 
 ### Examples
 
@@ -1772,7 +1792,7 @@ Returns \`{"status": "ok"}\`.
 ${sampleResponse}
 \`\`\`
 
-Number fields return as JSON numbers. Boolean fields return as JSON booleans or \`null\`. Enum/keyword/text fields return as strings. \`_score\` is the relevance score (higher = better match).
+Number fields return as JSON numbers. Boolean fields return as JSON booleans or \`null\`. Enum/keyword/text fields return as strings. \`_score\` is the relevance score (higher = better match). The optional \`pagination\` object is returned only when \`include_pagination=true\`.
 `;
 
   document.getElementById('copy-llm-btn').addEventListener('click', async () => {

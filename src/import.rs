@@ -7,7 +7,9 @@ use tantivy::schema::Schema;
 use tantivy::{IndexWriter, TantivyDocument};
 
 use crate::config::{Config, FieldType};
-use crate::field_meta::{canonicalize_stored_value, write_stored_field_metadata, ImportFieldMetadataCollector};
+use crate::field_meta::{
+    canonicalize_stored_value, write_stored_field_metadata, ImportFieldMetadataCollector,
+};
 use crate::schema::build_schema;
 
 pub struct ImportStats {
@@ -26,10 +28,15 @@ pub struct SourceStats {
 /// Count lines in a file quickly (for progress bar total)
 fn count_lines(path: &Path) -> u64 {
     use std::io::{BufRead, BufReader};
-    let file = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return 0 };
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
     let reader = BufReader::with_capacity(256 * 1024, file);
     let mut count = 0u64;
-    for _ in reader.lines() { count += 1; }
+    for _ in reader.lines() {
+        count += 1;
+    }
     // Subtract header row
     count.saturating_sub(1)
 }
@@ -54,7 +61,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
 
     let multi = MultiProgress::new();
     let style = ProgressStyle::with_template(
-        "{prefix:<30} {bar:30.cyan/dim} {pos:>10}/{len:10} {per_sec:>12} ETA {eta}"
+        "{prefix:<30} {bar:30.cyan/dim} {pos:>10}/{len:10} {per_sec:>12} ETA {eta}",
     )
     .unwrap()
     .progress_chars("██░");
@@ -69,7 +76,9 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     for source in &config.sources {
         let source_start = Instant::now();
         let mapping = source.resolved_mapping(&config.mappings);
-        let file_name = source.path.file_name()
+        let file_name = source
+            .path
+            .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.path.display().to_string());
 
@@ -145,9 +154,7 @@ fn import_csv(
     metadata_collector: &mut ImportFieldMetadataCollector,
     pb: &ProgressBar,
 ) -> anyhow::Result<u64> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_path(path)?;
+    let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
 
     let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
 
@@ -172,7 +179,8 @@ fn import_csv(
             };
 
             // Try CSV column first, then defaults
-            let value = col_indices.get(&fc.name)
+            let value = col_indices
+                .get(&fc.name)
                 .and_then(|&idx| record.get(idx))
                 .map(|s| s.to_string())
                 .or_else(|| defaults.get(&fc.name).cloned())

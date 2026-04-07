@@ -120,7 +120,35 @@ curl 'localhost:8888/search?q=tech&employees_min=100&employees_max=5000'
 
 # With sorting (override relevance ranking)
 curl 'localhost:8888/search?q=energy&sort_by=employees&sort_order=desc'
+
+# Page through a numeric/range query
+curl 'localhost:8888/search?city=OSLO&revenue_min=100000000&sort_by=revenue&sort_order=desc&limit=100&offset=200'
+
+# Add pagination metadata and capped total counts
+curl 'localhost:8888/search?city=OSLO&revenue_min=100000000&sort_by=revenue&sort_order=desc&limit=100&offset=200&include_pagination=true'
 ```
+
+When `include_pagination=true`, `/search` includes an extra `pagination` object:
+
+```json
+{
+  "took_ms": 4.1,
+  "total": 100,
+  "pagination": {
+    "offset": 200,
+    "limit": 100,
+    "returned": 100,
+    "total": 18432,
+    "total_relation": "eq",
+    "has_more": true
+  },
+  "results": []
+}
+```
+
+`total` remains the number of returned rows for backward compatibility. `pagination.total` is the total number of matches, capped at `100000`. When the cap is hit, `pagination.total_relation` is `"gte"`.
+
+The maximum pagination window is `offset + limit <= 100000`.
 
 ### `GET /lookup`
 

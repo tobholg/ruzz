@@ -61,7 +61,7 @@ pub fn dir_size(path: &Path) -> u64 {
 }
 
 /// Apply memory budget by pre-warming index pages up to the budget.
-/// 
+///
 /// Strategy:
 /// - Scan all files in the index directory
 /// - Calculate what fraction of the index fits in the budget
@@ -77,7 +77,10 @@ pub fn apply_memory_budget(index_path: &Path, budget_str: &str) {
     match budget {
         None => {
             // Unlimited: warm everything
-            println!("  memory: unlimited (warming full index: {})", format_bytes(index_size));
+            println!(
+                "  memory: unlimited (warming full index: {})",
+                format_bytes(index_size)
+            );
             warm_files(index_path, 1.0);
         }
         Some(budget_bytes) => {
@@ -236,6 +239,9 @@ mod tests {
         assert_eq!(parse_memory_budget("50%", 1000), Some(500));
         assert_eq!(parse_memory_budget("512MB", 0), Some(512 * 1024 * 1024));
         assert_eq!(parse_memory_budget("2GB", 0), Some(2 * 1024 * 1024 * 1024));
-        assert_eq!(parse_memory_budget("10%", 545 * 1024 * 1024), Some(54 * 1024 * 1024 + 524288));
+        assert_eq!(
+            parse_memory_budget("10%", 545 * 1024 * 1024),
+            Some(54 * 1024 * 1024 + 524288)
+        );
     }
 }

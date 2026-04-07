@@ -88,7 +88,10 @@ pub struct SourceConfig {
 
 impl SourceConfig {
     /// Resolve the effective column mapping (inline or referenced)
-    pub fn resolved_mapping<'a>(&'a self, named: &'a HashMap<String, HashMap<String, String>>) -> HashMap<String, String> {
+    pub fn resolved_mapping<'a>(
+        &'a self,
+        named: &'a HashMap<String, HashMap<String, String>>,
+    ) -> HashMap<String, String> {
         if let Some(ref name) = self.use_mapping {
             if let Some(m) = named.get(name) {
                 return m.clone();
