@@ -176,6 +176,11 @@
   .result-score { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 6px; }
   .result-collapse { min-height: 28px; padding: 0.28rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-family: var(--font); font-size: 0.7rem; cursor: pointer; }
   .result-collapse:hover { color: var(--text); border-color: var(--text-muted); }
+  .result-full-btn { min-height: 28px; padding: 0.28rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-family: var(--font); font-size: 0.7rem; cursor: pointer; }
+  .result-full-btn:hover { color: var(--text); border-color: var(--text-muted); }
+  .result-full-btn.open { color: var(--text); border-color: var(--accent); }
+  .result-full { margin-top: 0.6rem; }
+  .result-full pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.85rem; font-size: 0.72rem; line-height: 1.5; overflow-x: auto; max-height: 340px; overflow-y: auto; white-space: pre; color: var(--text); }
   .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text); opacity: 0.7; }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
   .result-meta.compact { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -491,6 +496,8 @@ let compactResults = sessionStorage.getItem('ruzz_results_view') !== 'full';
 let resultLimit = loadStoredResultLimit();
 let lastSearchData = null;
 let expandedResultIndexes = new Set();
+let openFullRefs = new Set();
+const fullDocCache = new Map();
 let exportColumns = [];
 let exportFieldSearch = '';
 let exportLimit = DEFAULT_RESULT_LIMIT;
@@ -1396,6 +1403,12 @@ function bindResultInteractions() {
       collapseResult(Number.parseInt(button.dataset.index || '', 10));
     });
   });
+  container.querySelectorAll('.result-full-btn[data-ref]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleFullDoc(Number.parseInt(button.dataset.ref || '', 10));
+    });
+  });
 }
 
 function expandResult(index) {
@@ -1478,9 +1491,37 @@ function renderResults(data) {
     const collapseButton = compactResults && isExpanded
       ? `<button class="result-collapse" type="button" data-index="${index}">Collapse</button>`
       : '';
-    return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}${compactResults && isExpanded ? ' expanded' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}</div>`;
+    const hasRef = record._ref !== undefined && record._ref !== null;
+    const fullOpen = hasRef && openFullRefs.has(record._ref);
+    const fullButton = hasRef
+      ? `<button class="result-full-btn${fullOpen ? ' open' : ''}" type="button" data-ref="${record._ref}">${fullOpen ? 'Hide full' : 'Full'}</button>`
+      : '';
+    const fullMarkup = fullOpen
+      ? `<div class="result-full"><pre>${esc(fullDocCache.has(record._ref) ? JSON.stringify(fullDocCache.get(record._ref), null, 2) : 'Loading…')}</pre></div>`
+      : '';
+    return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}${compactResults && isExpanded ? ' expanded' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${fullButton}${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}${fullMarkup}</div>`;
   }).join('');
   bindResultInteractions();
+}
+
+async function toggleFullDoc(ref) {
+  if (openFullRefs.has(ref)) {
+    openFullRefs.delete(ref);
+    if (lastSearchData) renderResults(lastSearchData);
+    return;
+  }
+  openFullRefs.add(ref);
+  if (lastSearchData) renderResults(lastSearchData);
+  if (!fullDocCache.has(ref)) {
+    try {
+      const res = await authFetch(`${API}/doc/${ref}`);
+      const data = await res.json();
+      fullDocCache.set(ref, res.ok ? data.full : data);
+    } catch {
+      fullDocCache.set(ref, { error: 'failed to load full document' });
+    }
+    if (lastSearchData) renderResults(lastSearchData);
+  }
 }
 
 async function doSearch() {
@@ -1488,6 +1529,7 @@ async function doSearch() {
   if (!searchState.hasSearch) {
     lastSearchData = null;
     expandedResultIndexes = new Set();
+    openFullRefs = new Set();
     renderIdleResultsState();
     updateViewToggle();
     return;
@@ -1496,6 +1538,7 @@ async function doSearch() {
     const res = await authFetch(`${API}/search?${searchState.params.toString()}`); const data = await res.json();
     lastSearchData = data;
     expandedResultIndexes = new Set();
+    openFullRefs = new Set();
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';

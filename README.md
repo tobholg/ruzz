@@ -24,6 +24,7 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **🔍 Fuzzy search** — typos, partial matches, unicode normalization. "amzon" finds "Amazon". Your users can't spell, and that's okay.
 - **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
 - **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
+- **📦 Document store** *(optional)* — keep the full record behind each compact search row in a zstd-compressed on-disk store. Search stays lean and fast; `GET /doc/{ref}` returns everything, including nested JSON your CSV can't hold.
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
 - **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🖥 Web dashboard** — ships with a built-in search UI. Dark mode. Light mode.
@@ -102,6 +103,37 @@ Enum and boolean fields are indexed as exact-match filters with canonical upperc
 
 `values = "auto"` discovers low-cardinality enum values during import. The initial default cap is `128` distinct values per auto-enum field.
 
+## Document store (optional)
+
+Your schema keeps the search index lean — but sometimes you want the *whole* record back, not just the indexed fields. Enable the document store and every imported row also lands in a compressed on-disk store, referenced from search results by `_ref`:
+
+```toml
+[store]
+enabled = true
+source = "row"            # "row" or "sidecar"
+compression_level = 1     # zstd level (1 = fastest)
+block_size = "256KB"      # raw bytes per compressed block
+cache = "64MB"            # LRU cache of hot decompressed blocks
+# path = "./data/store"   # default: sibling "store" of index_path
+```
+
+Two ways to say what "full" means:
+
+- **`source = "row"`** — the full document is every CSV column (original names, including columns you never mapped into the schema) plus the source's `defaults`, stored as JSON. Zero extra files.
+- **`source = "sidecar"`** — each source brings an aligned JSONL file: line *i* is the full document for CSV row *i*, stored byte-for-byte. This is how you store *nested* documents (arrays, objects, history) that a CSV can't represent:
+
+```toml
+[[sources]]
+path = "data/companies_no.csv"
+sidecar = "data/companies_no_full.jsonl"
+defaults = { country_code = "NO" }
+mapping = { name = "organisasjonsnavn", org_number = "organisasjonsnummer" }
+```
+
+The store lives next to the index (`docs.dat` + a tiny block table), is written in one sequential pass during import, and costs nothing on the search hot path. Lookups decompress one block (~100–200μs cold, microseconds cached). Typical compression on record data: 5–10x.
+
+**Ref semantics:** `_ref` is the row's import ordinal. It is stable for the lifetime of an index, but a re-import reshuffles refs — persist your own keys (like `org_number`) externally and resolve them via `/doc?field=value`, not refs.
+
 ## API
 
 ### `GET /search`
@@ -157,6 +189,29 @@ Exact match lookup. Lightning fast for keyword, enum, and boolean fields.
 ```bash
 curl 'localhost:8888/lookup?country=US&id=123456789'
 ```
+
+### Document store endpoints
+
+Available when `[store] enabled = true`. Search results carry a `_ref` per hit.
+
+```bash
+# One full document by ref
+curl 'localhost:8888/doc/42'
+
+# Batch fetch (order-preserving, null for unknown refs, max 256)
+curl 'localhost:8888/docs?refs=42,17,993'
+
+# Resolve exact-match filters to a full document (first match + matched count)
+curl 'localhost:8888/doc?country=US&id=123456789'
+
+# Fuzzy search and hydrate hits inline (adds "_full" to each result, limit <= 100)
+curl 'localhost:8888/search?q=amazn&full=true&limit=10'
+
+# Works on /lookup too
+curl 'localhost:8888/lookup?country=US&id=123456789&full=true'
+```
+
+The two-step flow is the intended default: fast fuzzy `/search` (compact rows), let the user pick, then `/doc/{ref}` or `/docs?refs=` for the full records. `full=true` is the one-step convenience for small result pages.
 
 ### `GET /stats`
 
@@ -222,7 +277,10 @@ For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending 
 
 ## Roadmap
 
-- [ ] Live index updates (append without full rebuild)
+- [x] Document store — full records behind compact search rows
+- [ ] Zero-downtime re-imports (generational index + store, atomic swap)
+- [ ] Incremental delta imports (append/update without full rebuild)
+- [ ] JSON import (native nested-document sources)
 - [ ] Direct Postgres/MySQL import
 - [ ] Disk-optimized tree index for reduced memory footprint
 

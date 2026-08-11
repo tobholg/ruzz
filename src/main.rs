@@ -6,6 +6,7 @@ mod memory;
 mod schema;
 mod search;
 mod server;
+mod store;
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -2,18 +2,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
+use serde_json::value::RawValue;
 use sysinfo::System;
 use tower_http::cors::CorsLayer;
 
-use crate::search::SearchEngine;
+use crate::search::{SearchEngine, StoreStatus};
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 const MAX_SEARCH_LIMIT: usize = 1000;
+/// Max results that may be hydrated inline with full=true
+const MAX_FULL_LIMIT: usize = 100;
+/// Max refs per /docs batch request
+const MAX_DOC_BATCH: usize = 256;
 
 pub struct AppState {
     pub engine: SearchEngine,
@@ -27,6 +33,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(handle_dashboard))
         .route("/search", get(handle_search))
         .route("/lookup", get(handle_lookup))
+        .route("/doc", get(handle_doc_resolve))
+        .route("/doc/{doc_ref}", get(handle_doc_by_ref))
+        .route("/docs", get(handle_docs_batch))
         .route("/stats", get(handle_stats))
         .route("/health", get(handle_health))
         .with_state(state);
@@ -87,6 +96,8 @@ struct SearchParams {
     include_pagination: Option<bool>,
     sort_by: Option<String>,    // field name to sort by
     sort_order: Option<String>, // "asc" or "desc"
+    /// Hydrate each hit with its full document from the store as "_full"
+    full: Option<bool>,
     #[serde(flatten)]
     extra: HashMap<String, String>,
 }
@@ -102,6 +113,7 @@ async fn handle_search(
         .clamp(1, MAX_SEARCH_LIMIT);
     let offset = params.offset.unwrap_or(0);
     let include_pagination = params.include_pagination.unwrap_or(false);
+    let include_full = params.full.unwrap_or(false);
 
     if offset.saturating_add(limit) > crate::search::MAX_REPORTED_TOTAL {
         return Json(serde_json::json!({
@@ -113,12 +125,25 @@ async fn handle_search(
         }));
     }
 
+    if include_full {
+        if state.engine.store.is_none() {
+            return Json(store_unavailable_body(&state.engine));
+        }
+        if limit > MAX_FULL_LIMIT {
+            return Json(serde_json::json!({
+                "error": "full_limit_too_large",
+                "message": format!("full=true requires limit <= {}", MAX_FULL_LIMIT),
+            }));
+        }
+    }
+
     let mut filters = params.extra.clone();
     filters.remove("limit");
     filters.remove("offset");
     filters.remove("include_pagination");
     filters.remove("sort_by");
     filters.remove("sort_order");
+    filters.remove("full");
 
     // Extract range filters: keys ending in _min or _max
     let mut range_filters: Vec<crate::search::RangeFilter> = Vec::new();
@@ -163,6 +188,7 @@ async fn handle_search(
         limit,
         offset,
         include_pagination,
+        include_full,
     ) {
         Ok(result) => Json(serde_json::to_value(result).unwrap()),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
@@ -171,17 +197,238 @@ async fn handle_search(
 
 #[derive(serde::Deserialize)]
 struct LookupParams {
+    full: Option<bool>,
     #[serde(flatten)]
     filters: HashMap<String, String>,
 }
 
 async fn handle_lookup(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<LookupParams>,
+    Query(mut params): Query<LookupParams>,
 ) -> Json<serde_json::Value> {
-    match state.engine.lookup(&params.filters) {
+    let include_full = params.full.unwrap_or(false);
+    params.filters.remove("full");
+    if include_full && state.engine.store.is_none() {
+        return Json(store_unavailable_body(&state.engine));
+    }
+    match state.engine.lookup(&params.filters, include_full) {
         Ok(result) => Json(serde_json::to_value(result).unwrap()),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+// -- document store endpoints -------------------------------------------------
+
+fn store_unavailable_body(engine: &SearchEngine) -> serde_json::Value {
+    let message = match &engine.store_status {
+        StoreStatus::Disabled => {
+            "document store is not enabled — set [store] enabled = true and re-import".to_string()
+        }
+        StoreStatus::Error(e) => format!("document store unavailable: {}", e),
+        StoreStatus::Ok => "document store unavailable".to_string(),
+    };
+    serde_json::json!({ "error": "store_unavailable", "message": message })
+}
+
+fn store_unavailable(engine: &SearchEngine) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(store_unavailable_body(engine)),
+    )
+        .into_response()
+}
+
+/// Wrap raw stored JSON so it passes through to the response verbatim
+/// (byte-for-byte, original key order) instead of being re-parsed.
+fn raw_json(text: String) -> Box<RawValue> {
+    RawValue::from_string(text.clone()).unwrap_or_else(|_| {
+        // Stored bytes weren't valid JSON (possible in sidecar mode beyond the
+        // validated first line) — degrade to a JSON string of the raw text.
+        serde_json::value::to_raw_value(&text).expect("string is valid JSON")
+    })
+}
+
+#[derive(serde::Serialize)]
+struct DocResponse {
+    took_ms: f64,
+    #[serde(rename = "_ref")]
+    doc_ref: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched: Option<usize>,
+    full: Box<RawValue>,
+}
+
+fn round_ms(start: Instant) -> f64 {
+    (start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0
+}
+
+/// GET /doc/{ref} — one full document by ref
+async fn handle_doc_by_ref(
+    State(state): State<Arc<AppState>>,
+    Path(doc_ref): Path<u64>,
+) -> Response {
+    if state.engine.store.is_none() {
+        return store_unavailable(&state.engine);
+    }
+    let start = Instant::now();
+    match state.engine.get_full(doc_ref) {
+        Ok(Some(full)) => Json(DocResponse {
+            took_ms: round_ms(start),
+            doc_ref,
+            matched: None,
+            full: raw_json(full),
+        })
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": format!("no document with ref {}", doc_ref),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /doc?field=value&... — exact-match resolve, then hydrate the first match
+async fn handle_doc_resolve(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if state.engine.store.is_none() {
+        return store_unavailable(&state.engine);
+    }
+    let mut filters = params;
+    filters.remove("token");
+    if filters.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing_filters",
+                "message": "provide at least one exact-match filter, e.g. /doc?country_code=NO&org_number=923609016",
+            })),
+        )
+            .into_response();
+    }
+
+    let start = Instant::now();
+    match state.engine.resolve_full(&filters) {
+        Ok((_matched, None)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": "no document matched the given filters",
+            })),
+        )
+            .into_response(),
+        Ok((matched, Some((doc_ref, full)))) => Json(DocResponse {
+            took_ms: round_ms(start),
+            doc_ref,
+            matched: Some(matched),
+            full: raw_json(full),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DocsBatchParams {
+    refs: String,
+}
+
+#[derive(serde::Serialize)]
+struct DocsBatchEntry {
+    #[serde(rename = "_ref")]
+    doc_ref: u64,
+    full: Box<RawValue>,
+}
+
+/// GET /docs?refs=1,2,3 — batch fetch, order-preserving, null for missing refs
+async fn handle_docs_batch(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DocsBatchParams>,
+) -> Response {
+    if state.engine.store.is_none() {
+        return store_unavailable(&state.engine);
+    }
+
+    let mut refs: Vec<u64> = Vec::new();
+    for part in params.refs.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.parse::<u64>() {
+            Ok(r) => refs.push(r),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_ref",
+                        "message": format!("'{}' is not a valid ref", part),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if refs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing_refs",
+                "message": "provide refs as a comma-separated list, e.g. /docs?refs=42,17",
+            })),
+        )
+            .into_response();
+    }
+    if refs.len() > MAX_DOC_BATCH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "batch_too_large",
+                "message": format!("at most {} refs per request", MAX_DOC_BATCH),
+            })),
+        )
+            .into_response();
+    }
+
+    let start = Instant::now();
+    match state.engine.get_full_many(&refs) {
+        Ok(fulls) => {
+            let results: Vec<Option<DocsBatchEntry>> = refs
+                .iter()
+                .zip(fulls)
+                .map(|(&doc_ref, full)| {
+                    full.map(|f| DocsBatchEntry {
+                        doc_ref,
+                        full: raw_json(f),
+                    })
+                })
+                .collect();
+            let found = results.iter().filter(|r| r.is_some()).count();
+            Json(serde_json::json!({
+                "took_ms": round_ms(start),
+                "total": found,
+                "results": results,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -211,6 +458,35 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
 
     let num_docs = state.engine.reader.searcher().num_docs();
 
+    let store_stats = match state.engine.store.as_ref() {
+        Some(store) => {
+            let s = store.stats();
+            serde_json::json!({
+                "enabled": true,
+                "status": "ok",
+                "documents": s.doc_count,
+                "blocks": s.block_count,
+                "generation": s.generation,
+                "source_mode": s.source_mode,
+                "raw_bytes": s.raw_bytes,
+                "raw_human": format_bytes(s.raw_bytes),
+                "size_bytes": s.compressed_bytes,
+                "size_human": format_bytes(s.compressed_bytes),
+                "cache": {
+                    "capacity_bytes": s.cache_capacity_bytes,
+                    "used_bytes": s.cache_used_bytes,
+                    "entries": s.cache_entries,
+                    "hits": s.cache_hits,
+                    "misses": s.cache_misses,
+                },
+            })
+        }
+        None => serde_json::json!({
+            "enabled": state.engine.config.store.enabled,
+            "status": state.engine.store_status.as_str(),
+        }),
+    };
+
     Json(serde_json::json!({
         "status": "online",
         "uptime_seconds": uptime_secs,
@@ -222,6 +498,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             "size_human": format_bytes(index_size),
             "segments": segment_count,
         },
+        "store": store_stats,
         "memory": {
             "rss_bytes": process_memory,
             "rss_human": format_bytes(process_memory),

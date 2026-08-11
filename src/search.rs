@@ -11,6 +11,8 @@ use crate::field_meta::{
     canonicalize_filter_value, json_boolean_value, load_stored_field_metadata,
     runtime_metadata_for_field, RuntimeFieldMetadata,
 };
+use crate::schema::REF_FIELD;
+use crate::store::{self, StoreReader};
 
 pub struct SearchEngine {
     pub index: Index,
@@ -20,6 +22,26 @@ pub struct SearchEngine {
     pub field_configs: HashMap<String, crate::config::FieldConfig>,
     pub field_metadata: HashMap<String, RuntimeFieldMetadata>,
     pub config: Arc<Config>,
+    pub store: Option<StoreReader>,
+    pub store_status: StoreStatus,
+    ref_field: Option<Field>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoreStatus {
+    Disabled,
+    Ok,
+    Error(String),
+}
+
+impl StoreStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            StoreStatus::Disabled => "disabled",
+            StoreStatus::Ok => "ok",
+            StoreStatus::Error(e) => e,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -55,6 +77,36 @@ pub enum SortOrder {
 
 pub const MAX_REPORTED_TOTAL: usize = 100_000;
 
+/// Open the document store and verify it belongs to this index: the
+/// generation stamped into the index dir at import time must match the store
+/// meta, and doc counts must line up.
+fn open_store(config: &Config, reader: &IndexReader) -> anyhow::Result<StoreReader> {
+    let store_path = config.store_path();
+    let cache_bytes = store::parse_size(&config.store.cache).unwrap_or(0);
+    let store = StoreReader::open(&store_path, cache_bytes)?;
+
+    let pairing = store::read_index_pairing(&config.server.index_path)
+        .ok_or_else(|| anyhow::anyhow!(
+            "index has no store pairing file — re-run import with [store] enabled"
+        ))?;
+    if pairing.generation != store.meta.generation {
+        anyhow::bail!(
+            "store generation {} does not match index generation {} — re-run import",
+            store.meta.generation,
+            pairing.generation
+        );
+    }
+    let num_docs = reader.searcher().num_docs();
+    if store.doc_count() != num_docs {
+        anyhow::bail!(
+            "store holds {} docs but index holds {} — re-run import",
+            store.doc_count(),
+            num_docs
+        );
+    }
+    Ok(store)
+}
+
 impl SearchEngine {
     pub fn open(config: Arc<Config>) -> anyhow::Result<Self> {
         let index = Index::open_in_dir(&config.server.index_path)?;
@@ -84,6 +136,20 @@ impl SearchEngine {
             }
         }
 
+        let ref_field = schema.get_field(REF_FIELD).ok();
+        let (store, store_status) = if config.store.enabled {
+            match open_store(&config, &reader) {
+                Ok(store) => (Some(store), StoreStatus::Ok),
+                Err(e) => {
+                    let msg = format!("{:#}", e);
+                    eprintln!("⚠ document store unavailable: {} (search still works; doc endpoints disabled)", msg);
+                    (None, StoreStatus::Error(msg))
+                }
+            }
+        } else {
+            (None, StoreStatus::Disabled)
+        };
+
         Ok(Self {
             index,
             reader,
@@ -92,9 +158,13 @@ impl SearchEngine {
             field_configs,
             field_metadata,
             config,
+            store,
+            store_status,
+            ref_field,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query_text: &str,
@@ -104,6 +174,7 @@ impl SearchEngine {
         limit: usize,
         offset: usize,
         include_pagination: bool,
+        include_full: bool,
     ) -> anyhow::Result<SearchResult> {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
@@ -302,6 +373,14 @@ impl SearchEngine {
             }
 
             obj.insert("_score".to_string(), serde_json::json!(score_or_val));
+
+            if let Some(doc_ref) = self.doc_ref_of(&doc) {
+                obj.insert("_ref".to_string(), serde_json::json!(doc_ref));
+                if include_full {
+                    obj.insert("_full".to_string(), self.full_as_value(doc_ref));
+                }
+            }
+
             results.push(serde_json::Value::Object(obj));
         }
 
@@ -343,26 +422,15 @@ impl SearchEngine {
         })
     }
 
-    pub fn lookup(&self, filters: &HashMap<String, String>) -> anyhow::Result<SearchResult> {
+    pub fn lookup(
+        &self,
+        filters: &HashMap<String, String>,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
-        let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
-        for (key, value) in filters {
-            if let (Some(&field), Some(field_config)) =
-                (self.field_map.get(key), self.field_configs.get(key))
-            {
-                if let Some(normalized) = canonicalize_filter_value(&field_config.field_type, value)
-                {
-                    let term = Term::from_field_text(field, &normalized);
-                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                    subqueries.push((Occur::Must, Box::new(term_query)));
-                }
-            }
-        }
-
-        let query = BooleanQuery::new(subqueries);
+        let query = self.exact_query(filters);
         let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
         let mut results = Vec::new();
@@ -398,6 +466,14 @@ impl SearchEngine {
                     }
                 }
             }
+
+            if let Some(doc_ref) = self.doc_ref_of(&doc) {
+                obj.insert("_ref".to_string(), serde_json::json!(doc_ref));
+                if include_full {
+                    obj.insert("_full".to_string(), self.full_as_value(doc_ref));
+                }
+            }
+
             results.push(serde_json::Value::Object(obj));
         }
 
@@ -408,6 +484,93 @@ impl SearchEngine {
             pagination: None,
             results,
         })
+    }
+
+    // -- document store access ------------------------------------------------
+
+    /// Raw JSON text of one full document, by ref.
+    pub fn get_full(&self, doc_ref: u64) -> anyhow::Result<Option<String>> {
+        let Some(store) = self.store.as_ref() else {
+            anyhow::bail!("document store not available");
+        };
+        let Some(bytes) = store.get(doc_ref)? else {
+            return Ok(None);
+        };
+        Ok(Some(String::from_utf8(bytes).map_err(|_| {
+            anyhow::anyhow!("stored document {} is not valid UTF-8", doc_ref)
+        })?))
+    }
+
+    pub fn get_full_many(&self, refs: &[u64]) -> anyhow::Result<Vec<Option<String>>> {
+        refs.iter().map(|&r| self.get_full(r)).collect()
+    }
+
+    /// Resolve exact-match filters to a full document: term query → first hit's
+    /// `_ref` → store. Returns (matched_count, first_match).
+    pub fn resolve_full(
+        &self,
+        filters: &HashMap<String, String>,
+    ) -> anyhow::Result<(usize, Option<(u64, String)>)> {
+        if self.store.is_none() {
+            anyhow::bail!("document store not available");
+        }
+        let searcher = self.reader.searcher();
+        let query = self.exact_query(filters);
+
+        let mut collectors = MultiCollector::new();
+        let docs_handle = collectors.add_collector(TopDocs::with_limit(1));
+        let count_handle = collectors.add_collector(Count);
+        let mut fruit = searcher.search(&query, &collectors)?;
+        let matched = count_handle.extract(&mut fruit);
+        let top_docs = docs_handle.extract(&mut fruit);
+
+        let Some((_score, doc_address)) = top_docs.first() else {
+            return Ok((matched, None));
+        };
+        let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
+        let doc_ref = self
+            .doc_ref_of(&doc)
+            .ok_or_else(|| anyhow::anyhow!("matched document has no _ref"))?;
+        let full = self
+            .get_full(doc_ref)?
+            .ok_or_else(|| anyhow::anyhow!("ref {} missing from store", doc_ref))?;
+        Ok((matched, Some((doc_ref, full))))
+    }
+
+    fn exact_query(&self, filters: &HashMap<String, String>) -> BooleanQuery {
+        let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for (key, value) in filters {
+            if let (Some(&field), Some(field_config)) =
+                (self.field_map.get(key), self.field_configs.get(key))
+            {
+                if let Some(normalized) = canonicalize_filter_value(&field_config.field_type, value)
+                {
+                    let term = Term::from_field_text(field, &normalized);
+                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+                    subqueries.push((Occur::Must, Box::new(term_query)));
+                }
+            }
+        }
+        BooleanQuery::new(subqueries)
+    }
+
+    fn doc_ref_of(&self, doc: &tantivy::TantivyDocument) -> Option<u64> {
+        let rf = self.ref_field?;
+        doc.get_first(rf).and_then(|v| v.as_u64())
+    }
+
+    /// Full document as a JSON value for embedding into search results.
+    /// Parse errors degrade to a string; a missing doc degrades to null.
+    fn full_as_value(&self, doc_ref: u64) -> serde_json::Value {
+        let Some(store) = self.store.as_ref() else {
+            return serde_json::Value::Null;
+        };
+        match store.get(doc_ref) {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+            }),
+            _ => serde_json::Value::Null,
+        }
     }
 }
 
@@ -453,7 +616,9 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder, MAX_REPORTED_TOTAL};
-    use crate::config::{Config, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig};
+    use crate::config::{
+        Config, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
+    };
     use crate::schema::build_schema;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -507,9 +672,10 @@ mod tests {
             },
             sources: Vec::<SourceConfig>::new(),
             mappings: HashMap::new(),
+            store: StoreConfig::default(),
         });
 
-        let (schema, _) = build_schema(&config.schema);
+        let (schema, _) = build_schema(&config.schema, false);
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
 
@@ -551,6 +717,7 @@ mod tests {
                 2,
                 1,
                 true,
+                false,
             )
             .unwrap();
 

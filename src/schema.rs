@@ -3,10 +3,21 @@ use tantivy::schema::*;
 
 use crate::config::{FieldType, SchemaConfig, SearchMode};
 
+/// Sequential import ordinal linking an index row to its full document in the
+/// on-disk store. Only present when the store is enabled. Not stable across
+/// re-imports — external systems should persist user keys, not refs.
+pub const REF_FIELD: &str = "_ref";
+
 /// Build a Tantivy schema from config, return (Schema, field_name → Field map)
-pub fn build_schema(config: &SchemaConfig) -> (Schema, HashMap<String, Field>) {
+pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<String, Field>) {
     let mut builder = Schema::builder();
     let mut field_map = HashMap::new();
+
+    if with_ref {
+        // STORED so search hits carry it; FAST so future features (delete by
+        // ref, hydration push-down) get columnar access. Not indexed.
+        builder.add_u64_field(REF_FIELD, NumericOptions::default().set_stored().set_fast());
+    }
 
     for fc in &config.fields {
         let field = match fc.field_type {
