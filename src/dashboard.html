@@ -180,7 +180,24 @@
   .result-full-btn:hover { color: var(--text); border-color: var(--text-muted); }
   .result-full-btn.open { color: var(--text); border-color: var(--accent); }
   .result-full { margin-top: 0.6rem; }
-  .result-full pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.85rem; font-size: 0.72rem; line-height: 1.5; overflow-x: auto; max-height: 340px; overflow-y: auto; white-space: pre; color: var(--text); }
+  .result-full pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.85rem; font-size: 0.72rem; line-height: 1.5; overflow-x: auto; max-height: 420px; overflow-y: auto; white-space: pre; color: var(--text); }
+  .result-full-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
+  .fd-ref { color: var(--text-muted); font-size: 0.68rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .fd-toggle { min-height: 24px; padding: 0.18rem 0.5rem; border-radius: 7px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font-family: var(--font); font-size: 0.66rem; cursor: pointer; }
+  .fd-toggle:hover { color: var(--text); border-color: var(--text-muted); }
+  .full-doc { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.65rem 0.8rem; font-size: 0.72rem; line-height: 1.55; max-height: 420px; overflow: auto; }
+  .fd-grid { display: grid; grid-template-columns: minmax(150px, 250px) 1fr; gap: 1px 14px; }
+  .fd-key { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.68rem; word-break: break-word; padding-top: 0.07rem; }
+  .fd-val { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.7rem; word-break: break-word; }
+  .fd-null { color: var(--text-muted); }
+  .fd-section { margin-top: 0.55rem; }
+  .fd-section > summary { cursor: pointer; font-weight: 600; font-size: 0.73rem; color: var(--text); padding: 0.15rem 0; user-select: none; }
+  .fd-section > summary:hover { color: var(--accent); }
+  .fd-count { color: var(--text-muted); font-weight: 400; font-size: 0.66rem; margin-left: 0.35rem; }
+  .fd-section .fd-grid, .fd-section .fd-items { margin-top: 0.3rem; }
+  details.fd-item { margin: 0.3rem 0; }
+  details.fd-item > summary { cursor: pointer; font-weight: 600; font-size: 0.7rem; color: var(--accent); user-select: none; }
+  details.fd-item > .fd-grid { margin: 0.3rem 0 0.5rem 0; padding-left: 0.7rem; border-left: 2px solid var(--border); }
   .result-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--text); opacity: 0.7; }
   .result-meta span { display: flex; align-items: center; gap: 0.3rem; }
   .result-meta.compact { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -497,6 +514,7 @@ let resultLimit = loadStoredResultLimit();
 let lastSearchData = null;
 let expandedResultIndexes = new Set();
 let openFullRefs = new Set();
+let rawFullRefs = new Set();
 const fullDocCache = new Map();
 let exportColumns = [];
 let exportFieldSearch = '';
@@ -1409,6 +1427,14 @@ function bindResultInteractions() {
       toggleFullDoc(Number.parseInt(button.dataset.ref || '', 10));
     });
   });
+  container.querySelectorAll('.fd-toggle[data-ref]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      const ref = Number.parseInt(button.dataset.ref || '', 10);
+      if (rawFullRefs.has(ref)) rawFullRefs.delete(ref); else rawFullRefs.add(ref);
+      if (lastSearchData) renderResults(lastSearchData);
+    });
+  });
 }
 
 function expandResult(index) {
@@ -1497,11 +1523,75 @@ function renderResults(data) {
       ? `<button class="result-full-btn${fullOpen ? ' open' : ''}" type="button" data-ref="${record._ref}">${fullOpen ? 'Hide full' : 'Full'}</button>`
       : '';
     const fullMarkup = fullOpen
-      ? `<div class="result-full"><pre>${esc(fullDocCache.has(record._ref) ? JSON.stringify(fullDocCache.get(record._ref), null, 2) : 'Loading…')}</pre></div>`
+      ? `<div class="result-full">${renderFullPanel(record._ref)}</div>`
       : '';
     return `<div class="result-card${compactResults && !isExpanded ? ' expandable' : ''}${compactResults && isExpanded ? ' expanded' : ''}" data-index="${index}"><div class="result-header"><span class="result-name">${esc(name)}</span><div class="result-header-tools">${fullButton}${collapseButton}<span class="result-score">${score}</span></div></div>${metaMarkup}${fullMarkup}</div>`;
   }).join('');
   bindResultInteractions();
+}
+
+function renderFullPanel(ref) {
+  if (!fullDocCache.has(ref)) {
+    return `<div class="full-doc"><span class="fd-null">Loading full document…</span></div>`;
+  }
+  const doc = fullDocCache.get(ref);
+  const raw = rawFullRefs.has(ref);
+  const head = `<div class="result-full-head"><span class="fd-ref">ref ${esc(String(ref))}</span><button class="fd-toggle" type="button" data-ref="${ref}">${raw ? 'Formatted view' : 'Raw JSON'}</button></div>`;
+  if (raw) {
+    return `${head}<pre>${esc(JSON.stringify(doc, null, 2))}</pre>`;
+  }
+  return `${head}<div class="full-doc">${renderFullDoc(doc)}</div>`;
+}
+
+// Structured view of a full document: top-level scalars as a key/value grid,
+// nested objects and arrays as collapsible sections. Schema-agnostic — keys
+// are shown exactly as stored (they are raw source column names).
+function renderFullDoc(doc) {
+  if (doc === null || typeof doc !== 'object') {
+    return `<span class="fd-val">${esc(String(doc))}</span>`;
+  }
+  if (Array.isArray(doc)) return renderFullValue(doc);
+
+  const scalarRows = [];
+  const sections = [];
+  for (const [key, value] of Object.entries(doc)) {
+    if (value !== null && typeof value === 'object') {
+      const count = Array.isArray(value) ? value.length : Object.keys(value).length;
+      const body = Array.isArray(value)
+        ? `<div class="fd-items">${renderFullValue(value)}</div>`
+        : renderFullValue(value);
+      sections.push(`<details class="fd-section" open><summary>${esc(key)}<span class="fd-count">${count} ${Array.isArray(value) ? 'entries' : 'fields'}</span></summary>${body}</details>`);
+    } else {
+      scalarRows.push(`<div class="fd-key">${esc(key)}</div><div class="fd-val">${renderFullValue(value)}</div>`);
+    }
+  }
+  const scalars = scalarRows.length ? `<div class="fd-grid">${scalarRows.join('')}</div>` : '';
+  return scalars + sections.join('');
+}
+
+function renderFullValue(value) {
+  if (value === null || value === undefined || value === '') {
+    return `<span class="fd-null">—</span>`;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return `<span class="fd-null">—</span>`;
+    return value.map((item, i) => {
+      if (item === null || typeof item !== 'object') {
+        return `<div class="fd-val">${esc(String(item))}</div>`;
+      }
+      // Label array entries by a date/year-ish key when one exists
+      const label = item.DATE_TO || item.FINANCIAL_YEAR || item.date_to || item.year
+        || item.DATE_FROM || `entry ${i + 1}`;
+      return `<details class="fd-item"${i === 0 ? ' open' : ''}><summary>${esc(String(label))}</summary>${renderFullValue(item)}</details>`;
+    }).join('');
+  }
+  if (typeof value === 'object') {
+    const rows = Object.entries(value).map(([k, v]) =>
+      `<div class="fd-key">${esc(k)}</div><div class="fd-val">${renderFullValue(v)}</div>`
+    ).join('');
+    return `<div class="fd-grid">${rows}</div>`;
+  }
+  return esc(String(value));
 }
 
 async function toggleFullDoc(ref) {
@@ -1530,6 +1620,7 @@ async function doSearch() {
     lastSearchData = null;
     expandedResultIndexes = new Set();
     openFullRefs = new Set();
+    rawFullRefs = new Set();
     renderIdleResultsState();
     updateViewToggle();
     return;
@@ -1539,6 +1630,7 @@ async function doSearch() {
     lastSearchData = data;
     expandedResultIndexes = new Set();
     openFullRefs = new Set();
+    rawFullRefs = new Set();
     document.getElementById('query-meta').style.display = 'flex';
     document.getElementById('result-count').textContent = data.total;
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
