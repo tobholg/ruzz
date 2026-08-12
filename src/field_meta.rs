@@ -14,6 +14,12 @@ const FIELD_METADATA_FILE: &str = "ruzz_field_metadata.json";
 pub struct StoredFieldMetadata {
     #[serde(default)]
     pub fields: HashMap<String, StoredFieldMetadataEntry>,
+    /// Keyword fields whose terms were lowercased at index time. Filters may
+    /// only be folded for these — an index built before case-insensitive
+    /// matching existed has none, so it keeps exact-match behaviour and
+    /// upgrading the binary alone never breaks queries.
+    #[serde(default)]
+    pub case_insensitive_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -183,11 +189,17 @@ pub fn enum_auto_max(field: &FieldConfig) -> usize {
 
 pub struct ImportFieldMetadataCollector {
     fields: HashMap<String, EnumCollector>,
+    case_insensitive_fields: Vec<String>,
 }
 
 impl ImportFieldMetadataCollector {
     pub fn new(field_configs: &[FieldConfig]) -> Self {
         let mut fields = HashMap::new();
+        let case_insensitive_fields = field_configs
+            .iter()
+            .filter(|f| f.field_type == FieldType::Keyword && !f.case_sensitive)
+            .map(|f| f.name.clone())
+            .collect();
 
         for field in field_configs {
             if field.field_type != FieldType::Enum {
@@ -203,7 +215,10 @@ impl ImportFieldMetadataCollector {
             fields.insert(field.name.clone(), collector);
         }
 
-        Self { fields }
+        Self {
+            fields,
+            case_insensitive_fields,
+        }
     }
 
     pub fn observe(&mut self, field: &FieldConfig, value: &str) {
@@ -224,7 +239,10 @@ impl ImportFieldMetadataCollector {
             .map(|(name, collector)| (name, collector.into_stored()))
             .collect();
 
-        StoredFieldMetadata { fields }
+        StoredFieldMetadata {
+            fields,
+            case_insensitive_fields: self.case_insensitive_fields,
+        }
     }
 }
 

@@ -8,6 +8,11 @@ use crate::config::{FieldType, SchemaConfig, SearchMode};
 /// re-imports — external systems should persist user keys, not refs.
 pub const REF_FIELD: &str = "_ref";
 
+/// Whole-value tokenizer that lowercases, so keyword filters match
+/// regardless of the caller's casing. Stored values keep their original
+/// case — only the indexed term is folded.
+pub const KEYWORD_CI_TOKENIZER: &str = "keyword_ci";
+
 /// Build a Tantivy schema from config, return (Schema, field_name → Field map)
 pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<String, Field>) {
     let mut builder = Schema::builder();
@@ -22,7 +27,7 @@ pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<S
     for fc in &config.fields {
         let field = match fc.field_type {
             FieldType::Text => {
-                if fc.search == Some(SearchMode::Fuzzy) {
+                if matches!(fc.search, Some(SearchMode::Fuzzy) | Some(SearchMode::Substring)) {
                     let options = TextOptions::default()
                         .set_indexing_options(
                             TextFieldIndexing::default()
@@ -40,10 +45,15 @@ pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<S
                 TextOptions::default()
                     .set_indexing_options(
                         TextFieldIndexing::default()
-                            .set_tokenizer("raw")
+                            .set_tokenizer(if fc.case_sensitive {
+                                "raw"
+                            } else {
+                                KEYWORD_CI_TOKENIZER
+                            })
                             .set_index_option(IndexRecordOption::Basic),
                     )
                     .set_stored()
+                    // Fast field keeps the raw value, so sorting is unaffected
                     .set_fast(None),
             ),
             FieldType::Enum | FieldType::Boolean => builder.add_text_field(

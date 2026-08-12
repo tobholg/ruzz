@@ -464,6 +464,15 @@ pub fn register_trigram_tokenizer_pub(index: &tantivy::Index) {
         .build();
 
     index.tokenizers().register("trigram", tokenizer);
+
+    // Whole value as one token, lowercased — keyword filters match any casing
+    // while the stored value keeps its original form.
+    let keyword_ci = TextAnalyzer::builder(RawTokenizer::default())
+        .filter(LowerCaser)
+        .build();
+    index
+        .tokenizers()
+        .register(crate::schema::KEYWORD_CI_TOKENIZER, keyword_ci);
 }
 
 #[cfg(test)]
@@ -494,6 +503,7 @@ mod tests {
             search: fuzzy.then_some(crate::config::SearchMode::Fuzzy),
             values: None,
             max_values: None,
+            case_sensitive: false,
         }
     }
 
@@ -504,6 +514,7 @@ mod tests {
             search: None,
             values: None,
             max_values: None,
+            case_sensitive: false,
         }
     }
 
@@ -616,7 +627,7 @@ org_number,company_name,city,secret_extra
         let parsed: serde_json::Value = serde_json::from_str(&full).unwrap();
         assert_eq!(parsed["company_name"], "Beta Bakery");
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -652,7 +663,7 @@ org_number,company_name,city,secret_extra
         // null is a valid "no document" marker
         assert_eq!(engine.get_full(2).unwrap().unwrap(), "null");
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -692,7 +703,7 @@ org_number,company_name,city,secret_extra
         let err = run_import(&config).unwrap_err().to_string();
         assert!(err.contains("more lines"), "got: {err}");
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -735,7 +746,7 @@ org_number,company_name,city,secret_extra
         // But full access errors
         assert!(engine.get_full(0).is_err());
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -780,6 +791,6 @@ org_number,company_name,city,secret_extra
         assert!(result.results[0].get("_ref").is_none());
         assert!(result.results[0].get("_full").is_none());
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

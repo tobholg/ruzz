@@ -27,6 +27,10 @@ pub struct SearchEngine {
     pub store: Option<StoreReader>,
     pub store_status: StoreStatus,
     ref_field: Option<Field>,
+    /// Keyword fields the index folded to lowercase. Filters are folded to
+    /// match only for these, so a new binary on an old index keeps its
+    /// original exact-match behaviour.
+    case_insensitive_fields: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +154,11 @@ impl SearchEngine {
         }
 
         let stored_metadata = load_stored_field_metadata(&config.server.index_path)?;
+        let case_insensitive_fields: std::collections::HashSet<String> = stored_metadata
+            .case_insensitive_fields
+            .iter()
+            .cloned()
+            .collect();
         let mut field_metadata = HashMap::new();
         for fc in &config.schema.fields {
             let meta = runtime_metadata_for_field(fc, stored_metadata.fields.get(&fc.name));
@@ -183,7 +192,37 @@ impl SearchEngine {
             store,
             store_status,
             ref_field,
+            case_insensitive_fields,
         })
+    }
+
+    /// Fold a filter value the same way the index folded its terms.
+    fn match_case(&self, field: &str, value: String) -> String {
+        if self.case_insensitive_fields.contains(field) {
+            value.to_lowercase()
+        } else {
+            value
+        }
+    }
+
+    /// Trigram query over one field. `occur` is Should for relevance-ranked
+    /// fuzzy matching and Must for substring matching, where every trigram of
+    /// the value has to be present.
+    fn trigram_query(&self, field: Field, text: &str, occur: Occur) -> Option<BooleanQuery> {
+        let ngrams = generate_ngrams(&text.to_lowercase(), 3, 3);
+        if ngrams.is_empty() {
+            return None;
+        }
+        let clauses: Vec<(Occur, Box<dyn Query>)> = ngrams
+            .iter()
+            .map(|ng| {
+                let term = Term::from_field_text(field, ng);
+                let query: Box<dyn Query> =
+                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions));
+                (occur, query)
+            })
+            .collect();
+        Some(BooleanQuery::new(clauses))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -218,9 +257,18 @@ impl SearchEngine {
             if let (Some(&field), Some(field_config)) =
                 (self.field_map.get(key), self.field_configs.get(key))
             {
+                // Substring fields are trigram-indexed: match every trigram
+                // of the value rather than the value as one term.
+                if field_config.search == Some(SearchMode::Substring) {
+                    if let Some(query) = self.trigram_query(field, value, Occur::Must) {
+                        subqueries.push((Occur::Must, const_score(Box::new(query))));
+                    }
+                    continue;
+                }
                 let values: Vec<String> = value
                     .split(',')
                     .filter_map(|s| canonicalize_filter_value(&field_config.field_type, s))
+                    .map(|v| self.match_case(key, v))
                     .collect();
                 // Filters are wrapped in ConstScoreQuery so they contribute no
                 // relevance. Without this, BM25 gives rarer values a higher
@@ -263,21 +311,16 @@ impl SearchEngine {
 
         // Fuzzy search with trigrams
         if !query_text.is_empty() && !fuzzy_fields.is_empty() {
-            let normalized = query_text.to_lowercase();
-            let ngrams = generate_ngrams(&normalized, 3, 3);
-
-            let mut ngram_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-            for field in &fuzzy_fields {
-                for ng in &ngrams {
-                    let term = Term::from_field_text(*field, ng);
-                    let tq = TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions);
-                    ngram_queries.push((Occur::Should, Box::new(tq)));
-                }
-            }
+            let ngram_queries: Vec<(Occur, Box<dyn Query>)> = fuzzy_fields
+                .iter()
+                .filter_map(|field| {
+                    self.trigram_query(*field, query_text, Occur::Should)
+                        .map(|q| (Occur::Should, Box::new(q) as Box<dyn Query>))
+                })
+                .collect();
 
             if !ngram_queries.is_empty() {
-                let ngram_bool = BooleanQuery::new(ngram_queries);
-                subqueries.push((Occur::Must, Box::new(ngram_bool)));
+                subqueries.push((Occur::Must, Box::new(BooleanQuery::new(ngram_queries))));
             }
         }
 
@@ -598,6 +641,7 @@ impl SearchEngine {
             {
                 if let Some(normalized) = canonicalize_filter_value(&field_config.field_type, value)
                 {
+                    let normalized = self.match_case(key, normalized);
                     let term = Term::from_field_text(field, &normalized);
                     let term_query = TermQuery::new(term, IndexRecordOption::Basic);
                     subqueries.push((Occur::Must, Box::new(term_query)));
@@ -706,6 +750,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -713,6 +758,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -720,6 +766,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                 ],
             },
@@ -731,6 +778,7 @@ mod tests {
         let (schema, _) = build_schema(&config.schema, false);
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
 
         {
             let city = schema.get_field("city").unwrap();
@@ -783,7 +831,7 @@ mod tests {
         assert_eq!(result.results[0]["revenue"], serde_json::json!(150.0));
         assert_eq!(result.results[1]["revenue"], serde_json::json!(120.0));
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -798,6 +846,7 @@ mod tests {
         let (schema, _) = build_schema(&config.schema, false);
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
         {
             let city = schema.get_field("city").unwrap();
             let revenue = schema.get_field("revenue").unwrap();
@@ -833,7 +882,80 @@ mod tests {
             "filter clauses must score uniformly, got {scores:?}"
         );
 
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keyword_filters_match_regardless_of_case() {
+        let dir = test_index_dir("case-insensitive");
+        let config = test_config(&dir);
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            // `name` is a keyword field holding mixed-case text
+            writer
+                .add_document(doc!(city => "OSLO", revenue => 10.0, name => "Forusbeen AS"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        // Written as if the import had recorded the folding
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["name".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        for probe in ["Forusbeen AS", "forusbeen as", "FORUSBEEN AS"] {
+            let mut filters = HashMap::new();
+            filters.insert("name".to_string(), probe.to_string());
+            let result = engine
+                .search("", &filters, &[], &SortOrder::Relevance, 5, 0, false, true, false)
+                .unwrap();
+            assert_eq!(result.returned, 1, "casing {probe:?} should still match");
+            assert_eq!(
+                result.results[0]["name"], "Forusbeen AS",
+                "stored value keeps its original casing"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn case_folding_is_skipped_for_indexes_that_did_not_fold() {
+        // A binary upgrade alone must not change query semantics: without the
+        // metadata marker the filter value is used verbatim.
+        let dir = test_index_dir("case-legacy");
+        let config = test_config(&dir);
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            writer
+                .add_document(doc!(city => "OSLO", revenue => 10.0, name => "Mixed Case"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        // No metadata file at all — the pre-upgrade situation
+        let engine = SearchEngine::open(config).unwrap();
+        assert!(engine.case_insensitive_fields.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn test_config(dir: &PathBuf) -> Arc<Config> {
@@ -853,6 +975,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -860,6 +983,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -867,6 +991,7 @@ mod tests {
                         search: None,
                         values: None,
                         max_values: None,
+                        case_sensitive: false,
                     },
                 ],
             },

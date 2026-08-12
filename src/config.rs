@@ -58,6 +58,15 @@ pub enum StoreSource {
     Sidecar,
 }
 
+impl SearchMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Fuzzy => "fuzzy",
+            SearchMode::Substring => "substring",
+        }
+    }
+}
+
 impl StoreSource {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -124,6 +133,10 @@ pub struct FieldConfig {
     pub values: Option<EnumValuesConfig>,
     #[serde(default)]
     pub max_values: Option<usize>,
+    /// Keyword fields match case-insensitively by default. Set true to
+    /// require exact casing (identifiers, codes with meaningful case).
+    #[serde(default)]
+    pub case_sensitive: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -143,10 +156,16 @@ pub enum EnumValuesConfig {
     List(Vec<String>),
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
+    /// Trigram-indexed and searched by the global `q` parameter.
     Fuzzy,
+    /// Trigram-indexed but excluded from `q`; queried through its own
+    /// parameter, where every trigram of the value must be present. Gives
+    /// case-insensitive substring matching over free text such as street
+    /// addresses without diluting name relevance.
+    Substring,
 }
 
 #[derive(Debug, Deserialize)]

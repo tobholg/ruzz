@@ -606,7 +606,7 @@ mod tests {
         }
         assert_eq!(reader.get(500).unwrap(), None);
         assert_eq!(reader.get(u64::MAX).unwrap(), None);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -617,7 +617,7 @@ mod tests {
         let reader = StoreReader::open(&dir, 0).unwrap(); // cache disabled
         assert_eq!(reader.get(0).unwrap().unwrap().len(), 100_000);
         assert_eq!(reader.get(1).unwrap().unwrap(), b"small");
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -627,7 +627,7 @@ mod tests {
         let reader = StoreReader::open(&dir, 1024).unwrap();
         assert_eq!(reader.doc_count(), 0);
         assert_eq!(reader.get(0).unwrap(), None);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod tests {
         }
         let stats = reader.stats();
         assert!(stats.cache_used_bytes <= 10_000);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -659,7 +659,7 @@ mod tests {
         writer.finish().unwrap();
         // No meta.json written → open must fail (commit marker semantics)
         assert!(StoreReader::open(&dir, 1024).is_err());
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -680,6 +680,6 @@ mod tests {
         assert!(!looks_like_store_dir(&dir)); // foreign content is not
         std::fs::write(dir.join(DOCS_FILE), "x").unwrap();
         assert!(looks_like_store_dir(&dir)); // crash leftovers are
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
