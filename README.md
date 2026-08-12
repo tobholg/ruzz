@@ -160,7 +160,29 @@ curl 'localhost:8888/search?city=OSLO&revenue_min=100000000&sort_by=revenue&sort
 curl 'localhost:8888/search?city=OSLO&revenue_min=100000000&sort_by=revenue&sort_order=desc&limit=100&offset=200&include_pagination=true'
 ```
 
-When `include_pagination=true`, `/search` includes an extra `pagination` object:
+Every response reports how many documents match — exactly, with no cap:
+
+```json
+{
+  "took_ms": 4.1,
+  "count": 44678,
+  "returned": 20,
+  "offset": 0,
+  "limit": 20,
+  "has_more": true,
+  "results": []
+}
+```
+
+`count` is the number of documents matching the current search state (query plus every filter), independent of `limit`/`offset`. It is nearly free on text searches, which already traverse the whole matching set; pass `count=false` to skip it on broad filter-only browses. `returned` is the number of rows in the response. `total` is a deprecated alias of `returned`, kept so existing clients keep working.
+
+Comma-separated values are OR'ed within a parameter, and filters never influence ranking — only `q` does:
+
+```bash
+curl 'localhost:8888/search?city=OSLO,BERGEN&limit=20'
+```
+
+When `include_pagination=true`, `/search` also includes the legacy `pagination` object:
 
 ```json
 {
@@ -178,9 +200,34 @@ When `include_pagination=true`, `/search` includes an extra `pagination` object:
 }
 ```
 
-`total` remains the number of returned rows for backward compatibility. `pagination.total` is the total number of matches, capped at `100000`. When the cap is hit, `pagination.total_relation` is `"gte"`.
+The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`.
 
-The maximum pagination window is `offset + limit <= 100000`.
+### `GET /fields`, `GET /docs`, `GET /openapi.json`
+
+Self-documenting, generated from the live schema so they can't drift:
+
+```bash
+curl 'localhost:8888/fields'        # every accepted parameter, as JSON
+curl 'localhost:8888/docs'          # the whole reference as Markdown
+curl 'localhost:8888/openapi.json'  # OpenAPI 3.1
+```
+
+`/docs` is sized to be fetched whole by an LLM — one request and an agent knows every valid parameter for your schema.
+
+### Strict parameters
+
+By default an unknown query parameter is reported in `ignored_parameters` on the response. Set `strict_params = true` under `[server]` to reject it instead:
+
+```json
+{
+  "error": "invalid_parameters",
+  "message": "Unknown query parameter(s): registerd_town. See /fields for the full list.",
+  "unknown_parameters": ["registerd_town"],
+  "did_you_mean": { "registerd_town": "registered_town" }
+}
+```
+
+Without this, a misspelled filter is silently dropped and the response looks like a valid unfiltered result set.
 
 ### `GET /lookup`
 
