@@ -92,6 +92,12 @@ pub struct ServerConfig {
     /// require Authorization: Bearer <token> header or ?token=<token> param.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Reject requests carrying unknown query parameters with HTTP 400
+    /// instead of silently ignoring them. When false (the default), unknown
+    /// parameters are still reported in the response as
+    /// `ignored_parameters` so mistakes surface either way.
+    #[serde(default)]
+    pub strict_params: bool,
 }
 
 fn default_memory_budget() -> String {

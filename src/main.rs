@@ -3,6 +3,7 @@ mod dashboard;
 mod field_meta;
 mod import;
 mod memory;
+mod params;
 mod schema;
 mod search;
 mod server;

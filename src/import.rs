@@ -514,6 +514,7 @@ mod tests {
                 index_path: dir.join("index"),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
+                strict_params: false,
             },
             schema: SchemaConfig {
                 fields: vec![

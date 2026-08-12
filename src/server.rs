@@ -150,6 +150,9 @@ async fn handle_search(
     filters.remove("full");
     filters.remove("count");
 
+    let mut unknown_params: Vec<String> = Vec::new();
+    let mut invalid_params: Vec<String> = Vec::new();
+
     // Extract range filters: keys ending in _min or _max
     let mut range_filters: Vec<crate::search::RangeFilter> = Vec::new();
     let range_keys: Vec<String> = filters
@@ -162,20 +165,68 @@ async fn handle_search(
     let mut range_fields: HashMap<String, (Option<f64>, Option<f64>)> = HashMap::new();
     for key in &range_keys {
         let value = filters.remove(key).unwrap_or_default();
-        let num = value.parse::<f64>().ok();
-        if let Some(n) = num {
-            if let Some(base) = key.strip_suffix("_min") {
-                let entry = range_fields.entry(base.to_string()).or_insert((None, None));
-                entry.0 = Some(n);
-            } else if let Some(base) = key.strip_suffix("_max") {
-                let entry = range_fields.entry(base.to_string()).or_insert((None, None));
-                entry.1 = Some(n);
-            }
+        let Some(base) = key.strip_suffix("_min").or_else(|| key.strip_suffix("_max")) else {
+            continue;
+        };
+        // A range suffix on something that is not a numeric field is a typo,
+        // not a filter — report the key the caller actually sent.
+        if !state.engine.field_map.contains_key(base) {
+            unknown_params.push(key.clone());
+            continue;
+        }
+        let Ok(num) = value.parse::<f64>() else {
+            invalid_params.push(format!("{}={}", key, value));
+            continue;
+        };
+        let entry = range_fields.entry(base.to_string()).or_insert((None, None));
+        if key.ends_with("_min") {
+            entry.0 = Some(num);
+        } else {
+            entry.1 = Some(num);
         }
     }
 
     for (field, (min, max)) in range_fields {
         range_filters.push(crate::search::RangeFilter { field, min, max });
+    }
+
+    // Anything left in `filters` that is not a schema field is a typo or a
+    // stale parameter. Previously these were dropped in silence, so a
+    // misspelled filter quietly returned unfiltered results.
+    let known = crate::params::KnownParams::build(&state.engine);
+    for key in filters.keys() {
+        if !known.contains(key) {
+            unknown_params.push(key.clone());
+        }
+    }
+    unknown_params.sort();
+    invalid_params.sort();
+
+    if (!unknown_params.is_empty() || !invalid_params.is_empty())
+        && state.engine.config.server.strict_params
+    {
+        let suggestions: serde_json::Map<String, serde_json::Value> = unknown_params
+            .iter()
+            .filter_map(|p| known.suggest(p).map(|s| (p.clone(), serde_json::Value::String(s))))
+            .collect();
+        let mut message = String::new();
+        if !unknown_params.is_empty() {
+            message.push_str(&format!(
+                "Unknown query parameter(s): {}. ",
+                unknown_params.join(", ")
+            ));
+        }
+        if !invalid_params.is_empty() {
+            message.push_str(&format!("Invalid value(s): {}. ", invalid_params.join(", ")));
+        }
+        message.push_str("See /fields for the full list.");
+        return Json(serde_json::json!({
+            "error": "invalid_parameters",
+            "message": message,
+            "unknown_parameters": unknown_params,
+            "invalid_parameters": invalid_params,
+            "did_you_mean": suggestions,
+        }));
     }
 
     // Sort
@@ -196,7 +247,20 @@ async fn handle_search(
         want_count,
         include_full,
     ) {
-        Ok(result) => Json(serde_json::to_value(result).unwrap()),
+        Ok(result) => {
+            let mut value = serde_json::to_value(result).unwrap();
+            let ignored: Vec<String> = unknown_params
+                .iter()
+                .chain(invalid_params.iter())
+                .cloned()
+                .collect();
+            if !ignored.is_empty() {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("ignored_parameters".to_string(), serde_json::json!(ignored));
+                }
+            }
+            Json(value)
+        }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
 }
