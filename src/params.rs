@@ -244,7 +244,7 @@ within one parameter widen it (OR).\n\n",
     out.push_str("- `total` — deprecated alias of `returned`; use `count` for the number of matches.\n");
     out.push_str("- `_score` on each row — relevance, driven by `q` only. Filters never affect ranking.\n\n");
 
-    let mut section = |title: &str, kind: &str, out: &mut String| {
+    let section = |title: &str, kind: &str, out: &mut String| {
         let rows: Vec<&ParamSpec> = params.iter().filter(|p| p.kind == kind).collect();
         if rows.is_empty() {
             return;
