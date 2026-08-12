@@ -49,7 +49,20 @@ impl StoreStatus {
 #[derive(serde::Serialize)]
 pub struct SearchResult {
     pub took_ms: f64,
+    /// Deprecated: number of rows in this response. Kept unchanged so existing
+    /// clients keep working — use `returned` for this, `count` for the number
+    /// of matches.
     pub total: usize,
+    /// Rows in this response.
+    pub returned: usize,
+    /// Documents matching the current search state (query + every filter),
+    /// independent of limit/offset. Exact and uncapped. Absent when the
+    /// caller passes count=false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pagination: Option<PaginationInfo>,
     pub results: Vec<serde_json::Value>,
@@ -77,7 +90,9 @@ pub enum SortOrder {
     FieldDesc(String),
 }
 
-pub const MAX_REPORTED_TOTAL: usize = 100_000;
+/// Deepest reachable result page (offset + limit). This bounds the cost of
+/// deep pagination — it does not bound `count`, which is always exact.
+pub const MAX_PAGINATION_WINDOW: usize = 100_000;
 
 /// Wrap a filter clause so it matches without contributing to relevance.
 fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
@@ -181,6 +196,7 @@ impl SearchEngine {
         limit: usize,
         offset: usize,
         include_pagination: bool,
+        want_count: bool,
         include_full: bool,
     ) -> anyhow::Result<SearchResult> {
         let start = std::time::Instant::now();
@@ -289,6 +305,11 @@ impl SearchEngine {
             })
             .unwrap_or(false);
 
+        // The Count collector rides along with TopDocs; it is nearly free for
+        // scored queries (which already traverse the whole matching set) and
+        // costs an extra pass only on broad filter-only browses.
+        let need_count = want_count || include_pagination;
+
         // Execute query with appropriate collector
         let (docs, matched_total): (Vec<(f64, DocAddress)>, Option<usize>) = if is_numeric_sort {
             let field_name = sort_field_name.unwrap();
@@ -296,7 +317,7 @@ impl SearchEngine {
                 SortOrder::FieldAsc(_) => Order::Asc,
                 _ => Order::Desc,
             };
-            if include_pagination {
+            if need_count {
                 let mut collectors = MultiCollector::new();
                 let docs_handle = collectors.add_collector(
                     TopDocs::with_limit(limit)
@@ -324,7 +345,7 @@ impl SearchEngine {
                 (docs, None)
             }
         } else {
-            if include_pagination {
+            if need_count {
                 let mut collectors = MultiCollector::new();
                 let docs_handle =
                     collectors.add_collector(TopDocs::with_limit(limit).and_offset(offset));
@@ -421,15 +442,28 @@ impl SearchEngine {
             }
         }
 
-        let total = results.len();
-        let pagination = matched_total.map(|matched_total| {
-            build_pagination_info(matched_total, limit, offset, results.len())
-        });
+        let returned = results.len();
+        let pagination = if include_pagination {
+            matched_total
+                .map(|matched_total| build_pagination_info(matched_total, limit, offset, returned))
+        } else {
+            None
+        };
+        let has_more = match matched_total {
+            Some(count) => offset.saturating_add(returned) < count,
+            // Without a count the best signal is a full page
+            None => returned == limit,
+        };
         let took = start.elapsed().as_secs_f64() * 1000.0;
 
         Ok(SearchResult {
             took_ms: (took * 100.0).round() / 100.0,
-            total,
+            total: returned,
+            returned,
+            count: if want_count { matched_total } else { None },
+            offset,
+            limit,
+            has_more,
             pagination,
             results,
         })
@@ -491,9 +525,15 @@ impl SearchEngine {
         }
 
         let took = start.elapsed().as_secs_f64() * 1000.0;
+        let returned = results.len();
         Ok(SearchResult {
             took_ms: (took * 100.0).round() / 100.0,
-            total: results.len(),
+            total: returned,
+            returned,
+            count: Some(returned),
+            offset: 0,
+            limit: 1,
+            has_more: false,
             pagination: None,
             results,
         })
@@ -593,21 +633,15 @@ fn build_pagination_info(
     offset: usize,
     returned: usize,
 ) -> PaginationInfo {
-    let total = matched_total.min(MAX_REPORTED_TOTAL);
-    let total_relation = if matched_total > MAX_REPORTED_TOTAL {
-        "gte"
-    } else {
-        "eq"
-    };
-    let has_more = matched_total > offset.saturating_add(returned);
-
     PaginationInfo {
         offset,
         limit,
         returned,
-        total,
-        total_relation,
-        has_more,
+        // Counts are exact and uncapped; the relation stays in the response
+        // so clients that branch on it keep working.
+        total: matched_total,
+        total_relation: "eq",
+        has_more: matched_total > offset.saturating_add(returned),
     }
 }
 
@@ -628,7 +662,7 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder, MAX_REPORTED_TOTAL};
+    use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder};
     use crate::config::{
         Config, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
     };
@@ -640,11 +674,16 @@ mod tests {
     use tantivy::{doc, Index};
 
     #[test]
-    fn builds_capped_pagination_metadata() {
-        let pagination = build_pagination_info(MAX_REPORTED_TOTAL + 25, 1000, 99_000, 1000);
-        assert_eq!(pagination.total, MAX_REPORTED_TOTAL);
-        assert_eq!(pagination.total_relation, "gte");
+    fn reports_exact_uncapped_totals() {
+        // Counts used to clamp at 100k and report "gte"; they are now exact
+        // however large the match set is.
+        let pagination = build_pagination_info(17_635_175, 1000, 99_000, 1000);
+        assert_eq!(pagination.total, 17_635_175);
+        assert_eq!(pagination.total_relation, "eq");
         assert!(pagination.has_more);
+
+        let last_page = build_pagination_info(2000, 1000, 1000, 1000);
+        assert!(!last_page.has_more);
     }
 
     #[test]
@@ -730,6 +769,7 @@ mod tests {
                 2,
                 1,
                 true,
+                true,
                 false,
             )
             .unwrap();
@@ -778,7 +818,7 @@ mod tests {
         let mut filters = HashMap::new();
         filters.insert("city".to_string(), "OSLO,BERGEN".to_string());
         let result = engine
-            .search("", &filters, &[], &SortOrder::Relevance, 9, 0, true, false)
+            .search("", &filters, &[], &SortOrder::Relevance, 9, 0, true, true, false)
             .unwrap();
 
         assert_eq!(result.results.len(), 9, "OR filter matches every row");

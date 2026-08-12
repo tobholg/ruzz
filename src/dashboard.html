@@ -1632,7 +1632,10 @@ async function doSearch() {
     openFullRefs = new Set();
     rawFullRefs = new Set();
     document.getElementById('query-meta').style.display = 'flex';
-    document.getElementById('result-count').textContent = data.total;
+    document.getElementById('result-count').textContent =
+      (data.count !== undefined && data.count !== data.returned)
+        ? `${data.returned} of ${data.count.toLocaleString()}`
+        : (data.returned ?? data.total);
     document.getElementById('query-time').textContent = data.took_ms + 'ms';
     updateViewToggle();
     renderResults(data);

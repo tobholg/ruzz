@@ -582,6 +582,7 @@ org_number,company_name,city,secret_extra
                 0,
                 false,
                 true,
+                true,
             )
             .unwrap();
         assert_eq!(result.total, 1);
@@ -724,6 +725,7 @@ org_number,company_name,city,secret_extra
                 10,
                 0,
                 false,
+                true,
                 false,
             )
             .unwrap();
@@ -769,6 +771,7 @@ org_number,company_name,city,secret_extra
                 10,
                 0,
                 false,
+                true,
                 false,
             )
             .unwrap();

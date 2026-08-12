@@ -98,6 +98,9 @@ struct SearchParams {
     sort_order: Option<String>, // "asc" or "desc"
     /// Hydrate each hit with its full document from the store as "_full"
     full: Option<bool>,
+    /// Return `count` (matches for this search state). Default true; pass
+    /// false to skip the count on broad filter-only browses.
+    count: Option<bool>,
     #[serde(flatten)]
     extra: HashMap<String, String>,
 }
@@ -113,14 +116,15 @@ async fn handle_search(
         .clamp(1, MAX_SEARCH_LIMIT);
     let offset = params.offset.unwrap_or(0);
     let include_pagination = params.include_pagination.unwrap_or(false);
+    let want_count = params.count.unwrap_or(true);
     let include_full = params.full.unwrap_or(false);
 
-    if offset.saturating_add(limit) > crate::search::MAX_REPORTED_TOTAL {
+    if offset.saturating_add(limit) > crate::search::MAX_PAGINATION_WINDOW {
         return Json(serde_json::json!({
             "error": "pagination_window_too_large",
             "message": format!(
                 "offset + limit must be <= {}",
-                crate::search::MAX_REPORTED_TOTAL
+                crate::search::MAX_PAGINATION_WINDOW
             ),
         }));
     }
@@ -144,6 +148,7 @@ async fn handle_search(
     filters.remove("sort_by");
     filters.remove("sort_order");
     filters.remove("full");
+    filters.remove("count");
 
     // Extract range filters: keys ending in _min or _max
     let mut range_filters: Vec<crate::search::RangeFilter> = Vec::new();
@@ -188,6 +193,7 @@ async fn handle_search(
         limit,
         offset,
         include_pagination,
+        want_count,
         include_full,
     ) {
         Ok(result) => Json(serde_json::to_value(result).unwrap()),
