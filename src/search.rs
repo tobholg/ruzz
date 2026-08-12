@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tantivy::collector::{Count, MultiCollector, TopDocs};
 use tantivy::query::{
-    AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, TermQuery,
+    AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
 use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, Term};
@@ -260,8 +260,13 @@ impl SearchEngine {
                 // Substring fields are trigram-indexed: match every trigram
                 // of the value rather than the value as one term.
                 if field_config.search == Some(SearchMode::Substring) {
-                    if let Some(query) = self.trigram_query(field, value, Occur::Must) {
-                        subqueries.push((Occur::Must, const_score(Box::new(query))));
+                    match self.trigram_query(field, value, Occur::Must) {
+                        Some(query) => {
+                            subqueries.push((Occur::Must, const_score(Box::new(query))))
+                        }
+                        // Under three characters there are no trigrams to
+                        // match. Returning everything would be a silent lie.
+                        None => subqueries.push((Occur::Must, Box::new(EmptyQuery))),
                     }
                     continue;
                 }
@@ -310,7 +315,7 @@ impl SearchEngine {
         }
 
         // Fuzzy search with trigrams
-        if !query_text.is_empty() && !fuzzy_fields.is_empty() {
+        if !query_text.is_empty() {
             let ngram_queries: Vec<(Occur, Box<dyn Query>)> = fuzzy_fields
                 .iter()
                 .filter_map(|field| {
@@ -319,7 +324,12 @@ impl SearchEngine {
                 })
                 .collect();
 
-            if !ngram_queries.is_empty() {
+            if ngram_queries.is_empty() {
+                // No fuzzy field, or a query too short to form a trigram.
+                // Previously this fell through to AllQuery and returned the
+                // entire index for something like q=ab.
+                subqueries.push((Occur::Must, Box::new(EmptyQuery)));
+            } else {
                 subqueries.push((Occur::Must, Box::new(BooleanQuery::new(ngram_queries))));
             }
         }
@@ -954,6 +964,116 @@ mod tests {
         // No metadata file at all — the pre-upgrade situation
         let engine = SearchEngine::open(config).unwrap();
         assert!(engine.case_insensitive_fields.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn substring_field_matches_anywhere_and_stays_out_of_q() {
+        let dir = test_index_dir("substring");
+        let mut config = test_config(&dir);
+        // `name` becomes a substring-searchable text field
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Substring);
+        }
+
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for value in ["Forusbeen 50", "Storgata 1", "Nedre Forusbeen 12"] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 1.0, name => value))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+
+        let engine = SearchEngine::open(config).unwrap();
+        let search_for = |value: &str| {
+            let mut filters = HashMap::new();
+            filters.insert("name".to_string(), value.to_string());
+            engine
+                .search("", &filters, &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .unwrap()
+        };
+
+        // Substring, any casing, with or without the house number
+        for probe in ["Forusbeen", "forusbeen", "FORUSBEEN", "forusbeen 50"] {
+            assert!(
+                search_for(probe).returned >= 1,
+                "{probe:?} should match by substring"
+            );
+        }
+        assert_eq!(search_for("forusbeen").returned, 2, "matches mid-value too");
+        assert_eq!(search_for("storgata").returned, 1);
+
+        // A substring field must not widen the global `q` — that is the whole
+        // reason it is a separate search mode.
+        let by_q = engine
+            .search("forusbeen", &HashMap::new(), &[], &SortOrder::Relevance, 10, 0, false, true, false)
+            .unwrap();
+        assert_eq!(by_q.returned, 0, "substring fields are excluded from q");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unsatisfiable_query_returns_nothing_not_everything() {
+        // q=ab has no trigram, so the query cannot be satisfied. It used to
+        // fall through to AllQuery and return the whole index.
+        let dir = test_index_dir("short-query");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Fuzzy);
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for value in ["Alpha", "Beta", "Gamma"] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 1.0, name => value))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |q: &str| {
+            engine
+                .search(q, &HashMap::new(), &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .unwrap()
+        };
+        assert_eq!(run("ab").returned, 0, "too short to match anything");
+        assert_eq!(run("alpha").returned, 1, "normal query still works");
+        assert_eq!(run("").returned, 3, "no query at all still browses");
 
         let _ = std::fs::remove_dir_all(dir);
     }

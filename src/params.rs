@@ -67,6 +67,7 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
 
     for fc in &engine.config.schema.fields {
         let value_type = match fc.field_type {
+            FieldType::Text if fc.search == Some(SearchMode::Substring) => "substring",
             FieldType::Text => "text",
             FieldType::Keyword => "keyword",
             FieldType::Number => "number",
@@ -84,13 +85,15 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
             FieldType::Boolean => "Boolean filter. Accepts true/false, yes/no, 1/0.".to_string(),
             FieldType::Enum => "Exact-match filter over a fixed value set. Comma-separated values are OR'ed.".to_string(),
             FieldType::Keyword => "Exact-match filter. Comma-separated values are OR'ed.".to_string(),
-            FieldType::Text => {
-                if fc.search == Some(SearchMode::Fuzzy) {
+            FieldType::Text => match fc.search {
+                Some(SearchMode::Fuzzy) => {
                     "Searched by the `q` parameter (fuzzy). Not an exact-match filter.".to_string()
-                } else {
-                    "Text field.".to_string()
                 }
-            }
+                Some(SearchMode::Substring) => {
+                    "Case-insensitive substring search — matches anywhere in the value. Needs at least 3 characters. Not included in `q`.".to_string()
+                }
+                None => "Text field.".to_string(),
+            },
         };
 
         specs.push(ParamSpec {

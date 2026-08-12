@@ -93,6 +93,24 @@ id = "registration_number"
 category = "sic_code"
 ```
 
+Keyword fields match case-insensitively — `city=Oslo` and `city=OSLO` find the same rows, while the stored value keeps its original casing. Add `case_sensitive = true` to a field when case carries meaning (identifiers, codes).
+
+Text fields can be searched two ways:
+
+```toml
+{ name = "name", type = "text", search = "fuzzy" }              # typo-tolerant, searched by q
+{ name = "street", type = "text", search = "substring" }        # matches anywhere, own parameter
+```
+
+`fuzzy` fields are what `q` searches. A `substring` field is queried through its own parameter and stays out of `q`, so free-text address matching doesn't dilute name relevance:
+
+```bash
+curl 'localhost:8888/search?street=forusbeen'      # matches "Forusbeen 50", any casing
+curl 'localhost:8888/search?q=equinor&street=forusbeen'
+```
+
+Substring matching needs at least 3 characters (it works on trigrams). A query that can't be satisfied returns no rows rather than everything.
+
 Enum and boolean fields are indexed as exact-match filters with canonical uppercase values:
 
 ```toml
