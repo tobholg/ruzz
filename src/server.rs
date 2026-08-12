@@ -36,6 +36,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/doc", get(handle_doc_resolve))
         .route("/doc/{doc_ref}", get(handle_doc_by_ref))
         .route("/docs", get(handle_docs_batch))
+        .route("/fields", get(handle_fields))
+        .route("/openapi.json", get(handle_openapi))
+        .route("/api", get(handle_api_index))
         .route("/stats", get(handle_stats))
         .route("/health", get(handle_health))
         .with_state(state);
@@ -413,7 +416,9 @@ async fn handle_doc_resolve(
 
 #[derive(serde::Deserialize)]
 struct DocsBatchParams {
-    refs: String,
+    /// Absent means the caller wants the API documentation, not documents.
+    /// `/docs?refs=…` keeps its original batch-fetch behaviour.
+    refs: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -428,12 +433,16 @@ async fn handle_docs_batch(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DocsBatchParams>,
 ) -> Response {
+    let Some(refs_param) = params.refs else {
+        // Bare /docs is where people look for documentation
+        return handle_api_docs(State(state)).await;
+    };
     if state.engine.store.is_none() {
         return store_unavailable(&state.engine);
     }
 
     let mut refs: Vec<u64> = Vec::new();
-    for part in params.refs.split(',') {
+    for part in refs_param.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -500,6 +509,49 @@ async fn handle_docs_batch(
         )
             .into_response(),
     }
+}
+
+/// Machine-readable parameter list — the answer to "what can I query?"
+async fn handle_fields(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let params = crate::params::all_params(&state.engine);
+    Json(serde_json::json!({
+        "documents": state.engine.reader.searcher().num_docs(),
+        "strict_params": state.engine.config.server.strict_params,
+        "parameters": params,
+        "docs_url": "/docs",
+        "openapi_url": "/openapi.json",
+    }))
+}
+
+/// Whole-API documentation as Markdown, generated from the live schema.
+/// One fetch gives an LLM (or a human) every valid parameter.
+async fn handle_api_docs(State(state): State<Arc<AppState>>) -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        crate::params::markdown_docs(&state.engine),
+    )
+        .into_response()
+}
+
+async fn handle_openapi(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::params::openapi(&state.engine))
+}
+
+/// JSON index of the API, for clients that hit the root expecting one.
+async fn handle_api_index(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let endpoints: Vec<serde_json::Value> = crate::params::endpoints(&state.engine)
+        .into_iter()
+        .map(|(route, description)| serde_json::json!({ "route": route, "description": description }))
+        .collect();
+    Json(serde_json::json!({
+        "name": "ruzz",
+        "version": env!("CARGO_PKG_VERSION"),
+        "documents": state.engine.reader.searcher().num_docs(),
+        "endpoints": endpoints,
+        "docs_url": "/docs",
+        "fields_url": "/fields",
+        "openapi_url": "/openapi.json",
+    }))
 }
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

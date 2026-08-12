@@ -1747,6 +1747,12 @@ function sampleExactValue(field, sample) {
 async function buildDocs() {
   if (!statsData || !schema.length) return;
   const baseUrl = window.location.origin;
+  // Machine-readable siblings of this page — /docs is generated from the live
+  // schema and is the one to hand to an LLM or paste into client docs.
+  const machineDocs = `<p><strong>Machine-readable:</strong>
+    <a href="${baseUrl}/docs" target="_blank"><code>/docs</code></a> (Markdown, full reference) ·
+    <a href="${baseUrl}/fields" target="_blank"><code>/fields</code></a> (every parameter as JSON) ·
+    <a href="${baseUrl}/openapi.json" target="_blank"><code>/openapi.json</code></a></p>`;
   const fields = schema;
   const exactFields = fields.filter(f => ['keyword', 'enum', 'boolean'].includes(f.type));
   const numberFields = fields.filter(f => f.type === 'number').map(f => f.name);
@@ -1818,7 +1824,7 @@ async function buildDocs() {
     `<tr><td><code>${f.name}</code></td><td>${describeExactField(f)}</td></tr>`
   ).join('');
 
-  document.getElementById('docs-content').innerHTML = `
+  document.getElementById('docs-content').innerHTML = machineDocs + `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
       <h2 style="margin:0">API Documentation</h2>
       <button class="copy-btn" id="copy-llm-btn">📋 Copy for LLM</button>
