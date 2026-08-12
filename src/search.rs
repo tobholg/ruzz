@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tantivy::collector::{Count, MultiCollector, TopDocs};
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, TermQuery,
+};
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
 use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, Term};
 
@@ -76,6 +78,11 @@ pub enum SortOrder {
 }
 
 pub const MAX_REPORTED_TOTAL: usize = 100_000;
+
+/// Wrap a filter clause so it matches without contributing to relevance.
+fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
+    Box::new(ConstScoreQuery::new(query, 1.0))
+}
 
 /// Open the document store and verify it belongs to this index: the
 /// generation stamped into the index dir at import time must match the store
@@ -199,10 +206,16 @@ impl SearchEngine {
                     .split(',')
                     .filter_map(|s| canonicalize_filter_value(&field_config.field_type, s))
                     .collect();
+                // Filters are wrapped in ConstScoreQuery so they contribute no
+                // relevance. Without this, BM25 gives rarer values a higher
+                // IDF, which sorts a multi-value filter into blocks — a query
+                // for BERGEN,STAVANGER returns every STAVANGER row before the
+                // first BERGEN one, so a normal page looks like the OR was
+                // ignored. Only `q` should influence ranking.
                 if values.len() == 1 {
                     let term = Term::from_field_text(field, &values[0]);
                     let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                    subqueries.push((Occur::Must, Box::new(term_query)));
+                    subqueries.push((Occur::Must, const_score(Box::new(term_query))));
                 } else if values.len() > 1 {
                     let or_clauses: Vec<(Occur, Box<dyn Query>)> = values
                         .iter()
@@ -213,7 +226,7 @@ impl SearchEngine {
                             (Occur::Should, tq)
                         })
                         .collect();
-                    subqueries.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
+                    subqueries.push((Occur::Must, const_score(Box::new(BooleanQuery::new(or_clauses)))));
                 }
             }
         }
@@ -228,7 +241,7 @@ impl SearchEngine {
                     std::ops::Bound::Included(min),
                     std::ops::Bound::Included(max),
                 );
-                subqueries.push((Occur::Must, Box::new(range_query)));
+                subqueries.push((Occur::Must, const_score(Box::new(range_query))));
             }
         }
 
@@ -730,6 +743,95 @@ mod tests {
         assert_eq!(result.results[1]["revenue"], serde_json::json!(120.0));
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn multi_value_filters_do_not_influence_ranking() {
+        // Regression: BM25 gives a rarer filter value a higher IDF, which used
+        // to sort a multi-value filter into per-value blocks (all BERGEN rows
+        // before the first OSLO row), making an OR filter look like it had
+        // been ignored on the first page of results.
+        let dir = test_index_dir("filter-scoring");
+        let config = test_config(&dir);
+
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            // OSLO is common, BERGEN is rare — the IDF gap that caused the bug
+            for i in 0..8 {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 100.0, name => format!("O{i}")))
+                    .unwrap();
+            }
+            writer
+                .add_document(doc!(city => "BERGEN", revenue => 100.0, name => "B0"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+
+        let engine = SearchEngine::open(config).unwrap();
+        let mut filters = HashMap::new();
+        filters.insert("city".to_string(), "OSLO,BERGEN".to_string());
+        let result = engine
+            .search("", &filters, &[], &SortOrder::Relevance, 9, 0, true, false)
+            .unwrap();
+
+        assert_eq!(result.results.len(), 9, "OR filter matches every row");
+        let scores: Vec<f64> = result
+            .results
+            .iter()
+            .map(|r| r["_score"].as_f64().unwrap())
+            .collect();
+        assert!(
+            scores.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON),
+            "filter clauses must score uniformly, got {scores:?}"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn test_config(dir: &PathBuf) -> Arc<Config> {
+        Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                index_path: dir.clone(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+            },
+            schema: SchemaConfig {
+                fields: vec![
+                    FieldConfig {
+                        name: "city".to_string(),
+                        field_type: FieldType::Enum,
+                        search: None,
+                        values: None,
+                        max_values: None,
+                    },
+                    FieldConfig {
+                        name: "revenue".to_string(),
+                        field_type: FieldType::Number,
+                        search: None,
+                        values: None,
+                        max_values: None,
+                    },
+                    FieldConfig {
+                        name: "name".to_string(),
+                        field_type: FieldType::Keyword,
+                        search: None,
+                        values: None,
+                        max_values: None,
+                    },
+                ],
+            },
+            sources: Vec::<SourceConfig>::new(),
+            mappings: HashMap::new(),
+            store: StoreConfig::default(),
+        })
     }
 
     fn test_index_dir(prefix: &str) -> PathBuf {
