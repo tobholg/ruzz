@@ -108,6 +108,12 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
         } else {
             description
         };
+        // The schema author's own note comes first: it says what the field
+        // means, which matters more than how it is matched.
+        let description = match fc.description.as_deref() {
+            Some(note) if !note.trim().is_empty() => format!("{} {description}", note.trim()),
+            _ => description,
+        };
         specs.push(ParamSpec {
             name: fc.name.clone(),
             kind: "filter",
@@ -125,7 +131,16 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
                     name: format!("{}{}", fc.name, suffix),
                     kind: "range",
                     value_type: "number",
-                    description: format!("{} bound (inclusive) for `{}`.", word, fc.name),
+                    // A threshold is typed here, so the unit has to be here too.
+                    description: match fc.description.as_deref() {
+                        Some(note) if !note.trim().is_empty() => format!(
+                            "{} bound (inclusive) for `{}`. {}",
+                            word,
+                            fc.name,
+                            note.trim()
+                        ),
+                        _ => format!("{} bound (inclusive) for `{}`.", word, fc.name),
+                    },
                     multi_value: false,
                     sortable: false,
                     values: None,
@@ -424,5 +439,48 @@ mod tests {
         assert_eq!(levenshtein("registerd_town", "registered_town"), 1);
         assert_eq!(levenshtein("revenu_min", "revenue_min"), 1);
         assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    /// A schema note has to reach the range parameters, not just the field:
+    /// `revenue_min=100000000` is where someone gets the unit wrong, and the
+    /// engine has no way to know the figures arrived in thousands.
+    #[test]
+    fn schema_notes_reach_the_field_and_its_range_bounds() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-schema-note-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine = crate::search::tests::engine_with_field(
+            &dir,
+            crate::config::FieldConfig {
+                name: "revenue".to_string(),
+                field_type: crate::config::FieldType::Number,
+                search: None,
+                values: None,
+                max_values: None,
+                case_sensitive: false,
+                multi: false,
+                separator: None,
+                description: Some("Thousands of NOK.".to_string()),
+            },
+        );
+
+        let specs = super::all_params(&engine);
+        for name in ["revenue", "revenue_min", "revenue_max"] {
+            let spec = specs
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(
+                spec.description.contains("Thousands of NOK."),
+                "{name} lost the schema note: {}",
+                spec.description
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

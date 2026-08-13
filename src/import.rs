@@ -506,6 +506,7 @@ mod tests {
             case_sensitive: false,
             multi: false,
             separator: None,
+            description: None,
         }
     }
 
@@ -519,6 +520,7 @@ mod tests {
             case_sensitive: false,
             multi: false,
             separator: None,
+            description: None,
         }
     }
 

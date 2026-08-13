@@ -145,6 +145,12 @@ pub struct FieldConfig {
     /// Separator for `multi` fields. Defaults to a comma.
     #[serde(default)]
     pub separator: Option<String>,
+    /// What this field means, in your terms — units, currency, how it was
+    /// derived. Appended to the generated description in `/fields`, `/docs`
+    /// and `/openapi.json`. The engine cannot infer that a number is in
+    /// thousands, and a caller cannot guess it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl FieldConfig {

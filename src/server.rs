@@ -651,6 +651,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                         "name": f.name,
                         "type": format!("{:?}", f.field_type).to_lowercase(),
                         "search": f.search.as_ref().map(|s| s.as_str()),
+                        "description": f.description,
                         "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
                         "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
                     })

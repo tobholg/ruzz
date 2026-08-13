@@ -112,6 +112,12 @@ Multi fields come back as JSON arrays in results.
 
 Keyword fields match case-insensitively — `city=Oslo` and `city=OSLO` find the same rows, while the stored value keeps its original casing. Add `case_sensitive = true` to a field when case carries meaning (identifiers, codes).
 
+Any field can carry a `description`. ruzz cannot infer that a number arrived in thousands, or which currency it is in, and a caller has no way to guess — so say it once in the schema and it appears everywhere the field is documented, including on its `_min` / `_max` bounds where the threshold actually gets typed:
+
+```toml
+{ name = "revenue", type = "number", description = "Thousands of the reporting currency (usually NOK)." }
+```
+
 Text fields can be searched two ways:
 
 ```toml

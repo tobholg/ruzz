@@ -739,7 +739,7 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder};
     use crate::config::{
         Config, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
@@ -787,6 +787,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -797,6 +798,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -807,6 +809,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                 ],
             },
@@ -1280,6 +1283,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -1290,6 +1294,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -1300,6 +1305,7 @@ mod tests {
                         case_sensitive: false,
                         multi: false,
                         separator: None,
+                        description: None,
                     },
                 ],
             },
@@ -1307,6 +1313,35 @@ mod tests {
             mappings: HashMap::new(),
             store: StoreConfig::default(),
         })
+    }
+
+    /// Build an engine over an empty index with one field. Enough for anything
+    /// that only reads the schema, without each caller repeating the setup.
+    pub fn engine_with_field(dir: &std::path::Path, field: FieldConfig) -> SearchEngine {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                index_path: dir.to_path_buf(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                fields: vec![field],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+        });
+        let (schema, _) = crate::schema::build_schema(&config.schema, false);
+        let index = tantivy::Index::create_in_dir(dir, schema).unwrap();
+        index
+            .writer::<tantivy::TantivyDocument>(15_000_000)
+            .unwrap()
+            .commit()
+            .unwrap();
+        SearchEngine::open(config).unwrap()
     }
 
     fn test_index_dir(prefix: &str) -> PathBuf {
