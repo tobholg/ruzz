@@ -111,10 +111,9 @@ fn open_store(config: &Config, reader: &IndexReader) -> anyhow::Result<StoreRead
     let cache_bytes = store::parse_size(&config.store.cache).unwrap_or(0);
     let store = StoreReader::open(&store_path, cache_bytes)?;
 
-    let pairing = store::read_index_pairing(&config.server.index_path)
-        .ok_or_else(|| anyhow::anyhow!(
-            "index has no store pairing file — re-run import with [store] enabled"
-        ))?;
+    let pairing = store::read_index_pairing(&config.server.index_path).ok_or_else(|| {
+        anyhow::anyhow!("index has no store pairing file — re-run import with [store] enabled")
+    })?;
     if pairing.generation != store.meta.generation {
         anyhow::bail!(
             "store generation {} does not match index generation {} — re-run import",
@@ -217,8 +216,10 @@ impl SearchEngine {
             .iter()
             .map(|ng| {
                 let term = Term::from_field_text(field, ng);
-                let query: Box<dyn Query> =
-                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqsAndPositions));
+                let query: Box<dyn Query> = Box::new(TermQuery::new(
+                    term,
+                    IndexRecordOption::WithFreqsAndPositions,
+                ));
                 (occur, query)
             })
             .collect();
@@ -261,9 +262,7 @@ impl SearchEngine {
                 // of the value rather than the value as one term.
                 if field_config.search == Some(SearchMode::Substring) {
                     match self.trigram_query(field, value, Occur::Must) {
-                        Some(query) => {
-                            subqueries.push((Occur::Must, const_score(Box::new(query))))
-                        }
+                        Some(query) => subqueries.push((Occur::Must, const_score(Box::new(query)))),
                         // Under three characters there are no trigrams to
                         // match. Returning everything would be a silent lie.
                         None => subqueries.push((Occur::Must, Box::new(EmptyQuery))),
@@ -295,7 +294,10 @@ impl SearchEngine {
                             (Occur::Should, tq)
                         })
                         .collect();
-                    subqueries.push((Occur::Must, const_score(Box::new(BooleanQuery::new(or_clauses)))));
+                    subqueries.push((
+                        Occur::Must,
+                        const_score(Box::new(BooleanQuery::new(or_clauses))),
+                    ));
                 }
             }
         }
@@ -380,21 +382,13 @@ impl SearchEngine {
                 let count_handle = collectors.add_collector(Count);
                 let mut multi_fruit = searcher.search(&*query, &collectors)?;
                 let total = count_handle.extract(&mut multi_fruit);
-                let docs = docs_handle
-                    .extract(&mut multi_fruit)
-                    .into_iter()
-                    .map(|(val, addr)| (val, addr))
-                    .collect();
+                let docs = docs_handle.extract(&mut multi_fruit).into_iter().collect();
                 (docs, Some(total))
             } else {
                 let collector = TopDocs::with_limit(limit)
                     .and_offset(offset)
                     .order_by_fast_field::<f64>(field_name, order);
-                let docs = searcher
-                    .search(&*query, &collector)?
-                    .into_iter()
-                    .map(|(val, addr)| (val, addr))
-                    .collect();
+                let docs = searcher.search(&*query, &collector)?.into_iter().collect();
                 (docs, None)
             }
         } else {
@@ -752,7 +746,7 @@ mod tests {
     };
     use crate::schema::build_schema;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tantivy::{doc, Index};
@@ -914,7 +908,17 @@ mod tests {
         let mut filters = HashMap::new();
         filters.insert("city".to_string(), "OSLO,BERGEN".to_string());
         let result = engine
-            .search("", &filters, &[], &SortOrder::Relevance, 9, 0, true, true, false)
+            .search(
+                "",
+                &filters,
+                &[],
+                &SortOrder::Relevance,
+                9,
+                0,
+                true,
+                true,
+                false,
+            )
             .unwrap();
 
         assert_eq!(result.results.len(), 9, "OR filter matches every row");
@@ -924,7 +928,9 @@ mod tests {
             .map(|r| r["_score"].as_f64().unwrap())
             .collect();
         assert!(
-            scores.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON),
+            scores
+                .windows(2)
+                .all(|w| (w[0] - w[1]).abs() < f64::EPSILON),
             "filter clauses must score uniformly, got {scores:?}"
         );
 
@@ -965,7 +971,17 @@ mod tests {
             let mut filters = HashMap::new();
             filters.insert("name".to_string(), probe.to_string());
             let result = engine
-                .search("", &filters, &[], &SortOrder::Relevance, 5, 0, false, true, false)
+                .search(
+                    "",
+                    &filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    5,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
                 .unwrap();
             assert_eq!(result.returned, 1, "casing {probe:?} should still match");
             assert_eq!(
@@ -1043,7 +1059,17 @@ mod tests {
             let mut filters = HashMap::new();
             filters.insert("name".to_string(), value.to_string());
             engine
-                .search("", &filters, &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .search(
+                    "",
+                    &filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
                 .unwrap()
         };
 
@@ -1060,7 +1086,17 @@ mod tests {
         // A substring field must not widen the global `q` — that is the whole
         // reason it is a separate search mode.
         let by_q = engine
-            .search("forusbeen", &HashMap::new(), &[], &SortOrder::Relevance, 10, 0, false, true, false)
+            .search(
+                "forusbeen",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
             .unwrap();
         assert_eq!(by_q.returned, 0, "substring fields are excluded from q");
 
@@ -1104,7 +1140,17 @@ mod tests {
         let engine = SearchEngine::open(config).unwrap();
         let run = |q: &str| {
             engine
-                .search(q, &HashMap::new(), &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .search(
+                    q,
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
                 .unwrap()
         };
         assert_eq!(run("ab").returned, 0, "too short to match anything");
@@ -1124,7 +1170,12 @@ mod tests {
         let mut config = test_config(&dir);
         {
             let config = Arc::get_mut(&mut config).unwrap();
-            let field = config.schema.fields.iter_mut().find(|f| f.name == "name").unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
             field.field_type = FieldType::Keyword;
             field.multi = true;
         }
@@ -1165,31 +1216,55 @@ mod tests {
             let mut filters = HashMap::new();
             filters.insert("name".to_string(), value.to_string());
             engine
-                .search("", &filters, &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .search(
+                    "",
+                    &filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
                 .unwrap()
         };
 
-        assert_eq!(search_for("styreleder").returned, 1, "matches the first value");
-        assert_eq!(search_for("revisor").returned, 1, "matches the second value");
+        assert_eq!(
+            search_for("styreleder").returned,
+            1,
+            "matches the first value"
+        );
+        assert_eq!(
+            search_for("revisor").returned,
+            1,
+            "matches the second value"
+        );
         assert_eq!(search_for("Revisor").returned, 1, "still case-insensitive");
-        assert_eq!(search_for("styremedlem").returned, 1, "single-value doc unaffected");
+        assert_eq!(
+            search_for("styremedlem").returned,
+            1,
+            "single-value doc unaffected"
+        );
         // Comma-OR across a multi field returns each matching document once
         assert_eq!(search_for("revisor,styremedlem").returned, 2);
 
         // The result must expose every value, not just the first
         let result = search_for("revisor");
-        let values = result.results[0]["name"].as_array().expect("multi field is an array");
+        let values = result.results[0]["name"]
+            .as_array()
+            .expect("multi field is an array");
         assert_eq!(values.len(), 2);
         assert!(values.iter().any(|v| v == "revisor"));
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn test_config(dir: &PathBuf) -> Arc<Config> {
+    fn test_config(dir: &Path) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
                 port: 8888,
-                index_path: dir.clone(),
+                index_path: dir.to_path_buf(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,

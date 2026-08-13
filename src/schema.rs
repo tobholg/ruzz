@@ -27,7 +27,10 @@ pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<S
     for fc in &config.fields {
         let field = match fc.field_type {
             FieldType::Text => {
-                if matches!(fc.search, Some(SearchMode::Fuzzy) | Some(SearchMode::Substring)) {
+                if matches!(
+                    fc.search,
+                    Some(SearchMode::Fuzzy) | Some(SearchMode::Substring)
+                ) {
                     let options = TextOptions::default()
                         .set_indexing_options(
                             TextFieldIndexing::default()

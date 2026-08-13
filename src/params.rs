@@ -26,7 +26,12 @@ pub struct ParamSpec {
     pub example: Option<String>,
 }
 
-fn control(name: &str, value_type: &'static str, description: &str, example: Option<&str>) -> ParamSpec {
+fn control(
+    name: &str,
+    value_type: &'static str,
+    description: &str,
+    example: Option<&str>,
+) -> ParamSpec {
     ParamSpec {
         name: name.to_string(),
         kind: "control",
@@ -97,7 +102,9 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
         };
 
         let description = if fc.multi {
-            format!("{description} A document may hold several values; a filter matches any of them.")
+            format!(
+                "{description} A document may hold several values; a filter matches any of them."
+            )
         } else {
             description
         };
@@ -189,20 +196,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::levenshtein;
-
-    #[test]
-    fn measures_edit_distance() {
-        assert_eq!(levenshtein("", ""), 0);
-        assert_eq!(levenshtein("", "abc"), 3);
-        assert_eq!(levenshtein("registerd_town", "registered_town"), 1);
-        assert_eq!(levenshtein("revenu_min", "revenue_min"), 1);
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Generated documentation
 // ---------------------------------------------------------------------------
@@ -210,18 +203,45 @@ mod tests {
 /// Endpoints this server exposes, given its configuration.
 pub fn endpoints(engine: &SearchEngine) -> Vec<(&'static str, &'static str)> {
     let mut list = vec![
-        ("GET /search", "Fuzzy search with filters, ranges, sorting and paging."),
-        ("GET /lookup", "Exact-match lookup returning at most one row."),
-        ("GET /fields", "Machine-readable list of every accepted query parameter."),
-        ("GET /docs", "This documentation, as Markdown (no parameters)."),
+        (
+            "GET /search",
+            "Fuzzy search with filters, ranges, sorting and paging.",
+        ),
+        (
+            "GET /lookup",
+            "Exact-match lookup returning at most one row.",
+        ),
+        (
+            "GET /fields",
+            "Machine-readable list of every accepted query parameter.",
+        ),
+        (
+            "GET /docs",
+            "This documentation, as Markdown (no parameters).",
+        ),
         ("GET /openapi.json", "OpenAPI 3.1 description of the API."),
-        ("GET /stats", "Runtime stats: documents, index size, memory, schema."),
+        (
+            "GET /stats",
+            "Runtime stats: documents, index size, memory, schema.",
+        ),
         ("GET /health", "Liveness probe."),
     ];
     if engine.store.is_some() {
         list.insert(2, ("GET /doc/{ref}", "One full document by its `_ref`."));
-        list.insert(3, ("GET /docs?refs=1,2,3", "Batch full-document fetch, max 256 refs."));
-        list.insert(4, ("GET /doc?field=value", "Resolve exact filters to one full document."));
+        list.insert(
+            3,
+            (
+                "GET /docs?refs=1,2,3",
+                "Batch full-document fetch, max 256 refs.",
+            ),
+        );
+        list.insert(
+            4,
+            (
+                "GET /doc?field=value",
+                "Resolve exact filters to one full document.",
+            ),
+        );
     }
     list
 }
@@ -249,8 +269,12 @@ within one parameter widen it (OR).\n\n",
     out.push_str("```json\n{\n  \"took_ms\": 4.1,\n  \"count\": 44678,\n  \"returned\": 20,\n  \"offset\": 0,\n  \"limit\": 20,\n  \"has_more\": true,\n  \"results\": []\n}\n```\n\n");
     out.push_str("- `count` — documents matching the current search state, exact and uncapped. Pass `count=false` to skip computing it.\n");
     out.push_str("- `returned` — rows in this response.\n");
-    out.push_str("- `total` — deprecated alias of `returned`; use `count` for the number of matches.\n");
-    out.push_str("- `_score` on each row — relevance, driven by `q` only. Filters never affect ranking.\n\n");
+    out.push_str(
+        "- `total` — deprecated alias of `returned`; use `count` for the number of matches.\n",
+    );
+    out.push_str(
+        "- `_score` on each row — relevance, driven by `q` only. Filters never affect ranking.\n\n",
+    );
 
     let section = |title: &str, kind: &str, out: &mut String| {
         let rows: Vec<&ParamSpec> = params.iter().filter(|p| p.kind == kind).collect();
@@ -314,10 +338,7 @@ within one parameter widen it (OR).\n\n",
             "/search?{}_min=1000&{}_max=5000  # inclusive numeric range\n",
             base, base
         ));
-        out.push_str(&format!(
-            "/search?sort_by={}&sort_order=desc\n",
-            base
-        ));
+        out.push_str(&format!("/search?sort_by={}&sort_order=desc\n", base));
     }
     out.push_str("```\n\n");
     out.push_str("Unknown parameters are reported in `ignored_parameters`, or rejected outright when the server runs with `strict_params`.\n");
@@ -390,4 +411,18 @@ pub fn openapi(engine: &SearchEngine) -> serde_json::Value {
             "/health": { "get": { "summary": "Liveness probe" } }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::levenshtein;
+
+    #[test]
+    fn measures_edit_distance() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("registerd_town", "registered_town"), 1);
+        assert_eq!(levenshtein("revenu_min", "revenue_min"), 1);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
 }

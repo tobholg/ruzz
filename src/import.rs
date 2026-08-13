@@ -183,7 +183,11 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     merge_pb.set_message("Merging segments (this improves query speed)...");
     let segment_ids = index.searchable_segment_ids()?;
     if segment_ids.len() > 1 {
-        let _ = writer.merge(&segment_ids);
+        // merge() hands the work to the merge thread pool and returns a handle
+        // to the result. We do not need the resulting SegmentMeta, and dropping
+        // the handle does not cancel the merge — wait_merging_threads() below is
+        // what blocks until the pool has finished.
+        drop(writer.merge(&segment_ids));
         writer.wait_merging_threads()?;
     }
     merge_pb.finish_with_message("Segments merged.");
@@ -268,9 +272,7 @@ fn import_csv(
 
     let ref_field = schema.get_field(REF_FIELD).ok();
     let mut sidecar = match (&store_import, sidecar_path) {
-        (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => {
-            Some(SidecarReader::open(sp)?)
-        }
+        (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => Some(SidecarReader::open(sp)?),
         _ => None,
     };
 
@@ -334,7 +336,7 @@ fn import_csv(
         writer.add_document(doc)?;
         count += 1;
 
-        if count % 10_000 == 0 {
+        if count.is_multiple_of(10_000) {
             pb.set_position(count);
         }
     }
@@ -357,10 +359,7 @@ fn build_row_doc(
     let mut obj = serde_json::Map::with_capacity(headers.len() + defaults.len());
     for (i, header) in headers.iter().enumerate() {
         let value = record.get(i).unwrap_or("");
-        obj.insert(
-            header.clone(),
-            serde_json::Value::String(value.to_string()),
-        );
+        obj.insert(header.clone(), serde_json::Value::String(value.to_string()));
     }
     for (key, value) in defaults {
         if !obj.contains_key(key) {
@@ -416,10 +415,7 @@ impl SidecarReader {
         // catching wrong-file mistakes without paying to parse every line.
         if !self.validated_first {
             serde_json::from_slice::<&serde_json::value::RawValue>(&line).with_context(|| {
-                format!(
-                    "sidecar {} line 1 is not valid JSON",
-                    self.path.display()
-                )
+                format!("sidecar {} line 1 is not valid JSON", self.path.display())
             })?;
             self.validated_first = true;
         }
@@ -667,7 +663,10 @@ org_number,company_name,city,secret_extra
 
         // Verbatim bytes, nested structure intact
         let raw = engine.get_full(0).unwrap().unwrap();
-        assert_eq!(raw, "{\"org\":100,\"accounts\":[{\"year\":2024,\"revenue\":50}]}");
+        assert_eq!(
+            raw,
+            "{\"org\":100,\"accounts\":[{\"year\":2024,\"revenue\":50}]}"
+        );
         // null is a valid "no document" marker
         assert_eq!(engine.get_full(2).unwrap().unwrap(), "null");
 

@@ -168,7 +168,10 @@ async fn handle_search(
     let mut range_fields: HashMap<String, (Option<f64>, Option<f64>)> = HashMap::new();
     for key in &range_keys {
         let value = filters.remove(key).unwrap_or_default();
-        let Some(base) = key.strip_suffix("_min").or_else(|| key.strip_suffix("_max")) else {
+        let Some(base) = key
+            .strip_suffix("_min")
+            .or_else(|| key.strip_suffix("_max"))
+        else {
             continue;
         };
         // A range suffix on something that is not a numeric field is a typo,
@@ -210,7 +213,11 @@ async fn handle_search(
     {
         let suggestions: serde_json::Map<String, serde_json::Value> = unknown_params
             .iter()
-            .filter_map(|p| known.suggest(p).map(|s| (p.clone(), serde_json::Value::String(s))))
+            .filter_map(|p| {
+                known
+                    .suggest(p)
+                    .map(|s| (p.clone(), serde_json::Value::String(s)))
+            })
             .collect();
         let mut message = String::new();
         if !unknown_params.is_empty() {
@@ -220,7 +227,10 @@ async fn handle_search(
             ));
         }
         if !invalid_params.is_empty() {
-            message.push_str(&format!("Invalid value(s): {}. ", invalid_params.join(", ")));
+            message.push_str(&format!(
+                "Invalid value(s): {}. ",
+                invalid_params.join(", ")
+            ));
         }
         message.push_str("See /fields for the full list.");
         return Json(serde_json::json!({
@@ -304,11 +314,7 @@ fn store_unavailable_body(engine: &SearchEngine) -> serde_json::Value {
 }
 
 fn store_unavailable(engine: &SearchEngine) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(store_unavailable_body(engine)),
-    )
-        .into_response()
+    (StatusCode::CONFLICT, Json(store_unavailable_body(engine))).into_response()
 }
 
 /// Wrap raw stored JSON so it passes through to the response verbatim
@@ -527,7 +533,10 @@ async fn handle_fields(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 /// One fetch gives an LLM (or a human) every valid parameter.
 async fn handle_api_docs(State(state): State<Arc<AppState>>) -> Response {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         crate::params::markdown_docs(&state.engine),
     )
         .into_response()
@@ -641,7 +650,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                     serde_json::json!({
                         "name": f.name,
                         "type": format!("{:?}", f.field_type).to_lowercase(),
-                        "search": f.search.as_ref().map(|s| format!("{:?}", s).to_lowercase()),
+                        "search": f.search.as_ref().map(|s| s.as_str()),
                         "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
                         "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
                     })

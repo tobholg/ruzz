@@ -191,12 +191,12 @@ fn writer_thread(
     let mut compressed_bytes = 0u64;
 
     let flush_block = |buf: &mut Vec<u8>,
-                           lens: &mut Vec<u32>,
-                           first_ref: u64,
-                           offset: &mut u64,
-                           blocks: &mut Vec<BlockEntry>,
-                           docs: &mut BufWriter<File>,
-                           compressed_bytes: &mut u64|
+                       lens: &mut Vec<u32>,
+                       first_ref: u64,
+                       offset: &mut u64,
+                       blocks: &mut Vec<BlockEntry>,
+                       docs: &mut BufWriter<File>,
+                       compressed_bytes: &mut u64|
      -> anyhow::Result<()> {
         if lens.is_empty() {
             return Ok(());
@@ -283,8 +283,8 @@ fn writer_thread(
 
 pub fn write_meta(dir: &Path, meta: &StoreMeta) -> anyhow::Result<()> {
     let path = dir.join(META_FILE);
-    let mut file = File::create(&path)
-        .with_context(|| format!("failed creating {}", path.display()))?;
+    let mut file =
+        File::create(&path).with_context(|| format!("failed creating {}", path.display()))?;
     file.write_all(serde_json::to_string_pretty(meta)?.as_bytes())?;
     file.sync_all()?;
     Ok(())
@@ -395,7 +395,8 @@ impl StoreReader {
         let mut idx = File::open(&blocks_path)
             .with_context(|| format!("failed opening {}", blocks_path.display()))?;
         let mut header = [0u8; 20];
-        idx.read_exact(&mut header).context("blocks.idx truncated")?;
+        idx.read_exact(&mut header)
+            .context("blocks.idx truncated")?;
         if &header[0..8] != BLOCKS_MAGIC {
             bail!("blocks.idx has wrong magic");
         }
