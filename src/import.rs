@@ -296,11 +296,15 @@ fn import_csv(
 
             match fc.field_type {
                 FieldType::Text | FieldType::Keyword | FieldType::Enum | FieldType::Boolean => {
-                    if let Some(normalized) = canonicalize_stored_value(fc, &value)? {
-                        if fc.field_type == FieldType::Enum {
-                            metadata_collector.observe(fc, &normalized);
+                    // A multi field contributes one term per element, so a
+                    // document can match a filter for any of them.
+                    for part in fc.split_values(&value) {
+                        if let Some(normalized) = canonicalize_stored_value(fc, part)? {
+                            if fc.field_type == FieldType::Enum {
+                                metadata_collector.observe(fc, &normalized);
+                            }
+                            doc.add_text(field, &normalized);
                         }
-                        doc.add_text(field, &normalized);
                     }
                 }
                 FieldType::Number => {
@@ -504,6 +508,8 @@ mod tests {
             values: None,
             max_values: None,
             case_sensitive: false,
+            multi: false,
+            separator: None,
         }
     }
 
@@ -515,6 +521,8 @@ mod tests {
             values: None,
             max_values: None,
             case_sensitive: false,
+            multi: false,
+            separator: None,
         }
     }
 

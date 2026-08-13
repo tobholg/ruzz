@@ -434,6 +434,21 @@ impl SearchEngine {
                     let val = doc.get_first(field);
                     match fc.field_type {
                         FieldType::Text | FieldType::Keyword | FieldType::Enum => {
+                            // A multi field holds several terms; returning
+                            // only the first would hide the rest from callers.
+                            if fc.multi {
+                                let values: Vec<String> = doc
+                                    .get_all(field)
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect();
+                                obj.insert(
+                                    fc.name.clone(),
+                                    serde_json::Value::Array(
+                                        values.into_iter().map(serde_json::Value::String).collect(),
+                                    ),
+                                );
+                                continue;
+                            }
                             let text = val.and_then(|v| v.as_str()).unwrap_or("");
                             obj.insert(
                                 fc.name.clone(),
@@ -542,6 +557,21 @@ impl SearchEngine {
                     let val = doc.get_first(field);
                     match fc.field_type {
                         FieldType::Text | FieldType::Keyword | FieldType::Enum => {
+                            // A multi field holds several terms; returning
+                            // only the first would hide the rest from callers.
+                            if fc.multi {
+                                let values: Vec<String> = doc
+                                    .get_all(field)
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect();
+                                obj.insert(
+                                    fc.name.clone(),
+                                    serde_json::Value::Array(
+                                        values.into_iter().map(serde_json::Value::String).collect(),
+                                    ),
+                                );
+                                continue;
+                            }
                             let text = val.and_then(|v| v.as_str()).unwrap_or("");
                             obj.insert(
                                 fc.name.clone(),
@@ -761,6 +791,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -769,6 +801,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -777,6 +811,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                 ],
             },
@@ -1078,6 +1114,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn multi_value_field_matches_any_of_its_values() {
+        // A person holding several roles must be findable by each of them.
+        // Joining the values into one string and matching substrings was
+        // unreliable — "Revisor" inside "Styreleder, Revisor" would sometimes
+        // miss — so each value is indexed as its own term.
+        let dir = test_index_dir("multi-value");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config.schema.fields.iter_mut().find(|f| f.name == "name").unwrap();
+            field.field_type = FieldType::Keyword;
+            field.multi = true;
+        }
+
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            // Written the way import splits a multi cell
+            let mut doc = tantivy::TantivyDocument::default();
+            doc.add_text(city, "OSLO");
+            doc.add_f64(revenue, 1.0);
+            for role in ["styreleder", "revisor"] {
+                doc.add_text(name, role);
+            }
+            writer.add_document(doc).unwrap();
+            writer
+                .add_document(doc!(city => "OSLO", revenue => 1.0, name => "styremedlem"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["name".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let search_for = |value: &str| {
+            let mut filters = HashMap::new();
+            filters.insert("name".to_string(), value.to_string());
+            engine
+                .search("", &filters, &[], &SortOrder::Relevance, 10, 0, false, true, false)
+                .unwrap()
+        };
+
+        assert_eq!(search_for("styreleder").returned, 1, "matches the first value");
+        assert_eq!(search_for("revisor").returned, 1, "matches the second value");
+        assert_eq!(search_for("Revisor").returned, 1, "still case-insensitive");
+        assert_eq!(search_for("styremedlem").returned, 1, "single-value doc unaffected");
+        // Comma-OR across a multi field returns each matching document once
+        assert_eq!(search_for("revisor,styremedlem").returned, 2);
+
+        // The result must expose every value, not just the first
+        let result = search_for("revisor");
+        let values = result.results[0]["name"].as_array().expect("multi field is an array");
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().any(|v| v == "revisor"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn test_config(dir: &PathBuf) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
@@ -1096,6 +1203,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                     FieldConfig {
                         name: "revenue".to_string(),
@@ -1104,6 +1213,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                     FieldConfig {
                         name: "name".to_string(),
@@ -1112,6 +1223,8 @@ mod tests {
                         values: None,
                         max_values: None,
                         case_sensitive: false,
+                        multi: false,
+                        separator: None,
                     },
                 ],
             },

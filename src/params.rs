@@ -96,6 +96,11 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
             },
         };
 
+        let description = if fc.multi {
+            format!("{description} A document may hold several values; a filter matches any of them.")
+        } else {
+            description
+        };
         specs.push(ParamSpec {
             name: fc.name.clone(),
             kind: "filter",

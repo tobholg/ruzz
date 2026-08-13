@@ -93,6 +93,20 @@ id = "registration_number"
 category = "sic_code"
 ```
 
+A field can hold a list. With `multi = true` the source value is split (on commas by default) and each element is indexed as its own value, so one document can be found by any of them:
+
+```toml
+{ name = "roles", type = "keyword", multi = true }
+{ name = "nace_codes", type = "keyword", multi = true, separator = ";" }
+```
+
+```bash
+curl 'localhost:8888/search?roles=chair'          # matches "chair,ceo"
+curl 'localhost:8888/search?roles=chair,auditor'  # OR across the list
+```
+
+Multi fields come back as JSON arrays in results.
+
 Keyword fields match case-insensitively — `city=Oslo` and `city=OSLO` find the same rows, while the stored value keeps its original casing. Add `case_sensitive = true` to a field when case carries meaning (identifiers, codes).
 
 Text fields can be searched two ways:

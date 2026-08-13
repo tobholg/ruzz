@@ -137,6 +137,30 @@ pub struct FieldConfig {
     /// require exact casing (identifiers, codes with meaningful case).
     #[serde(default)]
     pub case_sensitive: bool,
+    /// Treat the source value as a list: "LEDE,DAGL" indexes two terms, so
+    /// one document can match a filter for either. Applies to keyword and
+    /// enum fields; values are split on `separator`.
+    #[serde(default)]
+    pub multi: bool,
+    /// Separator for `multi` fields. Defaults to a comma.
+    #[serde(default)]
+    pub separator: Option<String>,
+}
+
+impl FieldConfig {
+    /// Values this cell contributes to the index. A single value for ordinary
+    /// fields; each element for multi fields.
+    pub fn split_values<'a>(&self, value: &'a str) -> Vec<&'a str> {
+        if !self.multi {
+            return vec![value];
+        }
+        let separator = self.separator.as_deref().unwrap_or(",");
+        value
+            .split(separator)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
