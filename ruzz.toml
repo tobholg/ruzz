@@ -3,6 +3,14 @@ port = 8888
 index_path = "./data/index"
 memory_budget = "50MB"
 
+# Optional on-disk document store: keeps the full record behind each search row.
+# [store]
+# enabled = true
+# source = "row"          # "row" = all CSV columns; "sidecar" = aligned JSONL per source
+# compression_level = 1
+# block_size = "256KB"
+# cache = "64MB"
+
 [schema]
 fields = [
     { name = "name", type = "text", search = "fuzzy" },

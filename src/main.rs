@@ -3,9 +3,11 @@ mod dashboard;
 mod field_meta;
 mod import;
 mod memory;
+mod params;
 mod schema;
 mod search;
 mod server;
+mod store;
 
 use std::sync::Arc;
 use std::time::Instant;

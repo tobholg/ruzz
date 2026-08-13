@@ -9,6 +9,83 @@ pub struct Config {
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
     pub mappings: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub store: StoreConfig,
+}
+
+/// Optional on-disk document store for full records behind the compact
+/// search rows. Disabled unless `[store] enabled = true`.
+#[derive(Debug, Deserialize)]
+pub struct StoreConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where full documents come from:
+    /// "row" — every CSV column (original names) + source defaults, as JSON
+    /// "sidecar" — an aligned JSONL file per source, stored verbatim
+    #[serde(default)]
+    pub source: StoreSource,
+    /// zstd compression level (1 = fastest, good ratio on record data)
+    #[serde(default = "default_compression_level")]
+    pub compression_level: i32,
+    /// Raw bytes per compressed block — bounds per-lookup decompress cost
+    #[serde(default = "default_block_size")]
+    pub block_size: String,
+    /// LRU cache of decompressed blocks held in memory
+    #[serde(default = "default_store_cache")]
+    pub cache: String,
+    /// Store directory. Default: sibling "store" of index_path.
+    pub path: Option<PathBuf>,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source: StoreSource::default(),
+            compression_level: default_compression_level(),
+            block_size: default_block_size(),
+            cache: default_store_cache(),
+            path: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreSource {
+    #[default]
+    Row,
+    Sidecar,
+}
+
+impl SearchMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Fuzzy => "fuzzy",
+            SearchMode::Substring => "substring",
+        }
+    }
+}
+
+impl StoreSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StoreSource::Row => "row",
+            StoreSource::Sidecar => "sidecar",
+        }
+    }
+}
+
+fn default_compression_level() -> i32 {
+    1
+}
+
+fn default_block_size() -> String {
+    "256KB".to_string()
+}
+
+fn default_store_cache() -> String {
+    "64MB".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +101,12 @@ pub struct ServerConfig {
     /// require Authorization: Bearer <token> header or ?token=<token> param.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// Reject requests carrying unknown query parameters with HTTP 400
+    /// instead of silently ignoring them. When false (the default), unknown
+    /// parameters are still reported in the response as
+    /// `ignored_parameters` so mistakes surface either way.
+    #[serde(default)]
+    pub strict_params: bool,
 }
 
 fn default_memory_budget() -> String {
@@ -50,6 +133,34 @@ pub struct FieldConfig {
     pub values: Option<EnumValuesConfig>,
     #[serde(default)]
     pub max_values: Option<usize>,
+    /// Keyword fields match case-insensitively by default. Set true to
+    /// require exact casing (identifiers, codes with meaningful case).
+    #[serde(default)]
+    pub case_sensitive: bool,
+    /// Treat the source value as a list: "LEDE,DAGL" indexes two terms, so
+    /// one document can match a filter for either. Applies to keyword and
+    /// enum fields; values are split on `separator`.
+    #[serde(default)]
+    pub multi: bool,
+    /// Separator for `multi` fields. Defaults to a comma.
+    #[serde(default)]
+    pub separator: Option<String>,
+}
+
+impl FieldConfig {
+    /// Values this cell contributes to the index. A single value for ordinary
+    /// fields; each element for multi fields.
+    pub fn split_values<'a>(&self, value: &'a str) -> Vec<&'a str> {
+        if !self.multi {
+            return vec![value];
+        }
+        let separator = self.separator.as_deref().unwrap_or(",");
+        value
+            .split(separator)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -69,10 +180,16 @@ pub enum EnumValuesConfig {
     List(Vec<String>),
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
+    /// Trigram-indexed and searched by the global `q` parameter.
     Fuzzy,
+    /// Trigram-indexed but excluded from `q`; queried through its own
+    /// parameter, where every trigram of the value must be present. Gives
+    /// case-insensitive substring matching over free text such as street
+    /// addresses without diluting name relevance.
+    Substring,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +201,9 @@ pub struct SourceConfig {
     pub mapping: HashMap<String, String>,
     /// Reference a named mapping from [mappings.*]
     pub use_mapping: Option<String>,
+    /// Aligned JSONL file with one full document per CSV row.
+    /// Required for every source when [store] source = "sidecar".
+    pub sidecar: Option<PathBuf>,
 }
 
 impl SourceConfig {
@@ -105,6 +225,43 @@ impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&text)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.store.enabled {
+            for fc in &self.schema.fields {
+                if fc.name.starts_with('_') {
+                    anyhow::bail!(
+                        "schema field '{}' conflicts with reserved names (fields starting with '_') when the document store is enabled",
+                        fc.name
+                    );
+                }
+            }
+            if self.store.source == StoreSource::Sidecar {
+                for source in &self.sources {
+                    if source.sidecar.is_none() {
+                        anyhow::bail!(
+                            "[store] source = \"sidecar\" requires a sidecar path on every source; missing for {}",
+                            source.path.display()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Store directory: explicit [store] path, or sibling "store" of index_path
+    pub fn store_path(&self) -> PathBuf {
+        if let Some(ref p) = self.store.path {
+            return p.clone();
+        }
+        self.server
+            .index_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("store")
     }
 }
