@@ -56,7 +56,12 @@ struct StoreImport {
 pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     let store_enabled = config.store.enabled;
     let (schema, field_map) = build_schema(&config.schema, store_enabled);
+    // Imports always write to the current default (or an explicit [store]
+    // path). A store left at the pre-0.2 location is not reused: that shared
+    // path is exactly what let one index clobber another's store.
     let store_path = config.store_path();
+    let legacy_path = config.legacy_store_path();
+    let legacy_in_the_way = legacy_path != store_path && store::looks_like_store_dir(&legacy_path);
 
     // Validate everything that can fail BEFORE wiping the previous index.
     if store_enabled {
@@ -90,6 +95,12 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             std::fs::remove_dir_all(&store_path)?;
         }
         std::fs::create_dir_all(&store_path)?;
+        if legacy_in_the_way {
+            println!(
+                "  note: a store also exists at the legacy path {} — it belongs to no index now and can be deleted",
+                legacy_path.display()
+            );
+        }
         let block_size = store::parse_size(&config.store.block_size)
             .with_context(|| format!("invalid store block_size '{}'", config.store.block_size))?;
         let writer =
@@ -100,9 +111,14 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             next_ref: 0,
         })
     } else {
-        if store_path.exists() && store::looks_like_store_dir(&store_path) {
-            std::fs::remove_dir_all(&store_path)?;
-            println!("  removed stale document store at {}", store_path.display());
+        // Clear both locations: a store left behind at either path would
+        // otherwise outlive the index it was built for, and the legacy one
+        // would still be picked up when serving.
+        for stale in [&store_path, &legacy_path] {
+            if store::looks_like_store_dir(stale) {
+                std::fs::remove_dir_all(stale)?;
+                println!("  removed stale document store at {}", stale.display());
+            }
         }
         None
     };

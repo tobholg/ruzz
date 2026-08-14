@@ -107,7 +107,16 @@ fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
 /// generation stamped into the index dir at import time must match the store
 /// meta, and doc counts must line up.
 fn open_store(config: &Config, reader: &IndexReader) -> anyhow::Result<StoreReader> {
-    let store_path = config.store_path();
+    let store_path = config.resolve_store_path();
+    if store_path == config.legacy_store_path() && store_path != config.default_store_path() {
+        eprintln!(
+            "note: reading the document store from the legacy path {}. \
+             New imports write to {} instead, which cannot collide with another \
+             index in the same directory. Rename it, or pin it with [store] path.",
+            store_path.display(),
+            config.default_store_path().display()
+        );
+    }
     let cache_bytes = store::parse_size(&config.store.cache).unwrap_or(0);
     let store = StoreReader::open(&store_path, cache_bytes)?;
 

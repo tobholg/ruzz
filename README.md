@@ -155,8 +155,10 @@ source = "row"            # "row" or "sidecar"
 compression_level = 1     # zstd level (1 = fastest)
 block_size = "256KB"      # raw bytes per compressed block
 cache = "64MB"            # LRU cache of hot decompressed blocks
-# path = "./data/store"   # default: sibling "store" of index_path
+# path = "./data/store"   # default: <index_path>-store
 ```
+
+The store lives next to the index and is named after it — `data/output/index` gets `data/output/index-store` — so you can build `index_v2` alongside a live `index` for a zero-downtime swap without the new import touching the store the live one is serving from. Set `path` explicitly to put it elsewhere (a bigger disk, say). A store left at the pre-0.2 location (a fixed `store` sibling) is still read when it is the only one present, so upgrading the binary under an existing deployment keeps working; the server says so on startup.
 
 Two ways to say what "full" means:
 

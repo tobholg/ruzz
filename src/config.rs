@@ -33,7 +33,8 @@ pub struct StoreConfig {
     /// LRU cache of decompressed blocks held in memory
     #[serde(default = "default_store_cache")]
     pub cache: String,
-    /// Store directory. Default: sibling "store" of index_path.
+    /// Store directory. Default: `<index_path>-store`, so two indexes in one
+    /// directory never share a store. Set this to place it elsewhere.
     pub path: Option<PathBuf>,
 }
 
@@ -259,15 +260,150 @@ impl Config {
         Ok(())
     }
 
-    /// Store directory: explicit [store] path, or sibling "store" of index_path
+    /// Store directory for this index.
+    ///
+    /// Defaults to a sibling named after the index — `data/index` gets
+    /// `data/index-store` — so two indexes in one directory cannot collide.
+    /// The old default was a fixed `store` sibling, which meant building
+    /// `index_v2` next to a live `index` quietly overwrote the store the live
+    /// index was still serving from. An explicit `[store] path` always wins.
     pub fn store_path(&self) -> PathBuf {
         if let Some(ref p) = self.store.path {
             return p.clone();
         }
-        self.server
-            .index_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("store")
+        self.default_store_path()
+    }
+
+    /// Where a store for this index is created.
+    pub fn default_store_path(&self) -> PathBuf {
+        let index = &self.server.index_path;
+        let mut name = index
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("index"))
+            .to_os_string();
+        name.push("-store");
+        Self::parent_of(index).join(name)
+    }
+
+    /// The pre-0.2 location: a fixed `store` sibling of the index. Still read
+    /// when it is the only store present, so upgrading the binary under an
+    /// existing deployment does not lose the store.
+    pub fn legacy_store_path(&self) -> PathBuf {
+        Self::parent_of(&self.server.index_path).join("store")
+    }
+
+    /// Store to read: the configured path, else the current default, else the
+    /// legacy location if that is where the store actually lives.
+    pub fn resolve_store_path(&self) -> PathBuf {
+        if let Some(ref p) = self.store.path {
+            return p.clone();
+        }
+        let default = self.default_store_path();
+        if default.exists() {
+            return default;
+        }
+        let legacy = self.legacy_store_path();
+        if crate::store::looks_like_store_dir(&legacy) {
+            return legacy;
+        }
+        default
+    }
+
+    fn parent_of(path: &std::path::Path) -> &std::path::Path {
+        match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => std::path::Path::new("."),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config_for(index_path: &str, store_path: Option<&str>) -> Config {
+        Config {
+            server: ServerConfig {
+                port: 8888,
+                index_path: PathBuf::from(index_path),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig { fields: Vec::new() },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: StoreConfig {
+                enabled: true,
+                path: store_path.map(PathBuf::from),
+                ..StoreConfig::default()
+            },
+        }
+    }
+
+    /// The bug this default exists to prevent: building `index_v2` beside a
+    /// live `index` used to resolve to the same `store` directory, so the
+    /// import wiped the store the live index was still serving from.
+    #[test]
+    fn two_indexes_in_one_directory_get_separate_stores() {
+        let live = config_for("data/output/index", None);
+        let next = config_for("data/output/index_v2", None);
+        assert_eq!(live.store_path(), PathBuf::from("data/output/index-store"));
+        assert_eq!(
+            next.store_path(),
+            PathBuf::from("data/output/index_v2-store")
+        );
+        assert_ne!(live.store_path(), next.store_path());
+        // Both used to land here, which is what made the collision silent
+        assert_eq!(live.legacy_store_path(), next.legacy_store_path());
+    }
+
+    #[test]
+    fn explicit_path_always_wins() {
+        let config = config_for("data/output/index", Some("/mnt/big/store"));
+        assert_eq!(config.store_path(), PathBuf::from("/mnt/big/store"));
+        assert_eq!(config.resolve_store_path(), PathBuf::from("/mnt/big/store"));
+    }
+
+    /// Upgrading the binary under a deployment whose store sits at the old
+    /// path must keep serving it rather than reporting the store missing.
+    #[test]
+    fn falls_back_to_the_legacy_store_when_that_is_where_it_lives() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-store-path-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index = dir.join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        let legacy = dir.join("store");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(crate::store::META_FILE), "{}").unwrap();
+
+        let config = config_for(index.to_str().unwrap(), None);
+        assert_eq!(
+            config.resolve_store_path(),
+            legacy,
+            "legacy store must be found"
+        );
+
+        // Once a store exists at the new path, that is the one used.
+        let current = config.default_store_path();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join(crate::store::META_FILE), "{}").unwrap();
+        assert_eq!(config.resolve_store_path(), current);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bare index name has no parent; the store must not end up at the
+    /// filesystem root or as a sibling of the working directory.
+    #[test]
+    fn bare_index_name_stays_in_the_working_directory() {
+        let config = config_for("index", None);
+        assert_eq!(config.store_path(), PathBuf::from("./index-store"));
     }
 }
