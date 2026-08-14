@@ -16,6 +16,24 @@ use crate::field_meta::{
 use crate::schema::REF_FIELD;
 use crate::store::{self, StoreReader};
 
+/// A filter value resolved against its field's type. Text fields index a
+/// string term; numeric fields index an f64, and the two are not
+/// interchangeable — building a text term for a numeric field yields a term
+/// that exists nowhere in the index.
+enum FilterValue {
+    Text(String),
+    Number(f64),
+}
+
+impl FilterValue {
+    fn into_term(self, field: Field) -> Term {
+        match self {
+            FilterValue::Text(value) => Term::from_field_text(field, &value),
+            FilterValue::Number(value) => Term::from_field_f64(field, value),
+        }
+    }
+}
+
 pub struct SearchEngine {
     pub index: Index,
     pub reader: IndexReader,
@@ -213,6 +231,79 @@ impl SearchEngine {
         }
     }
 
+    /// Terms a filter should match, resolved against the field's type.
+    ///
+    /// `None` means the caller supplied no value at all (`city=`), which an
+    /// unselected UI control sends and which must not constrain the query.
+    /// `Some([])` means values were supplied but none can ever match, which
+    /// must constrain the query to nothing — the alternative is dropping the
+    /// clause and returning the entire index, which reads as success.
+    fn resolve_filter_values(
+        &self,
+        key: &str,
+        field_config: &crate::config::FieldConfig,
+        raw: &str,
+    ) -> Option<Vec<FilterValue>> {
+        let parts: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(
+            parts
+                .into_iter()
+                .filter_map(|part| match field_config.field_type {
+                    // Numeric fields hold an f64. A text term built from "40"
+                    // is a different term entirely and can never match one.
+                    FieldType::Number => part.parse::<f64>().ok().map(FilterValue::Number),
+                    _ => canonicalize_filter_value(&field_config.field_type, part)
+                        .map(|value| FilterValue::Text(self.match_case(key, value))),
+                })
+                .collect(),
+        )
+    }
+
+    /// One MUST clause for an exact filter, or None when the filter is not a
+    /// constraint. Shared by `/search` and the `/lookup` + `/doc` path so the
+    /// two cannot drift apart.
+    fn exact_clause(
+        &self,
+        field: Field,
+        values: Vec<FilterValue>,
+        const_scored: bool,
+    ) -> Box<dyn Query> {
+        let wrap = |query: Box<dyn Query>| {
+            if const_scored {
+                const_score(query)
+            } else {
+                query
+            }
+        };
+        let mut terms = values.into_iter().map(|value| {
+            let term = value.into_term(field);
+            Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>
+        });
+        match terms.next() {
+            // Nothing matchable was asked for: unsatisfiable, not unfiltered.
+            None => Box::new(EmptyQuery),
+            Some(first) => {
+                let rest: Vec<Box<dyn Query>> = terms.collect();
+                if rest.is_empty() {
+                    wrap(first)
+                } else {
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = std::iter::once(first)
+                        .chain(rest)
+                        .map(|query| (Occur::Should, query))
+                        .collect();
+                    wrap(Box::new(BooleanQuery::new(clauses)))
+                }
+            }
+        }
+    }
+
     /// Trigram query over one field. `occur` is Should for relevance-ranked
     /// fuzzy matching and Must for substring matching, where every trigram of
     /// the value has to be present.
@@ -278,36 +369,16 @@ impl SearchEngine {
                     }
                     continue;
                 }
-                let values: Vec<String> = value
-                    .split(',')
-                    .filter_map(|s| canonicalize_filter_value(&field_config.field_type, s))
-                    .map(|v| self.match_case(key, v))
-                    .collect();
                 // Filters are wrapped in ConstScoreQuery so they contribute no
                 // relevance. Without this, BM25 gives rarer values a higher
                 // IDF, which sorts a multi-value filter into blocks — a query
                 // for BERGEN,STAVANGER returns every STAVANGER row before the
                 // first BERGEN one, so a normal page looks like the OR was
                 // ignored. Only `q` should influence ranking.
-                if values.len() == 1 {
-                    let term = Term::from_field_text(field, &values[0]);
-                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                    subqueries.push((Occur::Must, const_score(Box::new(term_query))));
-                } else if values.len() > 1 {
-                    let or_clauses: Vec<(Occur, Box<dyn Query>)> = values
-                        .iter()
-                        .map(|v| {
-                            let term = Term::from_field_text(field, v);
-                            let tq: Box<dyn Query> =
-                                Box::new(TermQuery::new(term, IndexRecordOption::Basic));
-                            (Occur::Should, tq)
-                        })
-                        .collect();
-                    subqueries.push((
-                        Occur::Must,
-                        const_score(Box::new(BooleanQuery::new(or_clauses))),
-                    ));
-                }
+                let Some(values) = self.resolve_filter_values(key, field_config, value) else {
+                    continue;
+                };
+                subqueries.push((Occur::Must, self.exact_clause(field, values, true)));
             }
         }
 
@@ -682,13 +753,10 @@ impl SearchEngine {
             if let (Some(&field), Some(field_config)) =
                 (self.field_map.get(key), self.field_configs.get(key))
             {
-                if let Some(normalized) = canonicalize_filter_value(&field_config.field_type, value)
-                {
-                    let normalized = self.match_case(key, normalized);
-                    let term = Term::from_field_text(field, &normalized);
-                    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
-                    subqueries.push((Occur::Must, Box::new(term_query)));
-                }
+                let Some(values) = self.resolve_filter_values(key, field_config, value) else {
+                    continue;
+                };
+                subqueries.push((Occur::Must, self.exact_clause(field, values, false)));
             }
         }
         BooleanQuery::new(subqueries)
@@ -1322,6 +1390,90 @@ pub mod tests {
             mappings: HashMap::new(),
             store: StoreConfig::default(),
         })
+    }
+
+    /// An exact filter on a numeric field used to be dropped on the floor:
+    /// the value list came back empty, neither query branch fired, no clause
+    /// was added, and every document matched. `age=40` returned the whole
+    /// index, and `strict_params` could not catch it because `age` is a real
+    /// field. The same shape as the earlier "unsatisfiable query returns
+    /// everything" bug, one branch further down.
+    #[test]
+    fn numeric_filters_match_exactly_and_never_match_everything() {
+        let dir = test_index_dir("numeric-exact");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = test_config(&dir);
+        let (schema, _) = crate::schema::build_schema(&config.schema, false);
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for value in [10.0f64, 20.0, 20.0, 30.0] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => value, name => "acme"))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let count = |field: &str, value: &str| {
+            let mut filters = HashMap::new();
+            filters.insert(field.to_string(), value.to_string());
+            engine
+                .search(
+                    "",
+                    &filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+                .count
+                .unwrap()
+        };
+
+        assert_eq!(count("revenue", "20"), 2, "exact numeric match");
+        assert_eq!(count("revenue", "10"), 1);
+        assert_eq!(
+            count("revenue", "20.0"),
+            2,
+            "same value, different spelling"
+        );
+        assert_eq!(count("revenue", "99"), 0, "absent value matches nothing");
+        assert_eq!(count("revenue", "10,30"), 2, "comma-OR across numbers");
+
+        // The bug: any of these used to return all four documents.
+        assert_eq!(count("revenue", "abc"), 0, "unparseable value cannot match");
+        assert_ne!(
+            count("revenue", "20"),
+            4,
+            "must not fall back to matching all"
+        );
+
+        // An unselected UI control sends an empty value; that is not a
+        // constraint and must keep returning everything.
+        assert_eq!(count("revenue", ""), 4, "empty value is not a filter");
+        assert_eq!(count("city", ""), 4, "empty value is not a filter (text)");
+        assert_eq!(count("city", "OSLO"), 4, "text filters unaffected");
+        assert_eq!(count("city", "BERGEN"), 0);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Build an engine over an empty index with one field. Enough for anything
