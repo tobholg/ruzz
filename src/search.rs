@@ -848,6 +848,7 @@ pub mod tests {
         let config = Arc::new(Config {
             server: ServerConfig {
                 port: 8888,
+                bind: "0.0.0.0".to_string(),
                 index_path: dir.clone(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
@@ -1344,6 +1345,7 @@ pub mod tests {
         Arc::new(Config {
             server: ServerConfig {
                 port: 8888,
+                bind: "0.0.0.0".to_string(),
                 index_path: dir.to_path_buf(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
@@ -1483,6 +1485,7 @@ pub mod tests {
         let config = Arc::new(Config {
             server: ServerConfig {
                 port: 8888,
+                bind: "0.0.0.0".to_string(),
                 index_path: dir.to_path_buf(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,

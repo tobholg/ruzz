@@ -60,6 +60,7 @@ Create a `ruzz.toml`:
 port = 8888
 index_path = "./data/index"
 memory_budget = "2GB"  # or "50%", "100%", "unlimited"
+# bind = "127.0.0.1"   # default "0.0.0.0"; loopback when a proxy fronts it
 
 [schema]
 fields = [
@@ -256,6 +257,41 @@ curl 'localhost:8888/openapi.json'  # OpenAPI 3.1
 ```
 
 `/docs` is sized to be fetched whole by an LLM — one request and an agent knows every valid parameter for your schema.
+
+### Behind a reverse proxy
+
+ruzz listens on every interface by default. When something else terminates TLS in front of it — Caddy, nginx, a load balancer — bind to loopback so the plain-HTTP port cannot be reached from outside the host at all, and the proxy becomes the only way in:
+
+```toml
+[server]
+bind = "127.0.0.1"
+```
+
+The server says which address it bound to on startup. A whole-host Caddyfile for two ruzz instances is six lines:
+
+```
+companies.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8889
+}
+
+directors.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8890
+}
+```
+
+Use one hostname per instance rather than a path prefix. The dashboard requests `/search` and `/stats` relative to the page root, so serving it under `example.com/directors/` would load the page and then have its own requests miss.
+
+If `auth_token` is set, keep the token out of your proxy's access log — it is a credential, and `?token=…` is written to disk in cleartext otherwise. In Caddy:
+
+```
+log {
+	format filter {
+		request>uri query { replace token REDACTED }
+	}
+}
+```
 
 ### Strict parameters
 

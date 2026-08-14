@@ -545,6 +545,7 @@ mod tests {
             server: ServerConfig {
                 port: 0,
                 index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,

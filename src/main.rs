@@ -73,8 +73,15 @@ async fn serve(config: Arc<config::Config>) -> anyhow::Result<()> {
 
     let app = server::create_router(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let bind = config.server.bind.trim();
+    let addr = format!("{}:{}", bind, port);
     println!("⚡ ruzz server listening on http://localhost:{}", port);
+    if bind != "0.0.0.0" {
+        println!(
+            "  bound to {} — reachable only through whatever proxies it",
+            bind
+        );
+    }
     println!("  /search?q=abax&country_code=NO&limit=20");
     println!("  /lookup?country_code=NO&org_number=936512054");
     println!("  /stats");

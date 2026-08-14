@@ -94,6 +94,12 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     pub index_path: PathBuf,
+    /// Address to listen on. Defaults to "0.0.0.0" — every interface — which
+    /// is what a standalone deployment wants. Set "127.0.0.1" when a reverse
+    /// proxy terminates TLS in front, so the plain-HTTP port is unreachable
+    /// from outside the host and the proxy is the only way in.
+    #[serde(default = "default_bind")]
+    pub bind: String,
     /// Memory budget for index pages. Examples: "512MB", "2GB", "100%"
     /// Default: "100%" (no limit, keep everything warm)
     #[serde(default = "default_memory_budget")]
@@ -112,6 +118,12 @@ pub struct ServerConfig {
 
 fn default_memory_budget() -> String {
     "100%".to_string()
+}
+
+/// Every interface. Unchanged from before the option existed, so upgrading
+/// the binary never makes a running deployment unreachable.
+fn default_bind() -> String {
+    "0.0.0.0".to_string()
 }
 
 fn default_port() -> u16 {
@@ -327,6 +339,7 @@ mod tests {
             server: ServerConfig {
                 port: 8888,
                 index_path: PathBuf::from(index_path),
+                bind: default_bind(),
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
