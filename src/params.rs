@@ -228,11 +228,11 @@ pub fn endpoints(engine: &SearchEngine) -> Vec<(&'static str, &'static str)> {
         ),
         (
             "POST /resolve",
-            "Bulk exact resolution, max 250 items. Each item reports matched,              not_found or ambiguous — never a best guess.",
+            "Bulk exact resolution, max 250 items. Each item reports matched, not_found or ambiguous — never a best guess.",
         ),
         (
             "POST /match",
-            "Bulk fuzzy matching, max 25 items, returning ranked candidates              per item for the caller to choose between.",
+            "Bulk fuzzy matching, max 25 items, returning ranked candidates per item for the caller to choose between.",
         ),
         (
             "GET /fields",
