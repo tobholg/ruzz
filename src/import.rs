@@ -75,7 +75,7 @@ fn dir_bytes(path: &Path) -> u64 {
 }
 
 fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
     while value >= 1024.0 && unit < UNITS.len() - 1 {
