@@ -401,9 +401,18 @@ For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending 
 
 **SQLite FTS5?** — No fuzzy matching. Exact tokens only.
 
+## Concurrency
+
+Search runs synchronously on Tokio's async worker threads, one per core by default. Every request being a few milliseconds makes that invisible, and it is what ruzz was shaped around.
+
+Long requests change the arithmetic. A `/match` batch of 25 names is 25 ranked queries and holds a worker for a few hundred milliseconds, so on a 4-core box four of them occupy every worker and short interactive searches queue behind them at the runtime level. Measured on a 1.3M-document index: 16 concurrent maximum-size `/match` clients degraded interactive p50 by 8.8x, while server-side processing time barely moved — the latency was queueing, not work. `/resolve` is far milder, because each request is tens of milliseconds rather than hundreds.
+
+If you drive bulk endpoints hard alongside interactive traffic, either keep bulk concurrency near your core count, or use smaller batches: head-of-line blocking scales with how long a single request holds a worker, so the same names per second in smaller requests cost less interactive latency.
+
 ## Roadmap
 
 - [x] Document store — full records behind compact search rows
+- [ ] Bulk endpoints off the async workers (`spawn_blocking` + a concurrency bound)
 - [ ] Zero-downtime re-imports (generational index + store, atomic swap)
 - [ ] Incremental delta imports (append/update without full rebuild)
 - [ ] JSON import (native nested-document sources)

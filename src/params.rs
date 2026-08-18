@@ -227,6 +227,14 @@ pub fn endpoints(engine: &SearchEngine) -> Vec<(&'static str, &'static str)> {
             "Exact-match lookup returning at most one row.",
         ),
         (
+            "POST /resolve",
+            "Bulk exact resolution, max 250 items. Each item reports matched, not_found or ambiguous — never a best guess.",
+        ),
+        (
+            "POST /match",
+            "Bulk fuzzy matching, max 25 items, returning ranked candidates per item for the caller to choose between.",
+        ),
+        (
             "GET /fields",
             "Machine-readable list of every accepted query parameter.",
         ),
@@ -280,6 +288,17 @@ within one parameter widen it (OR).\n\n",
         out.push_str(&format!("- `{}` — {}\n", route, description));
     }
 
+    out.push_str("\n## Bulk endpoints\n\n");
+    out.push_str("`POST /resolve` joins exact keys to records — the bulk lookup an importer needs. Up to 250 items, each with your own `id` echoed back.\n\n");
+    out.push_str("```json\n{\n  \"items\": [\n    {\"id\": \"row-1\", \"filters\": {\"org_number\": \"923609016\", \"country_code\": \"NO\"}},\n    {\"id\": \"row-2\", \"filters\": {\"org_number\": \"982463718\", \"country_code\": \"NO\"}}\n  ],\n  \"full\": true\n}\n```\n\n");
+    out.push_str("Every item comes back with an explicit `status`, never a best guess:\n\n");
+    out.push_str("- `matched` — exactly one record, in `document`\n");
+    out.push_str("- `not_found` — nothing matched; create a record or flag the row\n");
+    out.push_str("- `ambiguous` — more than one matched. `count` is the true number and `candidates` holds the first few. The key is not unique in this data, so choosing for you would attach your row to an arbitrary record\n");
+    out.push_str("- `invalid` — the item could not identify anything: an unknown field, no filters, or a blank value. A blank value matches every document, so it is refused rather than resolved\n\n");
+    out.push_str("`POST /match` is the fuzzy sibling for names, capped at 25 items because each one is a separate ranked query costing roughly a hundred times more than an exact key. It returns ranked `candidates` per item and never decides between them.\n\n");
+    out.push_str("```json\n{\n  \"items\": [{\"id\": \"row-1\", \"q\": \"Equinor\", \"filters\": {\"country_code\": \"NO\"}}],\n  \"candidates\": 5\n}\n```\n\n");
+    out.push_str("Do not store `_ref` as a foreign key: refs are ordinal and change on every re-import. Key on your own identifier and re-resolve.\n\n");
     out.push_str("\n## Response shape\n\n");
     out.push_str("```json\n{\n  \"took_ms\": 4.1,\n  \"count\": 44678,\n  \"returned\": 20,\n  \"offset\": 0,\n  \"limit\": 20,\n  \"has_more\": true,\n  \"results\": []\n}\n```\n\n");
     out.push_str("- `count` — documents matching the current search state, exact and uncapped. Pass `count=false` to skip computing it.\n");
@@ -417,6 +436,112 @@ pub fn openapi(engine: &SearchEngine) -> serde_json::Value {
                             }}}
                         },
                         "400": { "description": "Unknown or invalid parameters (strict_params mode)" }
+                    }
+                }
+            },
+            "/resolve": {
+                "post": {
+                    "summary": "Bulk exact resolution, max 250 items",
+                    "description": "Joins exact keys to records. Each item reports its own status and never a best guess: an item matching more than one record is reported as ambiguous with its candidates, because choosing one would attach the caller's row to an arbitrary record. Blank filter values are refused — an empty value matches every document and cannot identify anything.",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "required": ["items"],
+                        "properties": {
+                            "items": {
+                                "type": "array", "maxItems": 250,
+                                "items": {
+                                    "type": "object",
+                                    "required": ["filters"],
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Your own identifier, echoed back untouched" },
+                                        "filters": { "type": "object", "additionalProperties": { "type": "string" },
+                                                     "description": "Exact field filters that together identify one record" }
+                                    }
+                                }
+                            },
+                            "full": { "type": "boolean", "description": "Attach each match's full document from the store" },
+                            "candidates": { "type": "integer", "default": 5, "maximum": 25,
+                                            "description": "Candidates returned for an ambiguous item" }
+                        }
+                    }}}},
+                    "responses": {
+                        "200": { "description": "One result per input item, in order", "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "properties": {
+                                "took_ms": { "type": "number" },
+                                "summary": { "type": "object", "properties": {
+                                    "items": { "type": "integer" },
+                                    "matched": { "type": "integer" },
+                                    "not_found": { "type": "integer" },
+                                    "ambiguous": { "type": "integer" },
+                                    "invalid": { "type": "integer" }
+                                }},
+                                "results": { "type": "array", "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "nullable": true },
+                                        "status": { "type": "string", "enum": ["matched", "not_found", "ambiguous", "invalid", "error"] },
+                                        "count": { "type": "integer" },
+                                        "document": { "type": "object", "nullable": true },
+                                        "candidates": { "type": "array", "items": { "type": "object" } },
+                                        "error": { "type": "string" },
+                                        "message": { "type": "string" }
+                                    }
+                                }}
+                            }
+                        }}}},
+                        "400": { "description": "Malformed body, empty batch, or more than 250 items" }
+                    }
+                }
+            },
+            "/match": {
+                "post": {
+                    "summary": "Bulk fuzzy matching, max 25 items",
+                    "description": "Ranked candidate matching for names. Returns candidates for the caller to choose between and never decides. Reports no match count by design: trigram matching gives nearly every document a weak score, so the number runs to hundreds of thousands and means nothing actionable. Use `margin` — the gap between the best candidate and the runner-up, as a fraction of the top score — rather than thresholding on `_score`, which is not comparable between queries.",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "required": ["items"],
+                        "properties": {
+                            "items": {
+                                "type": "array", "maxItems": 25,
+                                "items": {
+                                    "type": "object",
+                                    "required": ["q"],
+                                    "properties": {
+                                        "id": { "type": "string", "description": "Your own identifier, echoed back untouched" },
+                                        "q": { "type": "string", "maxLength": 200, "description": "Text to match, e.g. a company name" },
+                                        "filters": { "type": "object", "additionalProperties": { "type": "string" },
+                                                     "description": "Exact filters scoping the match" }
+                                    }
+                                }
+                            },
+                            "full": { "type": "boolean" },
+                            "candidates": { "type": "integer", "default": 5, "maximum": 25 }
+                        }
+                    }}}},
+                    "responses": {
+                        "200": { "description": "Ranked candidates per input item, in order", "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "properties": {
+                                "took_ms": { "type": "number" },
+                                "summary": { "type": "object", "properties": {
+                                    "items": { "type": "integer" },
+                                    "with_candidates": { "type": "integer" }
+                                }},
+                                "results": { "type": "array", "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "nullable": true },
+                                        "status": { "type": "string", "enum": ["candidates", "not_found", "invalid", "error"] },
+                                        "returned": { "type": "integer" },
+                                        "margin": { "type": "number", "nullable": true,
+                                                    "description": "How far the top candidate stands clear of the runner-up, 0..1. Null when there is nothing to compare." },
+                                        "candidates": { "type": "array", "items": { "type": "object" } }
+                                    }
+                                }}
+                            }
+                        }}}},
+                        "400": { "description": "Malformed body, empty batch, or more than 25 items" }
                     }
                 }
             },

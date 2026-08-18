@@ -1782,6 +1782,33 @@ async function buildDocs() {
     .filter(Boolean)
     .join('&');
 
+  // Bulk examples, built from this index's own fields so they are runnable
+  // as shown rather than being generic placeholders.
+  const bulkKeyField = firstExactField ? firstExactField.name : 'id';
+  const bulkKeyValue = exExactValue || 'VALUE';
+  const bulkScope = secondExactField
+    ? `, "${secondExactField.name}": "${exExactValue2}"`
+    : '';
+  const resolveExample = `POST /resolve
+Content-Type: application/json
+
+{
+  "items": [
+    {"id": "row-1", "filters": {"${bulkKeyField}": "${bulkKeyValue}"${bulkScope}}},
+    {"id": "row-2", "filters": {"${bulkKeyField}": "…"${bulkScope}}}
+  ],
+  "full": false
+}`;
+  const matchExample = `POST /match
+Content-Type: application/json
+
+{
+  "items": [
+    {"id": "row-1", "q": "${exFuzzy}"${secondExactField ? `, "filters": {"${secondExactField.name}": "${exExactValue2}"}` : ''}}
+  ],
+  "candidates": 5
+}`;
+
   const fullSample = {};
   for (const f of fields) {
     if (sample && sample[f.name] !== undefined) {
@@ -1865,6 +1892,24 @@ async function buildDocs() {
     <p>Exact match lookup by exact-match fields.</p>
     <pre>GET /lookup?${lookupParams || 'field=value'}</pre>
 
+    <h3>POST /resolve</h3>
+    <p>Bulk exact resolution — the join an importer needs. Up to <strong>250</strong> items per request, each carrying your own <code>id</code>, which is echoed back.</p>
+    <pre>${esc(resolveExample)}</pre>
+    <p>Every item comes back with its own <code>status</code>, never a best guess:</p>
+    <ul>
+      <li><code>matched</code> — exactly one record, in <code>document</code></li>
+      <li><code>not_found</code> — nothing matched; create a record or flag the row</li>
+      <li><code>ambiguous</code> — more than one. <code>count</code> is the true number and <code>candidates</code> holds the first few. The key is not unique in this data, so choosing for you would attach your row to an arbitrary record</li>
+      <li><code>invalid</code> — cannot identify anything: unknown field, no filters, or a blank value. A blank value matches every document, so it is refused rather than resolved</li>
+    </ul>
+    <p>The batch always returns <code>200</code>; a <code>4xx</code> means the request itself was malformed, never that an item failed to resolve. Add <code>"full": true</code> to attach each match's full document.</p>
+
+    <h3>POST /match</h3>
+    <p>Bulk fuzzy matching for names — record linkage rather than a join. Capped at <strong>25</strong> items, because each one is a separate ranked query costing roughly a hundred times more than an exact key.</p>
+    <pre>${esc(matchExample)}</pre>
+    <p>Returns ranked <code>candidates</code> per item and never decides between them. There is deliberately no match count: trigram matching gives nearly every document a weak score, so that number runs to hundreds of thousands and means nothing you should act on.</p>
+    <p>Use <code>margin</code> instead — how far the leader stands clear of the runner-up, as a fraction of the top score. <code>1.0</code> means it stands alone; near <code>0</code> means a tie worth a human look. Do not threshold on <code>_score</code>: BM25 scores are not comparable between queries.</p>
+
     <h3>GET /stats</h3>
     <p>Runtime stats: document count, index size, memory usage, uptime, schema.</p>
 
@@ -1921,6 +1966,35 @@ Exact match lookup. Returns single result.
 \`\`\`
 GET /lookup?${lookupParams || 'field=value'}
 \`\`\`
+
+## POST /resolve
+
+Bulk exact resolution, up to 250 items. Each item carries your own \`id\`, echoed back.
+
+\`\`\`json
+${resolveExample.split('\n').slice(2).join('\n')}
+\`\`\`
+
+Each item reports its own \`status\`, never a best guess:
+
+- \`matched\` — exactly one record, in \`document\`
+- \`not_found\` — nothing matched
+- \`ambiguous\` — more than one; \`count\` is the true number and \`candidates\` holds the first few
+- \`invalid\` — unknown field, no filters, or a blank value (a blank value matches every document, so it is refused)
+
+The batch always returns 200; a 4xx means the request was malformed, never that an item failed to resolve. Add \`"full": true\` to attach full documents.
+
+Do not store \`_ref\` as a foreign key — refs are ordinal and change on every re-import. Key on your own identifier and re-resolve.
+
+## POST /match
+
+Bulk fuzzy matching, up to 25 items — each is a separate ranked query, so the limit is much lower than \`/resolve\`'s.
+
+\`\`\`json
+${matchExample.split('\n').slice(2).join('\n')}
+\`\`\`
+
+Returns ranked \`candidates\` per item and never decides between them. There is no match count by design: trigram matching gives nearly every document a weak score, so the number runs to hundreds of thousands and means nothing actionable. Use \`margin\` — the gap between the best candidate and the runner-up as a fraction of the top score. Do not threshold on \`_score\`; BM25 scores are not comparable across queries.
 
 ## GET /stats
 
