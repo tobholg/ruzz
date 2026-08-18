@@ -205,6 +205,29 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
         // what blocks until the pool has finished.
         drop(writer.merge(&segment_ids));
         writer.wait_merging_threads()?;
+
+        // Merging leaves the pre-merge segments on disk. Tantivy only removes
+        // files no longer referenced by meta.json during a garbage collect,
+        // and the merge here happens after the final commit, so nothing ever
+        // triggered one — every index carried its own superseded segments
+        // forever. Measured before this ran: a 16GB index dragging 27GB of
+        // dead files behind it, 63% of the directory.
+        //
+        // wait_merging_threads() consumes the writer, so collect with a fresh
+        // one. Deleting is safe for a reader that still has a file mapped: on
+        // Unix the inode outlives the directory entry, so a serving process
+        // keeps working and the space is returned when it next restarts.
+        let collector: IndexWriter = index.writer(15_000_000)?;
+        match collector.garbage_collect_files().wait() {
+            Ok(result) => {
+                let freed = result.deleted_files.len();
+                if freed > 0 {
+                    merge_pb.set_message(format!("Collected {} superseded files.", freed));
+                }
+            }
+            // Reclaiming disk is not worth failing a finished import over.
+            Err(e) => eprintln!("  note: could not collect superseded segments: {}", e),
+        }
     }
     merge_pb.finish_with_message("Segments merged.");
 
