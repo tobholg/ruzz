@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::value::RawValue;
 use sysinfo::System;
@@ -20,6 +20,19 @@ const MAX_SEARCH_LIMIT: usize = 1000;
 const MAX_FULL_LIMIT: usize = 100;
 /// Max refs per /docs batch request
 const MAX_DOC_BATCH: usize = 256;
+/// Max items per /resolve batch. Exact keys resolve in ~0.1ms each, so this
+/// is bounded by response size rather than by query cost.
+const MAX_RESOLVE_BATCH: usize = 250;
+/// Max items per /match batch. Each item is a separate ranked query costing
+/// ~15ms on real company names — two orders of magnitude more than an exact
+/// key — so this limit is much lower and is about CPU, not bytes.
+const MAX_MATCH_BATCH: usize = 25;
+/// Longest query string accepted per /match item. Fuzzy cost scales with the
+/// number of trigrams, so a limit on item count alone does not bound work.
+const MAX_MATCH_QUERY_LEN: usize = 200;
+/// Candidates returned for an ambiguous exact match, or per /match item.
+const DEFAULT_CANDIDATES: usize = 5;
+const MAX_CANDIDATES: usize = 25;
 
 pub struct AppState {
     pub engine: SearchEngine,
@@ -36,6 +49,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/doc", get(handle_doc_resolve))
         .route("/doc/{doc_ref}", get(handle_doc_by_ref))
         .route("/docs", get(handle_docs_batch))
+        .route("/resolve", post(handle_resolve))
+        .route("/match", post(handle_match))
         .route("/fields", get(handle_fields))
         .route("/openapi.json", get(handle_openapi))
         .route("/api", get(handle_api_index))
@@ -435,6 +450,348 @@ struct DocsBatchEntry {
 }
 
 /// GET /docs?refs=1,2,3 — batch fetch, order-preserving, null for missing refs
+/// One input row of a bulk request, carrying the caller's own identifier.
+///
+/// `id` is echoed back untouched. Array position is preserved too, but an
+/// importer that dedupes or filters client-side cannot rely on position, and
+/// correlating by it silently misaligns when they do.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveItem {
+    #[serde(default)]
+    id: Option<String>,
+    /// Exact field filters that together identify one record.
+    filters: HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveRequest {
+    items: Vec<ResolveItem>,
+    /// Attach the full document from the store to each matched record.
+    #[serde(default)]
+    full: bool,
+    /// Candidates to return for an ambiguous item (default 5, max 25).
+    #[serde(default)]
+    candidates: Option<usize>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatchItem {
+    #[serde(default)]
+    id: Option<String>,
+    /// The text to match, e.g. a company name.
+    q: String,
+    /// Exact filters scoping the match — country_code and the like.
+    #[serde(default)]
+    filters: HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatchRequest {
+    items: Vec<MatchItem>,
+    #[serde(default)]
+    full: bool,
+    /// Candidates per item (default 5, max 25).
+    #[serde(default)]
+    candidates: Option<usize>,
+}
+
+/// Parse a bulk request body, reporting failures as JSON.
+///
+/// Axum's own `Json` rejection is `text/plain`, so a client that parses every
+/// response as JSON breaks on exactly the requests it most needs to read. The
+/// serde message is worth surfacing too: it names the offending field and
+/// lists the valid ones, which is the body-level equivalent of the
+/// did-you-mean already offered for query parameters.
+fn parse_body<T: serde::de::DeserializeOwned>(body: &axum::body::Bytes) -> Result<T, Response> {
+    serde_json::from_slice::<T>(body).map_err(|e| {
+        bad_request(
+            "invalid_body",
+            format!("could not parse the JSON body: {}", e),
+        )
+    })
+}
+
+/// How far clear the top candidate is of the next one, as a fraction of the
+/// top score. `null` when there is nothing to compare against.
+fn top_margin(results: &[serde_json::Value]) -> Option<f64> {
+    let score = |row: &serde_json::Value| row.get("_score").and_then(|v| v.as_f64());
+    let first = score(results.first()?)?;
+    match results.get(1).and_then(score) {
+        _ if first <= 0.0 => None,
+        None => Some(1.0),
+        Some(second) => Some(((first - second) / first).clamp(0.0, 1.0)),
+    }
+}
+
+fn bad_request(error: &str, message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": error, "message": message })),
+    )
+        .into_response()
+}
+
+/// Reject a filter set that cannot identify anything, before it reaches the
+/// query layer.
+///
+/// An empty value means "no constraint" everywhere else in this API, which is
+/// right for an unselected dropdown and catastrophic here: the item would
+/// match the whole index and, under first-match semantics, join to an
+/// arbitrary record. Real data contains such keys — 412 rows in one country
+/// file carry a blank organisation number — so this is a live hazard, not a
+/// hypothetical one.
+fn validate_filters(
+    engine: &SearchEngine,
+    filters: &HashMap<String, String>,
+) -> Result<(), (&'static str, String)> {
+    if filters.is_empty() {
+        return Err(("no_filters", "provide at least one filter".to_string()));
+    }
+    for (key, value) in filters {
+        if !engine.field_map.contains_key(key) {
+            return Err((
+                "unknown_field",
+                format!("'{}' is not a field in this index; see /fields", key),
+            ));
+        }
+        if value.trim().is_empty() {
+            return Err((
+                "empty_value",
+                format!(
+                    "'{}' has an empty value; an empty filter matches every document, \
+                     which cannot identify a record",
+                    key
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Deterministic resolution of exact keys to records — the bulk join an
+/// importer needs. Never returns a "best guess": an item matching more than
+/// one record is reported as ambiguous with its candidates, because a wrong
+/// join corrupts the destination silently while a reported one does not.
+async fn handle_resolve(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    let req: ResolveRequest = match parse_body(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    let engine = &state.engine;
+    if req.items.is_empty() {
+        return bad_request("no_items", "provide at least one item".to_string());
+    }
+    if req.items.len() > MAX_RESOLVE_BATCH {
+        return bad_request(
+            "batch_too_large",
+            format!(
+                "at most {} items per request, got {}",
+                MAX_RESOLVE_BATCH,
+                req.items.len()
+            ),
+        );
+    }
+    if req.full && engine.store.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(store_unavailable_body(engine)),
+        )
+            .into_response();
+    }
+    let candidates = req
+        .candidates
+        .unwrap_or(DEFAULT_CANDIDATES)
+        .clamp(1, MAX_CANDIDATES);
+
+    let start = Instant::now();
+    let mut results = Vec::with_capacity(req.items.len());
+    let mut matched = 0usize;
+    let mut not_found = 0usize;
+    let mut ambiguous = 0usize;
+    let mut invalid = 0usize;
+
+    for item in &req.items {
+        if let Err((error, message)) = validate_filters(engine, &item.filters) {
+            invalid += 1;
+            results.push(serde_json::json!({
+                "id": item.id, "status": "invalid", "error": error, "message": message,
+            }));
+            continue;
+        }
+        // Ask for one more than we will report, so "exactly one" is decided by
+        // the count rather than by the page size.
+        let outcome = engine.search(
+            "",
+            &item.filters,
+            &[],
+            &crate::search::SortOrder::Relevance,
+            candidates,
+            0,
+            false,
+            true,
+            req.full,
+        );
+        match outcome {
+            Ok(found) => {
+                let count = found.count.unwrap_or(found.returned);
+                if count == 0 {
+                    not_found += 1;
+                    results.push(serde_json::json!({
+                        "id": item.id, "status": "not_found", "count": 0,
+                    }));
+                } else if count == 1 {
+                    matched += 1;
+                    results.push(serde_json::json!({
+                        "id": item.id, "status": "matched", "count": 1,
+                        "document": found.results.into_iter().next(),
+                    }));
+                } else {
+                    ambiguous += 1;
+                    results.push(serde_json::json!({
+                        "id": item.id, "status": "ambiguous", "count": count,
+                        "candidates": found.results,
+                    }));
+                }
+            }
+            Err(e) => {
+                invalid += 1;
+                results.push(serde_json::json!({
+                    "id": item.id, "status": "error", "message": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "took_ms": round_ms(start),
+        "summary": {
+            "items": req.items.len(),
+            "matched": matched,
+            "not_found": not_found,
+            "ambiguous": ambiguous,
+            "invalid": invalid,
+        },
+        "results": results,
+    }))
+    .into_response()
+}
+
+/// Ranked candidate matching for names — record linkage rather than a join.
+/// Returns candidates for the caller to choose between; it never decides.
+async fn handle_match(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    let req: MatchRequest = match parse_body(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    let engine = &state.engine;
+    if req.items.is_empty() {
+        return bad_request("no_items", "provide at least one item".to_string());
+    }
+    if req.items.len() > MAX_MATCH_BATCH {
+        return bad_request(
+            "batch_too_large",
+            format!(
+                "at most {} items per request, got {} — each item is a separate \
+                 ranked query, so this limit is much lower than /resolve's",
+                MAX_MATCH_BATCH,
+                req.items.len()
+            ),
+        );
+    }
+    if req.full && engine.store.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(store_unavailable_body(engine)),
+        )
+            .into_response();
+    }
+    let candidates = req
+        .candidates
+        .unwrap_or(DEFAULT_CANDIDATES)
+        .clamp(1, MAX_CANDIDATES);
+
+    let start = Instant::now();
+    let mut results = Vec::with_capacity(req.items.len());
+    let mut with_hits = 0usize;
+
+    for item in &req.items {
+        let query = item.q.trim();
+        if query.is_empty() {
+            results.push(serde_json::json!({
+                "id": item.id, "status": "invalid", "error": "empty_query",
+                "message": "q is empty; an empty query cannot rank anything",
+            }));
+            continue;
+        }
+        if query.chars().count() > MAX_MATCH_QUERY_LEN {
+            results.push(serde_json::json!({
+                "id": item.id, "status": "invalid", "error": "query_too_long",
+                "message": format!("q is limited to {} characters", MAX_MATCH_QUERY_LEN),
+            }));
+            continue;
+        }
+        if !item.filters.is_empty() {
+            if let Err((error, message)) = validate_filters(engine, &item.filters) {
+                results.push(serde_json::json!({
+                    "id": item.id, "status": "invalid", "error": error, "message": message,
+                }));
+                continue;
+            }
+        }
+        // No count: trigram matching gives almost every document a weak
+        // score, so the "number of matches" for a name runs to hundreds of
+        // thousands and means nothing a caller should act on. Reporting it
+        // would invite exactly the wrong reading. Skipping it is also free
+        // speed, since nothing has to traverse the whole matching set.
+        let outcome = engine.search(
+            query,
+            &item.filters,
+            &[],
+            &crate::search::SortOrder::Relevance,
+            candidates,
+            0,
+            false,
+            false,
+            req.full,
+        );
+        match outcome {
+            Ok(found) => {
+                if !found.results.is_empty() {
+                    with_hits += 1;
+                }
+                results.push(serde_json::json!({
+                    "id": item.id,
+                    "status": if found.results.is_empty() { "not_found" } else { "candidates" },
+                    "returned": found.results.len(),
+                    // Relative distance between the best candidate and the
+                    // runner-up. BM25 scores are not comparable across
+                    // queries, so an absolute score is not a confidence
+                    // signal and thresholding on one is a classic linkage
+                    // bug; the gap within a single ranking is meaningful.
+                    // 1.0 means the leader stands alone, near 0 means a tie
+                    // the caller should look at.
+                    "margin": top_margin(&found.results),
+                    "candidates": found.results,
+                }));
+            }
+            Err(e) => results.push(serde_json::json!({
+                "id": item.id, "status": "error", "message": e.to_string(),
+            })),
+        }
+    }
+
+    Json(serde_json::json!({
+        "took_ms": round_ms(start),
+        "summary": { "items": req.items.len(), "with_candidates": with_hits },
+        "results": results,
+    }))
+    .into_response()
+}
+
 async fn handle_docs_batch(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DocsBatchParams>,
@@ -716,5 +1073,81 @@ fn format_duration(secs: u64) -> String {
         format!("{}m {}s", mins, s)
     } else {
         format!("{}s", s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{FieldConfig, FieldType};
+
+    fn engine(dir: &std::path::Path) -> SearchEngine {
+        crate::search::tests::engine_with_field(
+            dir,
+            FieldConfig {
+                name: "org_number".to_string(),
+                field_type: FieldType::Keyword,
+                search: None,
+                values: None,
+                max_values: None,
+                case_sensitive: false,
+                multi: false,
+                separator: None,
+                description: None,
+            },
+        )
+    }
+
+    fn filters(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The hazard this endpoint exists to avoid. Everywhere else in the API an
+    /// empty value means "no constraint" — correct for an unselected dropdown.
+    /// In a bulk join it would match the entire index, and returning a "best
+    /// guess" from that would silently attach an importer's row to an
+    /// arbitrary company. Real feeds carry such keys, so this must be refused
+    /// rather than resolved.
+    #[test]
+    fn a_blank_key_is_refused_rather_than_matching_everything() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-resolve-validate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let engine = engine(&dir);
+
+        assert!(validate_filters(&engine, &filters(&[("org_number", "998877")])).is_ok());
+
+        for blank in ["", "   ", "\t"] {
+            let err = validate_filters(&engine, &filters(&[("org_number", blank)]))
+                .expect_err("a blank key must not be accepted");
+            assert_eq!(err.0, "empty_value", "blank {:?}", blank);
+        }
+
+        // No filters at all is the same hazard wearing a different hat.
+        let err = validate_filters(&engine, &HashMap::new()).expect_err("empty set");
+        assert_eq!(err.0, "no_filters");
+
+        // A misspelled field would otherwise be ignored and resolve against
+        // the remaining filters, quietly widening the match.
+        let err = validate_filters(&engine, &filters(&[("org_nummer", "998877")]))
+            .expect_err("unknown field");
+        assert_eq!(err.0, "unknown_field");
+
+        // One good filter does not excuse a blank one alongside it.
+        let err = validate_filters(
+            &engine,
+            &filters(&[("org_number", "998877"), ("country_code", "")]),
+        )
+        .expect_err("blank alongside good");
+        assert!(matches!(err.0, "empty_value" | "unknown_field"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

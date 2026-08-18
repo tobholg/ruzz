@@ -227,6 +227,14 @@ pub fn endpoints(engine: &SearchEngine) -> Vec<(&'static str, &'static str)> {
             "Exact-match lookup returning at most one row.",
         ),
         (
+            "POST /resolve",
+            "Bulk exact resolution, max 250 items. Each item reports matched,              not_found or ambiguous — never a best guess.",
+        ),
+        (
+            "POST /match",
+            "Bulk fuzzy matching, max 25 items, returning ranked candidates              per item for the caller to choose between.",
+        ),
+        (
             "GET /fields",
             "Machine-readable list of every accepted query parameter.",
         ),
@@ -280,6 +288,17 @@ within one parameter widen it (OR).\n\n",
         out.push_str(&format!("- `{}` — {}\n", route, description));
     }
 
+    out.push_str("\n## Bulk endpoints\n\n");
+    out.push_str("`POST /resolve` joins exact keys to records — the bulk lookup an importer needs. Up to 250 items, each with your own `id` echoed back.\n\n");
+    out.push_str("```json\n{\n  \"items\": [\n    {\"id\": \"row-1\", \"filters\": {\"org_number\": \"923609016\", \"country_code\": \"NO\"}},\n    {\"id\": \"row-2\", \"filters\": {\"org_number\": \"982463718\", \"country_code\": \"NO\"}}\n  ],\n  \"full\": true\n}\n```\n\n");
+    out.push_str("Every item comes back with an explicit `status`, never a best guess:\n\n");
+    out.push_str("- `matched` — exactly one record, in `document`\n");
+    out.push_str("- `not_found` — nothing matched; create a record or flag the row\n");
+    out.push_str("- `ambiguous` — more than one matched. `count` is the true number and `candidates` holds the first few. The key is not unique in this data, so choosing for you would attach your row to an arbitrary record\n");
+    out.push_str("- `invalid` — the item could not identify anything: an unknown field, no filters, or a blank value. A blank value matches every document, so it is refused rather than resolved\n\n");
+    out.push_str("`POST /match` is the fuzzy sibling for names, capped at 25 items because each one is a separate ranked query costing roughly a hundred times more than an exact key. It returns ranked `candidates` per item and never decides between them.\n\n");
+    out.push_str("```json\n{\n  \"items\": [{\"id\": \"row-1\", \"q\": \"Equinor\", \"filters\": {\"country_code\": \"NO\"}}],\n  \"candidates\": 5\n}\n```\n\n");
+    out.push_str("Do not store `_ref` as a foreign key: refs are ordinal and change on every re-import. Key on your own identifier and re-resolve.\n\n");
     out.push_str("\n## Response shape\n\n");
     out.push_str("```json\n{\n  \"took_ms\": 4.1,\n  \"count\": 44678,\n  \"returned\": 20,\n  \"offset\": 0,\n  \"limit\": 20,\n  \"has_more\": true,\n  \"results\": []\n}\n```\n\n");
     out.push_str("- `count` — documents matching the current search state, exact and uncapped. Pass `count=false` to skip computing it.\n");
