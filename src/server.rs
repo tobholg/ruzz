@@ -506,12 +506,14 @@ struct MatchRequest {
 /// serde message is worth surfacing too: it names the offending field and
 /// lists the valid ones, which is the body-level equivalent of the
 /// did-you-mean already offered for query parameters.
-fn parse_body<T: serde::de::DeserializeOwned>(body: &axum::body::Bytes) -> Result<T, Response> {
+fn parse_body<T: serde::de::DeserializeOwned>(
+    body: &axum::body::Bytes,
+) -> Result<T, Box<Response>> {
     serde_json::from_slice::<T>(body).map_err(|e| {
-        bad_request(
+        Box::new(bad_request(
             "invalid_body",
             format!("could not parse the JSON body: {}", e),
-        )
+        ))
     })
 }
 
@@ -579,7 +581,7 @@ fn validate_filters(
 async fn handle_resolve(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
     let req: ResolveRequest = match parse_body(&body) {
         Ok(req) => req,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let engine = &state.engine;
     if req.items.is_empty() {
@@ -685,7 +687,7 @@ async fn handle_resolve(State(state): State<Arc<AppState>>, body: axum::body::By
 async fn handle_match(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
     let req: MatchRequest = match parse_body(&body) {
         Ok(req) => req,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let engine = &state.engine;
     if req.items.is_empty() {
