@@ -33,6 +33,13 @@ enum Command {
     Serve,
     /// Import then serve
     Run,
+    /// Delete index files no longer referenced by the current commit
+    ///
+    /// Merging supersedes segments but does not remove them, and until
+    /// ruzz 0.2 nothing ever collected the leftovers — existing indexes can
+    /// be more than half dead weight. Import does this automatically now;
+    /// this reclaims an index built before that, without re-importing.
+    Gc,
 }
 
 #[tokio::main]
@@ -52,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
             import::run_import(&config)?;
             println!();
             serve(config).await?;
+        }
+        Command::Gc => {
+            import::collect_garbage(&config)?;
         }
     }
 

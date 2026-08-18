@@ -30,6 +30,61 @@ pub struct SourceStats {
     pub duration_secs: f64,
 }
 
+/// Delete index files the current commit no longer references.
+///
+/// Safe to run against a live index: on Unix the inode outlives the
+/// directory entry, so a serving process keeps reading the files it has
+/// already mapped. The space it holds is returned when it next restarts.
+pub fn collect_garbage(config: &Config) -> anyhow::Result<()> {
+    let index_path = &config.server.index_path;
+    let before = dir_bytes(index_path);
+    let index = tantivy::Index::open_in_dir(index_path)
+        .with_context(|| format!("opening index at {}", index_path.display()))?;
+    let writer: IndexWriter = index.writer(15_000_000)?;
+    let outcome = writer
+        .garbage_collect_files()
+        .wait()
+        .map_err(|e| anyhow::anyhow!("garbage collection failed: {}", e))?;
+    let after = dir_bytes(index_path);
+    println!(
+        "✓ removed {} unreferenced files, {} → {} ({} reclaimed)",
+        outcome.deleted_files.len(),
+        human_bytes(before),
+        human_bytes(after),
+        human_bytes(before.saturating_sub(after)),
+    );
+    if outcome.deleted_files.is_empty() {
+        println!("  nothing to collect — this index is already clean");
+    } else {
+        println!("  a running server keeps its mapped files until it restarts");
+    }
+    Ok(())
+}
+
+fn dir_bytes(path: &Path) -> u64 {
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.2} {}", value, UNITS[unit])
+}
+
 /// Count lines in a file quickly (for progress bar total)
 fn count_lines(path: &Path) -> u64 {
     use std::io::{BufRead, BufReader};
