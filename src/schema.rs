@@ -59,7 +59,26 @@ pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<S
                     // Fast field keeps the raw value, so sorting is unaffected
                     .set_fast(None),
             ),
-            FieldType::Enum | FieldType::Boolean => builder.add_text_field(
+            // Enums match case-insensitively like keywords, through the
+            // index term rather than by rewriting the value. Booleans keep
+            // the raw tokenizer: they are canonicalised to TRUE/FALSE, so
+            // there is no original casing to preserve.
+            FieldType::Enum => builder.add_text_field(
+                &fc.name,
+                TextOptions::default()
+                    .set_indexing_options(
+                        TextFieldIndexing::default()
+                            .set_tokenizer(if fc.case_sensitive {
+                                "raw"
+                            } else {
+                                KEYWORD_CI_TOKENIZER
+                            })
+                            .set_index_option(IndexRecordOption::Basic),
+                    )
+                    .set_stored()
+                    .set_fast(None),
+            ),
+            FieldType::Boolean => builder.add_text_field(
                 &fc.name,
                 TextOptions::default()
                     .set_indexing_options(
