@@ -225,10 +225,20 @@ impl SearchEngine {
     /// Fold a filter value the same way the index folded its terms.
     fn match_case(&self, field: &str, value: String) -> String {
         if self.case_insensitive_fields.contains(field) {
-            value.to_lowercase()
-        } else {
-            value
+            return value.to_lowercase();
         }
+        // An enum outside that set belongs to an index built before enums
+        // preserved their casing: its terms were upper-cased on the way in,
+        // so a filter has to be upper-cased to meet them. Without this a
+        // binary upgrade would silently stop matching every enum filter on
+        // every existing index.
+        if matches!(
+            self.field_configs.get(field).map(|f| &f.field_type),
+            Some(FieldType::Enum)
+        ) {
+            return value.to_uppercase();
+        }
+        value
     }
 
     /// Terms a filter should match, resolved against the field's type.
@@ -921,6 +931,17 @@ pub mod tests {
             writer.commit().unwrap();
         }
 
+        // A real import always records which fields fold case; without it
+        // this fixture is a combination that cannot occur.
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
+
         let engine = SearchEngine::open(config).unwrap();
         let mut filters = HashMap::new();
         filters.insert("city".to_string(), "OSLO".to_string());
@@ -985,6 +1006,17 @@ pub mod tests {
             writer.commit().unwrap();
         }
 
+        // A real import always records which fields fold case; without it
+        // this fixture is a combination that cannot occur.
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
+
         let engine = SearchEngine::open(config).unwrap();
         let mut filters = HashMap::new();
         filters.insert("city".to_string(), "OSLO,BERGEN".to_string());
@@ -1042,7 +1074,7 @@ pub mod tests {
             &dir,
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
-                case_insensitive_fields: vec!["name".to_string()],
+                case_insensitive_fields: vec!["name".to_string(), "city".to_string()],
             },
         )
         .unwrap();
@@ -1094,7 +1126,8 @@ pub mod tests {
                 .unwrap();
             writer.commit().unwrap();
         }
-        // No metadata file at all — the pre-upgrade situation
+        // No metadata file at all — the pre-upgrade situation, which is the
+        // whole point of this test. Writing one here would destroy it.
         let engine = SearchEngine::open(config).unwrap();
         assert!(engine.case_insensitive_fields.is_empty());
 
@@ -1134,6 +1167,17 @@ pub mod tests {
             }
             writer.commit().unwrap();
         }
+
+        // A real import always records which fields fold case; without it
+        // this fixture is a combination that cannot occur.
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
 
         let engine = SearchEngine::open(config).unwrap();
         let search_for = |value: &str| {
@@ -1218,6 +1262,17 @@ pub mod tests {
             writer.commit().unwrap();
         }
 
+        // A real import always records which fields fold case; without it
+        // this fixture is a combination that cannot occur.
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
+
         let engine = SearchEngine::open(config).unwrap();
         let run = |q: &str| {
             engine
@@ -1287,7 +1342,7 @@ pub mod tests {
             &dir,
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
-                case_insensitive_fields: vec!["name".to_string()],
+                case_insensitive_fields: vec!["name".to_string(), "city".to_string()],
             },
         )
         .unwrap();
@@ -1424,7 +1479,7 @@ pub mod tests {
             &dir,
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
-                case_insensitive_fields: Vec::new(),
+                case_insensitive_fields: vec!["city".to_string()],
             },
         )
         .unwrap();
@@ -1474,6 +1529,80 @@ pub mod tests {
         assert_eq!(count("city", ""), 4, "empty value is not a filter (text)");
         assert_eq!(count("city", "OSLO"), 4, "text filters unaffected");
         assert_eq!(count("city", "BERGEN"), 0);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Enums used to be upper-cased on the way in, which bought
+    /// case-insensitive matching by destroying the alternative: a region
+    /// filed as "Vestland" came back "VESTLAND", and a role code documented
+    /// as `dagl` came back `DAGL`. Matching belongs to the index term, as it
+    /// already did for keywords.
+    #[test]
+    fn enum_values_keep_their_casing_and_still_match_either_way() {
+        let dir = test_index_dir("enum-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = test_config(&dir);
+        let (schema, _) = crate::schema::build_schema(&config.schema, false);
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            // Written the way import writes a canonicalised enum: untouched.
+            writer
+                .add_document(doc!(city => "Vestland", revenue => 1.0, name => "a"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |value: &str| {
+            let mut filters = HashMap::new();
+            filters.insert("city".to_string(), value.to_string());
+            engine
+                .search(
+                    "",
+                    &filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+
+        for spelling in ["Vestland", "vestland", "VESTLAND", "vEsTlAnD"] {
+            assert_eq!(
+                run(spelling).count,
+                Some(1),
+                "filter {spelling:?} should match"
+            );
+        }
+        assert_eq!(run("Trøndelag").count, Some(0));
+
+        // And the value comes back as it was filed, not shouted.
+        let stored = run("Vestland").results[0]["city"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            stored, "Vestland",
+            "an enum must not rewrite the value it stores"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -40,12 +40,19 @@ pub fn metadata_path(index_path: &Path) -> PathBuf {
     index_path.join(FIELD_METADATA_FILE)
 }
 
+/// Enum values keep the casing the source gave them.
+///
+/// They used to be upper-cased, which made matching case-insensitive by
+/// destroying the alternative: a region filed as "Vestland" came back as
+/// "VESTLAND", and a role code documented as `dagl` came back as `DAGL`.
+/// Matching is now the index term's job, exactly as it already is for
+/// keywords, so the stored value can be left alone.
 pub fn canonicalize_enum_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_uppercase())
+        Some(trimmed.to_string())
     }
 }
 
@@ -195,9 +202,14 @@ pub struct ImportFieldMetadataCollector {
 impl ImportFieldMetadataCollector {
     pub fn new(field_configs: &[FieldConfig]) -> Self {
         let mut fields = HashMap::new();
+        // Recorded per index, so a new binary over an index built before
+        // this change keeps that index's original matching. An enum absent
+        // from this list is an old, upper-cased one.
         let case_insensitive_fields = field_configs
             .iter()
-            .filter(|f| f.field_type == FieldType::Keyword && !f.case_sensitive)
+            .filter(|f| {
+                matches!(f.field_type, FieldType::Keyword | FieldType::Enum) && !f.case_sensitive
+            })
             .map(|f| f.name.clone())
             .collect();
 
@@ -304,11 +316,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonicalizes_enum_to_uppercase() {
+    fn enum_values_keep_the_casing_the_source_gave_them() {
+        // They used to be upper-cased, which made matching case-insensitive
+        // by destroying the alternative — a region filed as "Vestland" came
+        // back "VESTLAND". Matching is the index term's job now.
         assert_eq!(
             canonicalize_enum_value("  board chair "),
-            Some("BOARD CHAIR".to_string())
+            Some("board chair".to_string())
         );
+        assert_eq!(
+            canonicalize_enum_value("Vestland"),
+            Some("Vestland".to_string())
+        );
+        assert_eq!(canonicalize_enum_value("dagl"), Some("dagl".to_string()));
+        assert_eq!(canonicalize_enum_value("   "), None);
     }
 
     #[test]
