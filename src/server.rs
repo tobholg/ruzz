@@ -1094,6 +1094,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 "dashboard": {
                     "name": state.engine.config.dashboard.name,
                     "columns": state.engine.config.dashboard.columns,
+                    "filters": state.engine.config.dashboard.filters,
                 },
                 "schema": {
                     "fields": state.engine.config.schema.fields.iter().map(|f| {

@@ -66,6 +66,7 @@ memory_budget = "2GB"  # or "50%", "100%", "unlimited"
 # [dashboard]
 # name = "US companies"                       # label in the dashboard header
 # columns = ["name", "country", "city"]       # default table columns, in order
+# filters = ["country", "city", "revenue"]    # filters offered up-front, in order
 
 [schema]
 fields = [

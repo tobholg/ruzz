@@ -29,6 +29,12 @@ pub struct DashboardConfig {
     /// Users can still override this per browser from the Columns menu.
     #[serde(default)]
     pub columns: Option<Vec<String>>,
+    /// Filters offered up-front in the dashboard's filter strip, in order.
+    /// On a wide schema "the first N fields" is rarely what anyone wants to
+    /// filter by; this names the hot ones. The rest stay reachable through
+    /// the add-filter search and the settings modal.
+    #[serde(default)]
+    pub filters: Option<Vec<String>>,
 }
 
 /// Optional on-disk document store for full records behind the compact
