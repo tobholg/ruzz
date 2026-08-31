@@ -231,11 +231,16 @@
   .preset { font-family: var(--mono); font-size: 10px; color: var(--text-muted); padding: 4px 8px; background: var(--surface); border-radius: 6px; }
   .preset.active { background: var(--accent-tint); color: var(--accent-strong); font-weight: 600; }
 
-  /* ── Slideout ── */
-  .slideout { width: 0; flex-shrink: 0; overflow: hidden; background: var(--surface); border-left: 1px solid transparent; display: flex; flex-direction: column; transition: width 0.18s ease; }
-  .slideout.open { width: 460px; border-left-color: var(--border); box-shadow: -20px 0 44px rgba(31,30,29,0.08); }
+  /* ── Slideout ──
+     A viewport-pinned drawer: full height, footer buttons resting on the
+     bottom edge of the screen, the body scrolling internally. The table
+     makes room with a margin so no columns hide behind it. */
+  .slideout { position: fixed; top: 0; right: 0; bottom: 0; width: 460px; z-index: 60; background: var(--surface); border-left: 1px solid var(--border); transform: translateX(102%); transition: transform 0.18s ease; display: flex; flex-direction: column; }
+  .slideout.open { transform: translateX(0); box-shadow: -20px 0 44px rgba(31,30,29,0.08); }
   :root[data-theme="dark"] .slideout.open { box-shadow: -30px 0 60px rgba(0,0,0,0.4); }
-  .slideout-inner { width: 460px; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .slideout-inner { width: 100%; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .main { transition: padding-right 0.18s ease; }
+  .app.slideout-open .main { padding-right: 484px; }
   .slideout-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 16px 20px 10px 20px; }
   .slideout-title { font-family: var(--serif); font-size: 19px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
   .slideout-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; font-family: var(--mono); font-size: 10px; }
@@ -360,14 +365,13 @@
   .auth-btn { height: 40px; padding: 0 18px; background: var(--accent); color: var(--accent-contrast); border-radius: 9px; font-weight: 600; }
 
   @media (max-width: 1100px) {
-    .slideout.open { width: 380px; }
-    .slideout-inner { width: 380px; }
+    .slideout { width: 380px; }
+    .app.slideout-open .main { padding-right: 404px; }
     .topbar-right .hide-narrow { display: none; }
   }
   @media (max-width: 800px) {
-    .results-zone { flex-direction: column; }
-    .slideout.open { width: 100%; border-left: none; border-top: 1px solid var(--border); }
-    .slideout-inner { width: 100%; }
+    .slideout { width: 100%; }
+    .app.slideout-open .main { padding-right: 24px; }
     .count-block { display: none; }
   }
 </style>
@@ -1338,12 +1342,14 @@ function openSlideout() {
   const hasStore = storeAvailable() && record._ref !== undefined && record._ref !== null;
   if (!hasStore && (slideoutTab === 'full')) slideoutTab = 'fields';
   document.getElementById('slideout').classList.add('open');
+  document.querySelector('.app')?.classList.add('slideout-open');
   renderSlideout();
   if (hasStore && !fullDocCache.has(record._ref)) fetchFullDoc(record._ref);
 }
 
 function closeSlideout() {
   document.getElementById('slideout')?.classList.remove('open');
+  document.querySelector('.app')?.classList.remove('slideout-open');
 }
 
 async function fetchFullDoc(ref) {
