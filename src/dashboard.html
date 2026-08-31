@@ -218,6 +218,25 @@
   .column-toggle.off .mark { color: var(--text-dim); }
   .columns-pop-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 9px 5px 9px; border-top: 1px solid var(--hairline); margin-top: 5px; font-size: 10.5px; color: var(--text-dim); }
   .columns-reset { color: var(--accent); font-size: 10.5px; font-weight: 500; }
+  .columns-search-wrap { display: flex; align-items: center; gap: 7px; margin: 2px 2px 6px 2px; padding: 0 9px; height: 30px; background: var(--input); border: 1px solid var(--border); border-radius: 7px; }
+  .columns-search-wrap svg { color: var(--text-dim); flex-shrink: 0; }
+  .columns-search { flex: 1; min-width: 0; border: none; background: none; outline: none; font-size: 12px; }
+  .columns-more { padding: 5px 9px 2px 9px; font-size: 10.5px; color: var(--text-dim); }
+
+  /* ── Search settings modal ── */
+  .settings-section { margin-bottom: 18px; }
+  .settings-sort-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .settings-note { font-size: 11px; color: var(--text-dim); }
+  .settings-filters-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .settings-filters-grid .filter-group { max-width: none; justify-content: space-between; }
+  .settings-filters-grid .filter-group input.filter-input { flex: 1; width: auto; min-width: 0; }
+  .settings-filters-grid .filter-group input.filter-input[type="number"] { width: 54px; flex: none; }
+  .settings-limit-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .settings-limit-row .limit-input { width: 90px; }
+  .sort-chip { padding-right: 6px; }
+  .sort-order-btn { font-family: var(--mono); font-size: 12px; color: var(--accent); padding: 3px 7px; border-radius: 6px; }
+  .sort-order-btn:hover { background: var(--accent-tint); }
+  @media (max-width: 900px) { .settings-filters-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
   /* ── Limit menu ── */
   .limit-wrap { position: relative; }
@@ -473,6 +492,61 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="settings-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="settings-modal-title">Search settings</div>
+        <div class="modal-subtitle">Every filterable field, sorting and result size for the current search. Changes apply immediately.</div>
+      </div>
+      <button class="modal-close" id="settings-close-btn" type="button" aria-label="Close search settings">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-section">
+        <div class="export-panel-title">SORT</div>
+        <div class="settings-sort-row">
+          <div class="filter-group sort-chip">
+            <span class="filter-label">sort by</span>
+            <span id="settings-sort-slot"></span>
+            <button class="sort-order-btn" id="settings-sort-order-btn" type="button" title="Toggle sort order" hidden>↓</button>
+          </div>
+          <div class="settings-note">Clicking a table column header sorts by it too. Text fields cannot be sorted.</div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="export-panel-title">FILTERS</div>
+        <div class="export-search-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+          <input class="export-search-input" id="settings-filter-search" type="text" placeholder="Find field…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="settings-filters-grid" id="settings-filters-grid"></div>
+        <div class="settings-note" id="settings-filters-empty" hidden>No filters match that field name.</div>
+      </div>
+      <div class="settings-section">
+        <div class="export-panel-title">RESULTS PER SEARCH</div>
+        <div class="settings-limit-row">
+          <input class="limit-input" id="settings-limit-input" type="number" min="1" max="1000" step="1" inputmode="numeric">
+          <button class="limit-apply" id="settings-limit-apply" type="button">Apply</button>
+          <div class="preset-row" id="settings-limit-presets">
+            <button class="preset" type="button" data-limit="10">10</button>
+            <button class="preset" type="button" data-limit="30">30</button>
+            <button class="preset" type="button" data-limit="100">100</button>
+            <button class="preset" type="button" data-limit="250">250</button>
+            <button class="preset" type="button" data-limit="1000">1000</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="modal-status"></div>
+        <div class="modal-actions">
+          <button class="modal-secondary" id="settings-reset-btn" type="button">Clear all</button>
+          <button class="modal-primary" id="settings-done-btn" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '';
 let schema = [];
@@ -484,7 +558,6 @@ const DEFAULT_RESULT_LIMIT = 30;
 const MIN_RESULT_LIMIT = 1;
 const MAX_RESULT_LIMIT = 1000;
 const DEFAULT_COLUMN_CAP = 7;
-let filtersExpanded = false;
 let resultLimit = clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
 let lastSearchData = null;
 let sortBy = '';
@@ -541,7 +614,10 @@ function getSearchParams(limitOverride = resultLimit) {
   if (q) params.set('q', q);
   params.set('limit', String(clampResultLimit(limitOverride)));
   let hasAnyFilter = false;
-  document.querySelectorAll('#filters-flow .filter-input').forEach(input => {
+  // Filter controls live in the strip normally and inside the search
+  // settings modal while it is open — same nodes, either home counts.
+  document.querySelectorAll('#filters-flow .filter-input, #settings-filters-grid .filter-input').forEach(input => {
+    if (!input.dataset.field) return;
     const val = input.value.trim();
     if (!val) return;
     hasAnyFilter = true;
@@ -581,6 +657,11 @@ function searchTabMarkup() {
         <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       </div>
       <div class="strip-actions">
+        <div class="filter-group sort-chip" id="sort-chip">
+          <span class="filter-label">sort</span>
+          <span id="sort-picker-slot"></span>
+          <button class="sort-order-btn" id="sort-order-btn" type="button" title="Toggle sort order" hidden>↓</button>
+        </div>
         <button class="filters-toggle" id="filters-toggle" type="button" hidden></button>
         <button class="clear-btn" id="reset-search-btn" type="button">Clear</button>
         <button class="strip-btn" id="export-btn" type="button">
@@ -594,7 +675,12 @@ function searchTabMarkup() {
           </button>
           <div class="columns-pop" id="columns-pop" hidden>
             <div class="columns-pop-title">VISIBLE COLUMNS</div>
+            <div class="columns-search-wrap">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <input class="columns-search" id="columns-search" type="text" placeholder="Find column…" autocomplete="off" spellcheck="false">
+            </div>
             <div class="columns-list" id="columns-list"></div>
+            <div class="columns-more" id="columns-more" hidden></div>
             <div class="columns-pop-foot">
               <span id="columns-default-note">default</span>
               <button class="columns-reset" id="columns-reset" type="button">Reset</button>
@@ -699,15 +785,23 @@ document.querySelectorAll('.topbar .tab').forEach(tab => {
 function bindSearchTabEvents() {
   document.getElementById('search')?.addEventListener('input', scheduleSearch);
   document.getElementById('filter-search')?.addEventListener('input', applyFilterFieldSearch);
-  document.getElementById('filters-toggle')?.addEventListener('click', () => {
-    filtersExpanded = !filtersExpanded;
-    applyFilterFieldSearch();
-  });
+  document.getElementById('filters-toggle')?.addEventListener('click', openSettingsModal);
   document.getElementById('reset-search-btn')?.addEventListener('click', resetSearchState);
   document.getElementById('export-btn')?.addEventListener('click', openExportModal);
   document.getElementById('columns-btn')?.addEventListener('click', () => {
     const pop = document.getElementById('columns-pop');
-    if (pop) pop.hidden = !pop.hidden;
+    if (!pop) return;
+    pop.hidden = !pop.hidden;
+    if (!pop.hidden) {
+      columnsSearch = '';
+      const search = document.getElementById('columns-search');
+      if (search) { search.value = ''; search.focus(); }
+      renderColumnsPop();
+    }
+  });
+  document.getElementById('columns-search')?.addEventListener('input', event => {
+    columnsSearch = event.target.value.trim().toLowerCase();
+    renderColumnsPop();
   });
   document.getElementById('columns-reset')?.addEventListener('click', () => {
     try { localStorage.removeItem(columnsStorageKey()); } catch {}
@@ -787,6 +881,7 @@ function bindExportModalEvents() {
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     if (document.getElementById('export-modal')?.classList.contains('open')) { closeExportModal(); return; }
+    if (document.getElementById('settings-modal')?.classList.contains('open')) { closeSettingsModal(); return; }
     const pop = document.getElementById('columns-pop');
     if (pop && !pop.hidden) { pop.hidden = true; return; }
     closeSlideout();
@@ -851,10 +946,10 @@ function setStatus(text, ok) {
 }
 
 function buildSearchTab() {
-  filtersExpanded = false;
   lastSearchData = null;
   selectedIndex = -1;
   buildFilters();
+  buildSortControls();
   renderColumnsPop();
   updateLimitControls();
   renderIdleResultsState();
@@ -934,18 +1029,36 @@ function toggleColumn(name) {
   if (lastSearchData) renderResults(lastSearchData);
 }
 
+const COLUMNS_POP_CAP = 5;
+let columnsSearch = '';
+
 function renderColumnsPop() {
   const list = document.getElementById('columns-list');
   const count = document.getElementById('columns-count');
   const note = document.getElementById('columns-default-note');
+  const more = document.getElementById('columns-more');
   if (!list) return;
-  list.innerHTML = schema.map(field => {
+  // Visible columns first so unticking never requires a search; the list is
+  // capped because a schema can carry dozens of fields — search narrows it.
+  const ordered = [
+    ...schema.filter(field => visibleColumns.includes(field.name)),
+    ...schema.filter(field => !visibleColumns.includes(field.name)),
+  ];
+  const matches = ordered.filter(field =>
+    !columnsSearch || (field.name + ' ' + formatFieldName(field.name)).toLowerCase().includes(columnsSearch));
+  const shown = matches.slice(0, COLUMNS_POP_CAP);
+  list.innerHTML = shown.map(field => {
     const on = visibleColumns.includes(field.name);
     return `<button class="column-toggle${on ? '' : ' off'}" type="button" data-col="${esc(field.name)}"><span class="mark">${on ? '▣' : '▢'}</span>${esc(field.name)}</button>`;
-  }).join('');
+  }).join('') || '<div class="columns-more" style="padding:6px 9px">No columns match.</div>';
   list.querySelectorAll('.column-toggle').forEach(button => {
     button.addEventListener('click', () => toggleColumn(button.dataset.col));
   });
+  if (more) {
+    const hidden = matches.length - shown.length;
+    more.hidden = hidden <= 0;
+    more.textContent = hidden > 0 ? `+${hidden} more — type to narrow` : '';
+  }
   if (count) count.textContent = `${visibleColumns.length}/${schema.length}`;
   if (note) note.textContent = configColumns() ? 'default: ruzz.toml' : 'default: schema order';
 }
@@ -1001,22 +1114,161 @@ function markSetState(group) {
 
 function applyFilterFieldSearch() {
   const needle = (document.getElementById('filter-search')?.value || '').trim().toLowerCase();
-  const groups = [...document.querySelectorAll('#filters-flow .filter-group')];
+  const groups = [...document.querySelectorAll('#filters-flow .filter-group')].filter(g => !g.classList.contains('sort-chip'));
   let matched = 0;
   groups.forEach((group, index) => {
     const matches = !needle || group.dataset.fieldLabel.includes(needle);
     if (matches) matched += 1;
+    // Active filters stay pinned in the strip; the rest collapse behind the
+    // "All filters" modal past the first few.
     const pinned = group.classList.contains('is-set');
-    const collapsed = !needle && !filtersExpanded && !pinned && index >= DEFAULT_VISIBLE_FILTERS;
+    const collapsed = !needle && !pinned && index >= DEFAULT_VISIBLE_FILTERS;
     group.classList.toggle('hidden', !(matches && !collapsed));
   });
   document.getElementById('filters-empty')?.classList.toggle('visible', matched === 0 && schema.some(field => field.search !== 'fuzzy'));
   const toggle = document.getElementById('filters-toggle');
-  const total = groups.length;
   if (toggle) {
-    toggle.hidden = Boolean(needle) || total <= DEFAULT_VISIBLE_FILTERS;
-    toggle.textContent = filtersExpanded ? 'Fewer filters ▴' : `All filters (${total}) ▾`;
+    toggle.hidden = false;
+    toggle.textContent = `All filters (${groups.length}) ▸`;
   }
+}
+
+/* ── sort controls: one searchable dropdown per home (strip + settings),
+     covering every sortable field whether or not its column is shown ── */
+let sortPickers = [];
+
+function sortableFields() { return schema.filter(field => field.type !== 'text'); }
+
+function buildSortControls() {
+  sortPickers = [];
+  const fields = sortableFields();
+  const options = [['', 'Relevance'], ...fields.map(field => [field.name, formatFieldName(field.name)])];
+  for (const [slotId, btnId] of [['sort-picker-slot', 'sort-order-btn'], ['settings-sort-slot', 'settings-sort-order-btn']]) {
+    const slot = document.getElementById(slotId);
+    if (!slot) continue;
+    slot.innerHTML = '';
+    const picker = buildPicker({
+      searchable: options.length > 6,
+      searchPlaceholder: 'Search fields…',
+      initialValue: sortBy,
+      onSelect: value => setSort(value),
+    }, options);
+    slot.appendChild(picker);
+    sortPickers.push(picker);
+    const btn = document.getElementById(btnId);
+    if (btn) btn.onclick = toggleSortOrder;
+  }
+  syncSortUI();
+}
+
+function setSort(value) {
+  sortBy = value;
+  if (!value) sortOrder = 'desc';
+  syncSortUI();
+  doSearch();
+}
+
+function toggleSortOrder() {
+  if (!sortBy) return;
+  sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+  syncSortUI();
+  doSearch();
+}
+
+function syncSortUI() {
+  for (const picker of sortPickers) {
+    const hidden = picker.querySelector('.picker-hidden');
+    if (hidden && hidden.value !== sortBy) {
+      hidden.value = sortBy;
+      hidden.dispatchEvent(new Event('change'));
+    }
+  }
+  for (const id of ['sort-order-btn', 'settings-sort-order-btn']) {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.hidden = !sortBy;
+      btn.textContent = sortOrder === 'asc' ? '↑' : '↓';
+    }
+  }
+}
+
+/* ── search settings modal: the filter controls MOVE here while it is
+     open — one set of nodes, one source of truth — and move back on
+     close. Shows every filterable field, searchable. ── */
+let settingsOpen = false;
+
+function openSettingsModal() {
+  settingsOpen = true;
+  const grid = document.getElementById('settings-filters-grid');
+  document.querySelectorAll('#filters-flow .filter-group').forEach(group => {
+    if (group.classList.contains('sort-chip')) return;
+    group.classList.remove('hidden');
+    grid.appendChild(group);
+  });
+  const search = document.getElementById('settings-filter-search');
+  if (search) search.value = '';
+  applySettingsFilterSearch();
+  updateLimitControls();
+  syncSortUI();
+  const modal = document.getElementById('settings-modal');
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  search?.focus();
+}
+
+function closeSettingsModal() {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  const flow = document.getElementById('filters-flow');
+  const emptyNode = document.getElementById('filters-empty');
+  document.querySelectorAll('#settings-filters-grid .filter-group').forEach(group => {
+    flow.insertBefore(group, emptyNode);
+  });
+  applyFilterFieldSearch();
+  const modal = document.getElementById('settings-modal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function applySettingsFilterSearch() {
+  const needle = (document.getElementById('settings-filter-search')?.value || '').trim().toLowerCase();
+  let matched = 0;
+  document.querySelectorAll('#settings-filters-grid .filter-group').forEach(group => {
+    const matches = !needle || group.dataset.fieldLabel.includes(needle);
+    group.classList.toggle('hidden', !matches);
+    if (matches) matched += 1;
+  });
+  const empty = document.getElementById('settings-filters-empty');
+  if (empty) empty.hidden = matched !== 0;
+}
+
+function bindSettingsModalEvents() {
+  document.getElementById('settings-close-btn')?.addEventListener('click', closeSettingsModal);
+  document.getElementById('settings-done-btn')?.addEventListener('click', closeSettingsModal);
+  document.getElementById('settings-filter-search')?.addEventListener('input', applySettingsFilterSearch);
+  document.getElementById('settings-reset-btn')?.addEventListener('click', () => {
+    document.querySelectorAll('#settings-filters-grid .filter-input, #filters-flow .filter-input').forEach(input => {
+      input.value = '';
+      input.dispatchEvent(new Event('change'));
+    });
+    document.querySelectorAll('.filter-group').forEach(group => group.classList.remove('is-set'));
+    sortBy = '';
+    sortOrder = 'desc';
+    syncSortUI();
+    scheduleSearch();
+  });
+  document.getElementById('settings-limit-apply')?.addEventListener('click', () => {
+    applyResultLimit(document.getElementById('settings-limit-input')?.value);
+  });
+  document.getElementById('settings-limit-input')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') applyResultLimit(event.target.value);
+  });
+  document.querySelectorAll('#settings-limit-presets .preset').forEach(button => {
+    button.addEventListener('click', () => applyResultLimit(button.dataset.limit));
+  });
+  document.getElementById('settings-modal')?.addEventListener('click', event => {
+    if (event.target === document.getElementById('settings-modal')) closeSettingsModal();
+  });
 }
 
 /* ── pickers ── */
@@ -1068,7 +1320,8 @@ function buildPicker(config, options) {
       closePicker(picker);
       if (config.group) config.group.classList.toggle('is-set', value !== '');
       hidden.dispatchEvent(new Event('change'));
-      scheduleSearch();
+      if (config.onSelect) config.onSelect(value);
+      else scheduleSearch();
     });
     optionsWrap.appendChild(option);
   });
@@ -1159,9 +1412,11 @@ function closeLimitMenu() {
 function updateLimitControls() {
   const text = document.getElementById('limit-toggle-text');
   if (text) text.textContent = String(resultLimit);
-  const input = document.getElementById('limit-input');
-  if (input) input.value = String(resultLimit);
-  document.querySelectorAll('#limit-presets .preset').forEach(button => {
+  for (const id of ['limit-input', 'settings-limit-input']) {
+    const input = document.getElementById(id);
+    if (input) input.value = String(resultLimit);
+  }
+  document.querySelectorAll('#limit-presets .preset, #settings-limit-presets .preset').forEach(button => {
     button.classList.toggle('active', Number.parseInt(button.dataset.limit || '', 10) === resultLimit);
   });
 }
@@ -1187,7 +1442,7 @@ function resetSearchState() {
   document.querySelectorAll('#filters-flow .filter-group').forEach(group => group.classList.remove('is-set'));
   sortBy = '';
   sortOrder = 'desc';
-  filtersExpanded = false;
+  syncSortUI();
   resultLimit = DEFAULT_RESULT_LIMIT;
   sessionStorage.setItem('ruzz_result_limit', String(resultLimit));
   lastSearchData = null;
@@ -1314,6 +1569,7 @@ function cycleSort(name) {
   if (sortBy !== name) { sortBy = name; sortOrder = 'asc'; }
   else if (sortOrder === 'asc') { sortOrder = 'desc'; }
   else { sortBy = ''; sortOrder = 'desc'; }
+  syncSortUI();
   doSearch();
 }
 
@@ -2148,6 +2404,7 @@ Number fields return as JSON numbers, or \`null\` when the source had no value. 
 document.getElementById('tab-search').innerHTML = searchTabMarkup();
 bindSearchTabEvents();
 bindExportModalEvents();
+bindSettingsModalEvents();
 init();
 </script>
 </body>
