@@ -952,6 +952,18 @@ document.addEventListener('click', event => {
     const pop = document.getElementById('columns-pop');
     if (pop) pop.hidden = true;
   }
+  // Clicking outside the detail slideout dismisses it — except clicks that
+  // are themselves navigation (another row) or belong to an overlay with
+  // its own dismissal (modals, pickers, menus).
+  if (document.getElementById('slideout')?.classList.contains('open')
+      && !event.target.closest('#slideout')
+      && !event.target.closest('#results tbody tr')
+      && !event.target.closest('.modal-overlay')
+      && !event.target.closest('.picker')
+      && !event.target.closest('.limit-wrap')
+      && !event.target.closest('.columns-pop-wrap')) {
+    closeSlideout();
+  }
 });
 
 /* ── stats + init ── */
@@ -998,9 +1010,14 @@ function updateStats(d) {
   document.getElementById('stat-uptime').textContent = d.uptime_human;
   const chip = document.getElementById('index-chip');
   if (chip) {
-    const path = String(d.index?.path || '');
-    chip.textContent = path.split('/').filter(Boolean).slice(-2).join('/') || 'index';
-    chip.title = path;
+    // Only a configured human label earns header space — the index path
+    // means nothing to the people the dashboard is for.
+    const name = d.dashboard?.name;
+    chip.hidden = !name;
+    if (name) {
+      chip.textContent = name;
+      chip.title = String(d.index?.path || '');
+    }
   }
 }
 
@@ -1653,6 +1670,10 @@ function openSlideout() {
 function closeSlideout() {
   document.getElementById('slideout')?.classList.remove('open');
   document.querySelector('.app')?.classList.remove('slideout-open');
+  // The row highlight exists to say "this is what the pane shows" — with
+  // the pane gone it has nothing to say.
+  selectedIndex = -1;
+  document.querySelectorAll('#results tbody tr.selected').forEach(tr => tr.classList.remove('selected'));
 }
 
 async function fetchFullDoc(ref) {

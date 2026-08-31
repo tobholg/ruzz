@@ -19,6 +19,11 @@ pub struct Config {
 /// nothing here changes what the API serves.
 #[derive(Debug, Default, Deserialize)]
 pub struct DashboardConfig {
+    /// Human label for this deployment, shown in the dashboard header
+    /// ("Norwegian companies"). Unset shows nothing — a filesystem path
+    /// would only confuse the people the dashboard is for.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Columns the results table shows by default, in order. Unset means
     /// the dashboard picks: the fuzzy field first, then schema order.
     /// Users can still override this per browser from the Columns menu.

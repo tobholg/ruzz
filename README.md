@@ -62,6 +62,11 @@ index_path = "./data/index"
 memory_budget = "2GB"  # or "50%", "100%", "unlimited"
 # bind = "127.0.0.1"   # default "0.0.0.0"; loopback when a proxy fronts it
 
+# Optional dashboard presentation — cosmetic only, the API is unaffected
+# [dashboard]
+# name = "US companies"                       # label in the dashboard header
+# columns = ["name", "country", "city"]       # default table columns, in order
+
 [schema]
 fields = [
     { name = "name", type = "text", search = "fuzzy" },

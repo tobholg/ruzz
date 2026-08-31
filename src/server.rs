@@ -1092,6 +1092,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 "cpu_count": sys.cpus().len(),
             },
                 "dashboard": {
+                    "name": state.engine.config.dashboard.name,
                     "columns": state.engine.config.dashboard.columns,
                 },
                 "schema": {
