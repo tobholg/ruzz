@@ -7,6 +7,7 @@ mod params;
 mod schema;
 mod search;
 mod server;
+mod sort;
 mod store;
 
 use std::sync::Arc;

@@ -50,7 +50,7 @@ pub fn control_params(store_enabled: bool) -> Vec<ParamSpec> {
         control("q", "string", "Fuzzy full-text query across all fuzzy-search fields. Typo tolerant.", Some("q=amazn")),
         control("limit", "integer", "Rows to return (1-1000, default 20).", Some("limit=50")),
         control("offset", "integer", "Rows to skip for paging. offset + limit must be <= 100000.", Some("offset=100")),
-        control("sort_by", "string", "Field to sort by. Numeric fields sort natively; omit for relevance order.", Some("sort_by=revenue")),
+        control("sort_by", "string", "Field to sort by (keyword, enum, boolean or number fields). Omit for relevance order.", Some("sort_by=revenue")),
         control("sort_order", "string", "\"asc\" or \"desc\" (default desc). Only meaningful with sort_by.", Some("sort_order=desc")),
         control("count", "boolean", "Include `count`, the exact number of matches for this search state (default true). Pass false to skip it on broad filter-only browses.", Some("count=false")),
         control("include_pagination", "boolean", "Also emit the legacy `pagination` object (default false).", None),
@@ -120,7 +120,9 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
             value_type,
             description,
             multi_value: !matches!(fc.field_type, FieldType::Text),
-            sortable: true,
+            // Text fields have no fast-field column to sort on; sorting by
+            // one is rejected rather than served page-locally shuffled.
+            sortable: !matches!(fc.field_type, FieldType::Text),
             values,
             example: None,
         });
