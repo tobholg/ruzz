@@ -26,7 +26,7 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
 - **📦 Document store** *(optional)* — keep the full record behind each compact search row in a zstd-compressed on-disk store. Search stays lean and fast; `GET /doc/{ref}` returns everything, including nested JSON your CSV can't hold.
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
-- **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any field. Fuzzy search + filter by country + sort by revenue desc? One query.
+- **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any keyword/enum/boolean/number field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🧮 Multi-value fields & OR** — one row can hold `"LEDE,DAGL"` and match either. Pass `role=LEDE,DAGL` to OR across values on any filter. Case-insensitive by default; substring search where you want it.
 - **🔢 Real counts** — `count` is the exact number of matches for the current search state, not a capped estimate. That's the number your UI wants to print.
 - **📖 Self-documenting API** — `/fields`, `/docs`, `/openapi.json` are generated from your schema, so the docs can't drift. Unknown parameters can be rejected with a spelling suggestion instead of silently ignored.

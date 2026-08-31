@@ -515,22 +515,33 @@ impl SearchEngine {
             None => (Box::new(BooleanQuery::new(subqueries)), false),
         };
 
-        // Determine sort field for numeric fast-field sorting
+        // Determine sort field for fast-field sorting
         let sort_field_name = match sort {
             SortOrder::FieldAsc(f) | SortOrder::FieldDesc(f) => Some(f.as_str()),
             SortOrder::Relevance => None,
         };
 
-        // Check if the sort field is a numeric field
-        let is_numeric_sort = sort_field_name
-            .map(|name| {
-                self.config
-                    .schema
-                    .fields
-                    .iter()
-                    .any(|fc| fc.name == name && fc.field_type == FieldType::Number)
-            })
-            .unwrap_or(false);
+        let sort_field_type = sort_field_name
+            .and_then(|name| self.field_configs.get(name).map(|fc| fc.field_type.clone()));
+        let is_numeric_sort = sort_field_type == Some(FieldType::Number);
+        // Keyword, enum and boolean fields carry a string fast-field column,
+        // which is what global sorting needs. Text fields do not: they used
+        // to be "sorted" by alphabetizing whichever page relevance returned,
+        // so every page was ordered internally but pages did not connect.
+        // An honest error beats globally shuffled data.
+        let is_string_sort = matches!(
+            sort_field_type,
+            Some(FieldType::Keyword) | Some(FieldType::Enum) | Some(FieldType::Boolean)
+        );
+        if let Some(name) = sort_field_name {
+            if !is_numeric_sort && !is_string_sort {
+                anyhow::bail!(
+                    "cannot sort by '{}': only keyword, enum, boolean and number \
+                     fields are sortable",
+                    name
+                );
+            }
+        }
 
         let need_count = want_count || include_pagination;
 
@@ -560,6 +571,28 @@ impl SearchEngine {
                 let docs = searcher.search(&*query, &collector)?.into_iter().collect();
                 (docs, None)
             }
+        } else if is_string_sort {
+            let field_name = sort_field_name.unwrap();
+            let ascending = matches!(sort, SortOrder::FieldAsc(_));
+            let collector = crate::sort::TopByStrField::new(field_name, offset + limit, ascending);
+            let (top, total) = if need_count {
+                let mut collectors = MultiCollector::new();
+                let docs_handle = collectors.add_collector(collector);
+                let count_handle = collectors.add_collector(Count);
+                let mut multi_fruit = searcher.search(&*query, &collectors)?;
+                let total = count_handle.extract(&mut multi_fruit);
+                (docs_handle.extract(&mut multi_fruit), Some(total))
+            } else {
+                (searcher.search(&*query, &collector)?, None)
+            };
+            // The sort value itself is in the document; _score carries no
+            // information on this path.
+            let docs = top
+                .into_iter()
+                .skip(offset)
+                .map(|hit| (0.0, hit.address))
+                .collect();
+            (docs, total)
         } else {
             if need_count && prunable {
                 // Two passes beat one here. TopDocs on its own is the only
@@ -664,30 +697,6 @@ impl SearchEngine {
             }
 
             results.push(serde_json::Value::Object(obj));
-        }
-
-        // For non-numeric sort on text fields, do post-sort
-        if !is_numeric_sort {
-            if let Some(field_name) = sort_field_name {
-                let fname = field_name.to_string();
-                match sort {
-                    SortOrder::FieldAsc(_) => {
-                        results.sort_by(|a, b| {
-                            let va = a.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
-                            let vb = b.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
-                            va.cmp(vb)
-                        });
-                    }
-                    SortOrder::FieldDesc(_) => {
-                        results.sort_by(|a, b| {
-                            let va = a.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
-                            let vb = b.get(&fname).and_then(|v| v.as_str()).unwrap_or("");
-                            vb.cmp(va)
-                        });
-                    }
-                    _ => {}
-                }
-            }
         }
 
         let returned = results.len();
@@ -1595,6 +1604,109 @@ pub mod tests {
 
         // A query that is nothing but one repeated trigram still works.
         assert_eq!(run("aaaa", &HashMap::new(), true).count, Some(0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sorting by a keyword field used to alphabetize each page in
+    /// isolation, so pages were internally ordered but did not connect —
+    /// page 2 could hold values belonging on page 1. The order must be
+    /// global, across pages AND across segments (ordinals from different
+    /// segments are not comparable; the merge goes through resolved bytes).
+    #[test]
+    fn string_sort_is_global_across_pages_and_segments() {
+        let dir = test_index_dir("string-sort");
+        let config = test_config(&dir);
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            // Two commits → two segments, so the cross-segment merge runs.
+            for n in ["delta", "alpha", "echo"] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+            for n in ["bravo", "charlie"] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            // And one document with no name at all — it must sort last.
+            writer
+                .add_document(doc!(city => "OSLO", revenue => 1.0))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let page = |sort: SortOrder, limit: usize, offset: usize| -> Vec<String> {
+            engine
+                .search(
+                    "",
+                    &HashMap::new(),
+                    &[],
+                    &sort,
+                    limit,
+                    offset,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+                .results
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Ascending, walked two at a time: pages must connect globally.
+        let asc = SortOrder::FieldAsc("name".to_string());
+        assert_eq!(page(asc, 2, 0), vec!["alpha", "bravo"]);
+        let asc = SortOrder::FieldAsc("name".to_string());
+        assert_eq!(page(asc, 2, 2), vec!["charlie", "delta"]);
+        let asc = SortOrder::FieldAsc("name".to_string());
+        assert_eq!(page(asc, 2, 4), vec!["echo", ""]);
+
+        // Descending reverses the values; the value-less doc stays last.
+        let desc = SortOrder::FieldDesc("name".to_string());
+        assert_eq!(
+            page(desc, 6, 0),
+            vec!["echo", "delta", "charlie", "bravo", "alpha", ""]
+        );
+
+        // A field with no fast column cannot be sorted globally; that must
+        // be an error, not a silently page-local shuffle.
+        let err = engine
+            .search(
+                "",
+                &HashMap::new(),
+                &[],
+                &SortOrder::FieldAsc("no_such_field".to_string()),
+                5,
+                0,
+                false,
+                true,
+                false,
+            )
+            .err()
+            .expect("sorting by an unknown field must fail")
+            .to_string();
+        assert!(err.contains("cannot sort by"), "got: {err}");
 
         let _ = std::fs::remove_dir_all(dir);
     }
