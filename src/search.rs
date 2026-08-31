@@ -6,7 +6,7 @@ use tantivy::query::{
     AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
-use tantivy::{DocAddress, Index, IndexReader, Order, ReloadPolicy, Term};
+use tantivy::{DocAddress, Index, IndexReader, ReloadPolicy, Term};
 
 use crate::config::{Config, FieldType, SearchMode};
 use crate::field_meta::{
@@ -547,30 +547,29 @@ impl SearchEngine {
 
         // Execute query with appropriate collector
         let (docs, matched_total): (Vec<(f64, DocAddress)>, Option<usize>) = if is_numeric_sort {
+            // Not tantivy's order_by_fast_field: that drops documents
+            // without a value, so a doc with no revenue vanished from every
+            // revenue-sorted listing. The collector sorts them last instead,
+            // matching the string-sort contract.
             let field_name = sort_field_name.unwrap();
-            let order = match sort {
-                SortOrder::FieldAsc(_) => Order::Asc,
-                _ => Order::Desc,
-            };
-            if need_count {
+            let ascending = matches!(sort, SortOrder::FieldAsc(_));
+            let collector = crate::sort::TopByF64Field::new(field_name, offset + limit, ascending);
+            let (top, total) = if need_count {
                 let mut collectors = MultiCollector::new();
-                let docs_handle = collectors.add_collector(
-                    TopDocs::with_limit(limit)
-                        .and_offset(offset)
-                        .order_by_fast_field::<f64>(field_name, order),
-                );
+                let docs_handle = collectors.add_collector(collector);
                 let count_handle = collectors.add_collector(Count);
                 let mut multi_fruit = searcher.search(&*query, &collectors)?;
                 let total = count_handle.extract(&mut multi_fruit);
-                let docs = docs_handle.extract(&mut multi_fruit).into_iter().collect();
-                (docs, Some(total))
+                (docs_handle.extract(&mut multi_fruit), Some(total))
             } else {
-                let collector = TopDocs::with_limit(limit)
-                    .and_offset(offset)
-                    .order_by_fast_field::<f64>(field_name, order);
-                let docs = searcher.search(&*query, &collector)?.into_iter().collect();
-                (docs, None)
-            }
+                (searcher.search(&*query, &collector)?, None)
+            };
+            let docs = top
+                .into_iter()
+                .skip(offset)
+                .map(|hit| (hit.value.unwrap_or(0.0), hit.address))
+                .collect();
+            (docs, total)
         } else if is_string_sort {
             let field_name = sort_field_name.unwrap();
             let ascending = matches!(sort, SortOrder::FieldAsc(_));
@@ -676,12 +675,13 @@ impl SearchEngine {
                             }
                         }
                         FieldType::Number => {
-                            let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            if num != 0.0 {
-                                obj.insert(fc.name.clone(), serde_json::json!(num));
-                            } else {
-                                obj.insert(fc.name.clone(), serde_json::Value::Null);
-                            }
+                            // A stored zero is a value; only a field that was
+                            // never filed is null. Zero used to render as
+                            // null, making real zeros unreadable.
+                            match val.and_then(|v| v.as_f64()) {
+                                Some(num) => obj.insert(fc.name.clone(), serde_json::json!(num)),
+                                None => obj.insert(fc.name.clone(), serde_json::Value::Null),
+                            };
                         }
                     }
                 }
@@ -775,12 +775,13 @@ impl SearchEngine {
                             }
                         }
                         FieldType::Number => {
-                            let num = val.and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            if num != 0.0 {
-                                obj.insert(fc.name.clone(), serde_json::json!(num));
-                            } else {
-                                obj.insert(fc.name.clone(), serde_json::Value::Null);
-                            }
+                            // A stored zero is a value; only a field that was
+                            // never filed is null. Zero used to render as
+                            // null, making real zeros unreadable.
+                            match val.and_then(|v| v.as_f64()) {
+                                Some(num) => obj.insert(fc.name.clone(), serde_json::json!(num)),
+                                None => obj.insert(fc.name.clone(), serde_json::Value::Null),
+                            };
                         }
                     }
                 }

@@ -371,6 +371,7 @@ fn import_csv(
     };
 
     let mut count = 0u64;
+    let mut bad_number_cells = 0u64;
     let mut record = csv::StringRecord::new();
 
     while rdr.read_record(&mut record)? {
@@ -404,9 +405,17 @@ fn import_csv(
                     }
                 }
                 FieldType::Number => {
-                    // Parse to f64, store 0.0 for empty/invalid
-                    let num = value.parse::<f64>().unwrap_or(0.0);
-                    doc.add_f64(field, num);
+                    // An empty or unparseable cell is a missing value, not a
+                    // zero. Storing 0.0 for it (as this used to) made every
+                    // missing revenue match revenue_max=10, sort as the
+                    // smallest value, and equal a genuine zero.
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        match trimmed.parse::<f64>() {
+                            Ok(num) if num.is_finite() => doc.add_f64(field, num),
+                            _ => bad_number_cells += 1,
+                        }
+                    }
                 }
             }
         }
@@ -437,6 +446,14 @@ fn import_csv(
 
     if let Some(sidecar) = sidecar.as_mut() {
         sidecar.expect_exhausted(count)?;
+    }
+
+    if bad_number_cells > 0 {
+        eprintln!(
+            "  note: {} skipped {} non-numeric cell(s) in numeric fields — those values are null, not 0",
+            path.display(),
+            bad_number_cells
+        );
     }
 
     pb.set_position(count);
@@ -663,6 +680,131 @@ org_number,company_name,city,secret_extra
             use_mapping: None,
             sidecar,
         }
+    }
+
+    /// A numeric cell that is empty or unparseable used to be stored as 0.0,
+    /// and a genuine 0 used to render as null. Missing must be null and must
+    /// stay out of ranges and sorts; zero must be a first-class value.
+    #[test]
+    fn missing_numbers_are_null_and_zero_is_a_value() {
+        let dir = temp_dir("numbers");
+        write_csv(
+            &dir.join("data.csv"),
+            "org_number,company_name,revenue\n\
+             1,Zero Corp,0\n\
+             2,Missing Corp,\n\
+             3,Garbage Corp,abc\n\
+             4,Rich Corp,500\n\
+             5,Poor Corp,10\n",
+        );
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 0,
+                index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                fields: vec![
+                    keyword_field("org_number"),
+                    FieldConfig {
+                        name: "revenue".to_string(),
+                        field_type: FieldType::Number,
+                        search: None,
+                        values: None,
+                        max_values: None,
+                        case_sensitive: false,
+                        multi: false,
+                        separator: None,
+                        description: None,
+                    },
+                ],
+            },
+            sources: vec![SourceConfig {
+                path: dir.join("data.csv"),
+                defaults: HashMap::new(),
+                mapping: HashMap::from([
+                    ("org_number".to_string(), "org_number".to_string()),
+                    ("revenue".to_string(), "revenue".to_string()),
+                ]),
+                use_mapping: None,
+                sidecar: None,
+            }],
+            mappings: HashMap::new(),
+            store: StoreConfig::default(),
+        });
+
+        run_import(&config).unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+        let search =
+            |filters: &[(&str, &str)], ranges: &[crate::search::RangeFilter], sort: SortOrder| {
+                let filters: HashMap<String, String> = filters
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                engine
+                    .search("", &filters, ranges, &sort, 10, 0, false, true, false)
+                    .unwrap()
+            };
+
+        // A stored zero is a value, a missing or garbage cell is null.
+        let by_org = |org: &str| {
+            let result = search(&[("org_number", org)], &[], SortOrder::Relevance);
+            result.results[0]["revenue"].clone()
+        };
+        assert_eq!(by_org("1"), serde_json::json!(0.0), "zero is not null");
+        assert_eq!(by_org("2"), serde_json::Value::Null, "missing is null");
+        assert_eq!(by_org("3"), serde_json::Value::Null, "garbage is null");
+
+        // Ranges exclude missing values instead of treating them as 0.
+        let ranged = search(
+            &[],
+            &[crate::search::RangeFilter {
+                field: "revenue".to_string(),
+                min: Some(0.0),
+                max: None,
+            }],
+            SortOrder::Relevance,
+        );
+        assert_eq!(ranged.count, Some(3), "0, 10 and 500 — not missing rows");
+
+        // An exact zero filter matches only the true zero.
+        let zero = search(&[("revenue", "0")], &[], SortOrder::Relevance);
+        assert_eq!(zero.count, Some(1));
+        assert_eq!(zero.results[0]["org_number"], "1");
+
+        // Sorting puts value-less docs last in both directions.
+        let revenues = |sort: SortOrder| -> Vec<serde_json::Value> {
+            search(&[], &[], sort)
+                .results
+                .iter()
+                .map(|r| r["revenue"].clone())
+                .collect()
+        };
+        assert_eq!(
+            revenues(SortOrder::FieldAsc("revenue".to_string())),
+            vec![
+                serde_json::json!(0.0),
+                serde_json::json!(10.0),
+                serde_json::json!(500.0),
+                serde_json::Value::Null,
+                serde_json::Value::Null
+            ]
+        );
+        assert_eq!(
+            revenues(SortOrder::FieldDesc("revenue".to_string())),
+            vec![
+                serde_json::json!(500.0),
+                serde_json::json!(10.0),
+                serde_json::json!(0.0),
+                serde_json::Value::Null,
+                serde_json::Value::Null
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
