@@ -83,7 +83,8 @@
   }
 
   html, body { height: 100%; }
-  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; -webkit-font-smoothing: antialiased; }
+  /* The page is an app frame: chrome stays put, only the results scroll. */
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; -webkit-font-smoothing: antialiased; overflow: hidden; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { color: var(--accent-strong); }
   code { font-family: var(--mono); font-size: 0.86em; background: var(--surface); border: 1px solid var(--hairline); border-radius: 5px; padding: 0.1em 0.35em; }
@@ -93,8 +94,8 @@
   input { font-family: var(--sans); color: var(--text); }
   input::placeholder { color: var(--text-dim); }
 
-  .app { display: flex; flex-direction: column; min-height: 100vh; }
-  .main { width: 100%; max-width: 1760px; margin: 0 auto; padding: 0 24px; flex: 1; display: flex; flex-direction: column; }
+  .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+  .main { width: 100%; max-width: 1760px; margin: 0 auto; padding: 0 24px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
   /* ── Top bar ── */
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--border); }
@@ -171,17 +172,21 @@
   .picker-empty { display: none; padding: 8px 9px; font-size: 11px; color: var(--text-dim); }
   .picker-empty.visible { display: block; }
 
-  /* ── Results area ── */
+  /* ── Results area ──
+     #results is the ONLY scroll container: vertical always, horizontal
+     only when the columns genuinely need more room (auto table layout
+     with capped cell widths). Headers stay stuck to its top edge. */
   .results-zone { flex: 1; display: flex; min-height: 0; align-items: stretch; }
-  .table-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; padding-top: 10px; }
-  .results-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .results-table th { padding: 8px 10px; font-size: 12px; font-weight: 500; color: var(--text-muted); text-align: left; border-bottom: 1.5px solid var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .table-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding-top: 10px; }
+  #results { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+  .results-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  .results-table th { position: sticky; top: 0; z-index: 2; background: var(--bg); box-shadow: inset 0 -1.5px 0 var(--text); padding: 8px 10px; font-size: 12px; font-weight: 500; color: var(--text-muted); text-align: left; white-space: nowrap; }
   .results-table th.sortable { cursor: pointer; }
   .results-table th.sortable:hover { color: var(--text); }
   .results-table th.sorted { color: var(--accent-strong); font-weight: 600; }
   .results-table th .sort-arrow { display: inline-block; margin-left: 5px; color: var(--accent); font-size: 9px; }
   .results-table th.num, .results-table td.num { text-align: right; }
-  .results-table td { padding: 9px 10px; border-bottom: 1px solid var(--row-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  .results-table td { padding: 9px 10px; border-bottom: 1px solid var(--row-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; max-width: 340px; }
   .results-table td.mono { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
   .results-table td.dim { color: var(--text-dim); }
   .results-table td.primary { font-weight: 500; }
@@ -362,7 +367,7 @@
   /* ── Docs tab ── */
   .tab-content { display: none; }
   .tab-content.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  #tab-docs.active { display: block; }
+  #tab-docs.active { display: block; flex: 1; min-height: 0; overflow-y: auto; }
   .docs { max-width: 880px; padding: 1.5rem 0 4rem 0; line-height: 1.65; }
   .docs h2 { font-family: var(--serif); font-size: 1.35rem; margin: 2rem 0 0.75rem 0; }
   .docs h3 { font-size: 1rem; margin: 1.5rem 0 0.5rem 0; }
@@ -383,15 +388,40 @@
   .auth-input { flex: 1; height: 40px; padding: 0 13px; background: var(--input); border: 1px solid var(--border); border-radius: 9px; outline: none; font-size: 13px; }
   .auth-btn { height: 40px; padding: 0 18px; background: var(--accent); color: var(--accent-contrast); border-radius: 9px; font-weight: 600; }
 
+  /* Half-screen laptop: keep one tidy row — icon-only actions, fewer chips
+     (the chip cap itself is width-aware, in JS). */
+  @media (max-width: 1280px) {
+    .strip-btn-label { display: none; }
+    .strip-btn { padding: 0 10px; }
+    .main { padding: 0 16px; }
+    .kbd { display: none; }
+  }
   @media (max-width: 1100px) {
     .slideout { width: 380px; }
-    .app.slideout-open .main { padding-right: 404px; }
+    .app.slideout-open .main { padding-right: 396px; }
     .topbar-right .hide-narrow { display: none; }
   }
   @media (max-width: 800px) {
     .slideout { width: 100%; }
-    .app.slideout-open .main { padding-right: 24px; }
+    .app.slideout-open .main { padding-right: 16px; }
     .count-block { display: none; }
+    .main { padding: 0 12px; }
+    .topbar { padding: 0 12px; }
+    .index-chip { display: none; }
+    .query-bar { padding: 10px 0 8px 0; }
+    .search-wrap { height: 42px; }
+    /* The strip stacks: search-in-fields row, then the action row. */
+    .filter-strip { flex-wrap: wrap; }
+    .filter-flow { flex: 1 1 100%; }
+    .field-search-wrap { flex: 1; width: auto; min-width: 120px; }
+    .strip-actions { flex: 1; flex-wrap: wrap; justify-content: flex-end; }
+    .sort-chip .filter-label { display: none; }
+    .sort-chip .picker-trigger-text { max-width: 90px; }
+    #columns-count { display: none; }
+    .filters-toggle, .clear-btn { padding: 0 8px; }
+    .key-hints { display: none; }
+    .results-table td { max-width: 220px; }
+    .table-footer { padding: 8px 4px 10px 4px; }
   }
 </style>
 </head>
@@ -664,14 +694,14 @@ function searchTabMarkup() {
         </div>
         <button class="filters-toggle" id="filters-toggle" type="button" hidden></button>
         <button class="clear-btn" id="reset-search-btn" type="button">Clear</button>
-        <button class="strip-btn" id="export-btn" type="button">
+        <button class="strip-btn" id="export-btn" type="button" title="Export CSV">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 2v9M4.5 8 8 11.5 11.5 8M3 14h10"/></svg>
-          Export CSV
+          <span class="strip-btn-label">Export CSV</span>
         </button>
         <div class="columns-pop-wrap">
-          <button class="strip-btn" id="columns-btn" type="button">
+          <button class="strip-btn" id="columns-btn" type="button" title="Visible columns">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 2v12M8 2v12M13 2v12"/></svg>
-            Columns <span class="dim" id="columns-count"></span>
+            <span class="strip-btn-label">Columns</span> <span class="dim" id="columns-count"></span>
           </button>
           <div class="columns-pop" id="columns-pop" hidden>
             <div class="columns-pop-title">VISIBLE COLUMNS</div>
@@ -904,6 +934,12 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Enter' && selectedIndex >= 0) selectResult(selectedIndex, { open: true });
 });
 
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(applyFilterFieldSearch, 120);
+});
+
 document.addEventListener('click', event => {
   if (!(event.target instanceof Element)) return;
   // A click that re-rendered its own container (column toggles, picker
@@ -1112,9 +1148,20 @@ function markSetState(group) {
   group.classList.toggle('is-set', hasValue);
 }
 
+/* How many idle filter chips the strip shows before the rest live behind
+   the settings modal — fewer as the window narrows, none on a phone.
+   Active filters are always pinned visible regardless. */
+function stripFilterCap() {
+  const width = window.innerWidth;
+  if (width < 800) return 0;
+  if (width < 1280) return 3;
+  return DEFAULT_VISIBLE_FILTERS;
+}
+
 function applyFilterFieldSearch() {
   const needle = (document.getElementById('filter-search')?.value || '').trim().toLowerCase();
   const groups = [...document.querySelectorAll('#filters-flow .filter-group')].filter(g => !g.classList.contains('sort-chip'));
+  const cap = stripFilterCap();
   let matched = 0;
   groups.forEach((group, index) => {
     const matches = !needle || group.dataset.fieldLabel.includes(needle);
@@ -1122,7 +1169,7 @@ function applyFilterFieldSearch() {
     // Active filters stay pinned in the strip; the rest collapse behind the
     // "All filters" modal past the first few.
     const pinned = group.classList.contains('is-set');
-    const collapsed = !needle && !pinned && index >= DEFAULT_VISIBLE_FILTERS;
+    const collapsed = !needle && !pinned && index >= cap;
     group.classList.toggle('hidden', !(matches && !collapsed));
   });
   document.getElementById('filters-empty')?.classList.toggle('visible', matched === 0 && schema.some(field => field.search !== 'fuzzy'));
