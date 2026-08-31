@@ -314,11 +314,11 @@ impl SearchEngine {
         }
     }
 
-    /// Trigram query over one field. `occur` is Should for relevance-ranked
-    /// fuzzy matching and Must for substring matching, where every trigram of
-    /// the value has to be present.
-    fn trigram_query(&self, field: Field, text: &str, occur: Occur) -> Option<BooleanQuery> {
-        let ngrams = generate_ngrams(&text.to_lowercase(), 3, 3);
+    /// Substring query over one field: every trigram of the value must be
+    /// present. Basic record option — the clause is const-scored, so freqs
+    /// and positions would be decoded for nothing.
+    fn trigram_query(&self, field: Field, text: &str) -> Option<BooleanQuery> {
+        let ngrams = query_trigrams(text);
         if ngrams.is_empty() {
             return None;
         }
@@ -326,14 +326,84 @@ impl SearchEngine {
             .iter()
             .map(|ng| {
                 let term = Term::from_field_text(field, ng);
-                let query: Box<dyn Query> = Box::new(TermQuery::new(
-                    term,
-                    IndexRecordOption::WithFreqsAndPositions,
-                ));
-                (occur, query)
+                let query: Box<dyn Query> =
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                (Occur::Must, query)
             })
             .collect();
         Some(BooleanQuery::new(clauses))
+    }
+
+    /// Fuzzy `q` as ONE flat Should-union with a TermQuery per fuzzy field
+    /// per selected trigram: for each query word, the `RARE_DRIVE_TERMS`
+    /// rarest of that word's trigrams by document frequency (all of them
+    /// when the word has that few).
+    ///
+    /// Two properties carry the whole fuzzy path:
+    ///
+    /// Flat matters: tantivy specializes a union into its block-WAND top-k
+    /// pruning path only when every clause of a single BooleanQuery is a raw
+    /// term query. A union of per-field unions never qualified, so every
+    /// document sharing even one trigram with the query was fully
+    /// BM25-scored.
+    ///
+    /// Rare matters: traversal cost is the summed posting lengths of the
+    /// clauses, and the rarest trigrams are orders of magnitude cheaper than
+    /// the commonest while carrying nearly all of the IDF weight — the
+    /// trigrams dropped are exactly the ones BM25 scores lowest. Recall is
+    /// pigeonholed: one edit destroys at most three of a word's trigrams, so
+    /// of any four at least one survives in every document within edit
+    /// distance 1 of that word. Documents sharing only the query's common
+    /// trigrams — the bulk of the old candidate set — stop matching, which
+    /// is the point. Ties on document frequency break on the trigram itself
+    /// so the selection cannot vary between runs.
+    ///
+    /// WithFreqs, not positions: BM25 needs term frequency, and nothing
+    /// reads positions.
+    fn fuzzy_clauses(
+        &self,
+        searcher: &tantivy::Searcher,
+        fields: &[Field],
+        text: &str,
+    ) -> Vec<(Occur, Box<dyn Query>)> {
+        const RARE_DRIVE_TERMS: usize = 4;
+        let lowered = text.to_lowercase();
+        let mut seen: std::collections::HashSet<Term> = std::collections::HashSet::new();
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for word in lowered.split_whitespace() {
+            let mut ngrams = generate_ngrams(word, 3, 3);
+            ngrams.sort_unstable();
+            ngrams.dedup();
+            if ngrams.is_empty() {
+                continue;
+            }
+            for &field in fields {
+                let mut ranked: Vec<(u64, &String)> = ngrams
+                    .iter()
+                    .map(|ng| {
+                        let term = Term::from_field_text(field, ng);
+                        let df = if ngrams.len() > RARE_DRIVE_TERMS {
+                            searcher.doc_freq(&term).unwrap_or(u64::MAX)
+                        } else {
+                            0 // short word: everything is kept, skip the lookups
+                        };
+                        (df, ng)
+                    })
+                    .collect();
+                ranked.sort();
+                for (_, ng) in ranked.into_iter().take(RARE_DRIVE_TERMS) {
+                    let term = Term::from_field_text(field, ng);
+                    if seen.insert(term.clone()) {
+                        clauses.push((
+                            Occur::Should,
+                            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>,
+                        ));
+                    }
+                }
+            }
+        }
+        clauses
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -371,7 +441,7 @@ impl SearchEngine {
                 // Substring fields are trigram-indexed: match every trigram
                 // of the value rather than the value as one term.
                 if field_config.search == Some(SearchMode::Substring) {
-                    match self.trigram_query(field, value, Occur::Must) {
+                    match self.trigram_query(field, value) {
                         Some(query) => subqueries.push((Occur::Must, const_score(Box::new(query)))),
                         // Under three characters there are no trigrams to
                         // match. Returning everything would be a silent lie.
@@ -407,30 +477,42 @@ impl SearchEngine {
         }
 
         // Fuzzy search with trigrams
+        let mut fuzzy_clauses: Option<Vec<(Occur, Box<dyn Query>)>> = None;
         if !query_text.is_empty() {
-            let ngram_queries: Vec<(Occur, Box<dyn Query>)> = fuzzy_fields
-                .iter()
-                .filter_map(|field| {
-                    self.trigram_query(*field, query_text, Occur::Should)
-                        .map(|q| (Occur::Should, Box::new(q) as Box<dyn Query>))
-                })
-                .collect();
-
-            if ngram_queries.is_empty() {
+            let clauses = self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text);
+            if clauses.is_empty() {
                 // No fuzzy field, or a query too short to form a trigram.
                 // Previously this fell through to AllQuery and returned the
                 // entire index for something like q=ab.
                 subqueries.push((Occur::Must, Box::new(EmptyQuery)));
             } else {
-                subqueries.push((Occur::Must, Box::new(BooleanQuery::new(ngram_queries))));
+                fuzzy_clauses = Some(clauses);
             }
         }
 
-        // If no subqueries at all (browse mode), use AllQuery
-        let query: Box<dyn Query> = if subqueries.is_empty() {
-            Box::new(AllQuery)
-        } else {
-            Box::new(BooleanQuery::new(subqueries))
+        // `prunable`: the whole query is one flat scored term union — the
+        // only shape tantivy's block-WAND pruning accepts — so it is used
+        // bare. Wrapping it in an outer BooleanQuery, even alone under a
+        // single Must, produces a generic scorer, and that is exactly what
+        // the over-threshold arm below does on purpose: WAND pays per-clause
+        // bookkeeping on every block, and past a handful of trigrams that
+        // overhead outgrows the skipping it buys. Measured on a 5M-doc
+        // corpus, pruning is 2-3x faster up to 6 clauses and up to 2x
+        // *slower* from 8; queries above the threshold keep the plain
+        // traversal. With filters present the top level is an intersection
+        // and cannot prune regardless — there the filters do the narrowing.
+        const WAND_MAX_CLAUSES: usize = 6;
+        let (query, prunable): (Box<dyn Query>, bool) = match fuzzy_clauses {
+            Some(clauses) if subqueries.is_empty() && clauses.len() <= WAND_MAX_CLAUSES => {
+                (Box::new(BooleanQuery::new(clauses)), true)
+            }
+            Some(clauses) => {
+                subqueries.push((Occur::Must, Box::new(BooleanQuery::new(clauses))));
+                (Box::new(BooleanQuery::new(subqueries)), false)
+            }
+            // If no subqueries at all (browse mode), use AllQuery
+            None if subqueries.is_empty() => (Box::new(AllQuery), false),
+            None => (Box::new(BooleanQuery::new(subqueries)), false),
         };
 
         // Determine sort field for numeric fast-field sorting
@@ -450,9 +532,6 @@ impl SearchEngine {
             })
             .unwrap_or(false);
 
-        // The Count collector rides along with TopDocs; it is nearly free for
-        // scored queries (which already traverse the whole matching set) and
-        // costs an extra pass only on broad filter-only browses.
         let need_count = want_count || include_pagination;
 
         // Execute query with appropriate collector
@@ -482,7 +561,24 @@ impl SearchEngine {
                 (docs, None)
             }
         } else {
-            if need_count {
+            if need_count && prunable {
+                // Two passes beat one here. TopDocs on its own is the only
+                // collector arrangement tantivy prunes with block-WAND, so
+                // the ranked page skips most of the candidate set; Count on
+                // its own disables scoring entirely. A MultiCollector would
+                // instead BM25-score every document sharing a trigram with
+                // the query — millions of docs on a large index.
+                let docs: Vec<(f64, DocAddress)> = searcher
+                    .search(&*query, &TopDocs::with_limit(limit).and_offset(offset))?
+                    .into_iter()
+                    .map(|(score, addr)| (score as f64, addr))
+                    .collect();
+                let total = searcher.search(&*query, &Count)?;
+                (docs, Some(total))
+            } else if need_count {
+                // Count rides along with TopDocs: for filtered or unscored
+                // queries nothing can prune anyway, so one shared traversal
+                // is the cheapest way to get both.
                 let mut collectors = MultiCollector::new();
                 let docs_handle =
                     collectors.add_collector(TopDocs::with_limit(limit).and_offset(offset));
@@ -808,6 +904,17 @@ fn build_pagination_info(
         total_relation: "eq",
         has_more: matched_total > offset.saturating_add(returned),
     }
+}
+
+/// Deduplicated, lowercased trigrams of a query — the query-side mirror of
+/// the "trigram" tokenizer registered at import time; the two must stay in
+/// lockstep. Deduped because a repeated trigram ("aaaa") would otherwise add
+/// duplicate clauses that match the same postings twice.
+fn query_trigrams(text: &str) -> Vec<String> {
+    let mut ngrams = generate_ngrams(&text.to_lowercase(), 3, 3);
+    ngrams.sort_unstable();
+    ngrams.dedup();
+    ngrams
 }
 
 fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
@@ -1392,6 +1499,276 @@ pub mod tests {
             .expect("multi field is an array");
         assert_eq!(values.len(), 2);
         assert!(values.iter().any(|v| v == "revisor"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The pruning-eligible shape (bare `q`, no filters) takes a different
+    /// execution path from `q` + filters: a bare union collects TopDocs and
+    /// Count in two passes, filtered queries in one. Both must agree with
+    /// each other and return exact counts, whichever fields the union spans.
+    #[test]
+    fn fuzzy_counts_are_exact_on_both_execution_paths() {
+        let dir = test_index_dir("fuzzy-count");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Fuzzy);
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for (n, c) in [
+                ("Amazon Web Services", "OSLO"),
+                ("Amazonia Flowers", "BERGEN"),
+                ("Amason Logistics", "OSLO"), // the typo fuzzy search exists for
+                ("Beta Bakery", "OSLO"),
+            ] {
+                writer
+                    .add_document(doc!(city => c, revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |q: &str, filters: &HashMap<String, String>, want_count: bool| {
+            engine
+                .search(
+                    q,
+                    filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    want_count,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // Bare q: two-pass execution. All three amazon-ish names share
+        // trigrams with the query; the bakery shares none.
+        let bare = run("amazon", &HashMap::new(), true);
+        assert_eq!(bare.count, Some(3), "exact count on the pruned path");
+        // Which of the two all-trigram matches wins depends on BM25 length
+        // normalization; the stable property is that both beat the one-trigram
+        // typo match.
+        assert_eq!(
+            bare.results[2]["name"], "Amason Logistics",
+            "sharing one trigram ranks below sharing all of them"
+        );
+
+        // Same q through the filtered (single-pass) path must agree.
+        let mut filters = HashMap::new();
+        filters.insert("city".to_string(), "OSLO".to_string());
+        let filtered = run("amazon", &filters, true);
+        assert_eq!(filtered.count, Some(2), "typo match survives the filter");
+
+        // count=false returns the same page without a count.
+        let uncounted = run("amazon", &HashMap::new(), false);
+        assert_eq!(uncounted.count, None);
+        assert_eq!(uncounted.returned, bare.returned);
+        assert_eq!(uncounted.results[0]["name"], bare.results[0]["name"]);
+
+        // A query that is nothing but one repeated trigram still works.
+        assert_eq!(run("aaaa", &HashMap::new(), true).count, Some(0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Long fuzzy queries (and filtered ones) are driven by their rarest
+    /// trigrams. The pigeonhole guarantee: every document within one edit of
+    /// a query word stays reachable, while documents sharing only common
+    /// trigrams — the bulk of the old candidate set — drop out.
+    #[test]
+    fn rare_trigram_driving_keeps_typo_matches_and_sheds_noise() {
+        let dir = test_index_dir("rare-driving");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Fuzzy);
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for (n, c) in [
+                ("Storgruppen Konsern", "OSLO"), // the real match
+                ("Historie AS", "OSLO"),         // shares only sto/tor — noise
+                ("Gruppen Invest", "BERGEN"),    // shares the gruppen tail
+                ("Fjordkraft AS", "OSLO"),
+            ] {
+                writer
+                    .add_document(doc!(city => c, revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |q: &str, filters: &HashMap<String, String>| {
+            engine
+                .search(
+                    q,
+                    filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // 9 trigrams, of which the 4 rarest are kept. The full-name doc and
+        // the tail-sharing doc survive; the doc sharing only the two
+        // commonest trigrams does not.
+        let result = run("storgruppen", &HashMap::new());
+        assert_eq!(result.count, Some(2), "common-trigram-only noise is shed");
+        assert_eq!(
+            result.results[0]["name"], "Storgruppen Konsern",
+            "full-union scoring still ranks the real match first"
+        );
+
+        // One edit destroys at most three trigrams, so a typo'd query must
+        // still reach the real document through its driving terms.
+        let typo = run("storgrappen", &HashMap::new());
+        assert_eq!(typo.results[0]["name"], "Storgruppen Konsern");
+
+        // A document matching only one word of a multi-word query stays
+        // reachable: driving terms are chosen per word.
+        let multi = run("blahblah fjordkraft", &HashMap::new());
+        assert_eq!(multi.results[0]["name"], "Fjordkraft AS");
+
+        // Filters compose with driving (filtered fuzzy also takes this arm).
+        let mut filters = HashMap::new();
+        filters.insert("city".to_string(), "OSLO".to_string());
+        let filtered = run("storgruppen", &filters);
+        assert_eq!(filtered.count, Some(1), "BERGEN tail match filtered out");
+        assert_eq!(filtered.results[0]["name"], "Storgruppen Konsern");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two fuzzy fields flatten into one union; a document must be findable
+    /// through either field, and one matching in both must outrank one
+    /// matching in a single field (scores sum across the flat union exactly
+    /// as they summed across the old nested one).
+    #[test]
+    fn fuzzy_union_spans_every_fuzzy_field() {
+        let dir = test_index_dir("fuzzy-multi-field");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            for name in ["name", "city"] {
+                let field = config
+                    .schema
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.name == name)
+                    .unwrap();
+                field.field_type = FieldType::Text;
+                field.search = Some(crate::config::SearchMode::Fuzzy);
+            }
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            writer
+                .add_document(doc!(city => "Bergen Havn", revenue => 1.0, name => "Bergen Seafood"))
+                .unwrap();
+            writer
+                .add_document(doc!(city => "Oslo", revenue => 1.0, name => "Bergen Byggvarer"))
+                .unwrap();
+            writer
+                .add_document(doc!(city => "Bergen", revenue => 1.0, name => "Fjordkraft"))
+                .unwrap();
+            writer
+                .add_document(doc!(city => "Oslo", revenue => 1.0, name => "Beta Bakery"))
+                .unwrap();
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let result = engine
+            .search(
+                "bergen",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
+
+        // Matches via name only, city only, and both.
+        assert_eq!(result.count, Some(3), "either fuzzy field can match");
+        assert_eq!(
+            result.results[0]["name"], "Bergen Seafood",
+            "matching in both fields outranks matching in one"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

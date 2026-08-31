@@ -37,6 +37,46 @@ const MAX_CANDIDATES: usize = 25;
 pub struct AppState {
     pub engine: SearchEngine,
     pub started_at: Instant,
+    /// Caps concurrent query threads at the core count. Excess requests
+    /// queue on the semaphore instead of spawning ever more blocking
+    /// threads that fight over the same CPUs.
+    query_permits: tokio::sync::Semaphore,
+}
+
+impl AppState {
+    pub fn new(engine: SearchEngine) -> Self {
+        let permits = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        Self {
+            engine,
+            started_at: Instant::now(),
+            query_permits: tokio::sync::Semaphore::new(permits),
+        }
+    }
+}
+
+/// Run CPU-bound engine work off the async runtime.
+///
+/// Handlers used to call the engine inline, so a handful of slow queries
+/// stalled every in-flight request — including /health, which makes a load
+/// balancer read a busy server as a dead one. Anything that traverses the
+/// index, decompresses the store, or scans the filesystem belongs in here;
+/// the async threads only parse requests and serialize responses.
+async fn run_blocking<T, F>(state: &Arc<AppState>, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce(&AppState) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = state
+        .query_permits
+        .acquire()
+        .await
+        .expect("query semaphore is never closed");
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || f(&state))
+        .await
+        .map_err(|e| anyhow::anyhow!("query task failed: {}", e))
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -264,17 +304,23 @@ async fn handle_search(
         _ => crate::search::SortOrder::Relevance,
     };
 
-    match state.engine.search(
-        &query_text,
-        &filters,
-        &range_filters,
-        &sort,
-        limit,
-        offset,
-        include_pagination,
-        want_count,
-        include_full,
-    ) {
+    let outcome = run_blocking(&state, move |app| {
+        app.engine.search(
+            &query_text,
+            &filters,
+            &range_filters,
+            &sort,
+            limit,
+            offset,
+            include_pagination,
+            want_count,
+            include_full,
+        )
+    })
+    .await
+    .and_then(|result| result);
+
+    match outcome {
         Ok(result) => {
             let mut value = serde_json::to_value(result).unwrap();
             let ignored: Vec<String> = unknown_params
@@ -309,7 +355,11 @@ async fn handle_lookup(
     if include_full && state.engine.store.is_none() {
         return Json(store_unavailable_body(&state.engine));
     }
-    match state.engine.lookup(&params.filters, include_full) {
+    let filters = params.filters;
+    let outcome = run_blocking(&state, move |app| app.engine.lookup(&filters, include_full))
+        .await
+        .and_then(|result| result);
+    match outcome {
         Ok(result) => Json(serde_json::to_value(result).unwrap()),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
@@ -365,7 +415,10 @@ async fn handle_doc_by_ref(
         return store_unavailable(&state.engine);
     }
     let start = Instant::now();
-    match state.engine.get_full(doc_ref) {
+    let outcome = run_blocking(&state, move |app| app.engine.get_full(doc_ref))
+        .await
+        .and_then(|result| result);
+    match outcome {
         Ok(Some(full)) => Json(DocResponse {
             took_ms: round_ms(start),
             doc_ref,
@@ -411,7 +464,10 @@ async fn handle_doc_resolve(
     }
 
     let start = Instant::now();
-    match state.engine.resolve_full(&filters) {
+    let outcome = run_blocking(&state, move |app| app.engine.resolve_full(&filters))
+        .await
+        .and_then(|result| result);
+    match outcome {
         Ok((_matched, None)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -610,76 +666,88 @@ async fn handle_resolve(State(state): State<Arc<AppState>>, body: axum::body::By
         .clamp(1, MAX_CANDIDATES);
 
     let start = Instant::now();
-    let mut results = Vec::with_capacity(req.items.len());
-    let mut matched = 0usize;
-    let mut not_found = 0usize;
-    let mut ambiguous = 0usize;
-    let mut invalid = 0usize;
+    let outcome = run_blocking(&state, move |app| {
+        let engine = &app.engine;
+        let mut results = Vec::with_capacity(req.items.len());
+        let mut matched = 0usize;
+        let mut not_found = 0usize;
+        let mut ambiguous = 0usize;
+        let mut invalid = 0usize;
 
-    for item in &req.items {
-        if let Err((error, message)) = validate_filters(engine, &item.filters) {
-            invalid += 1;
-            results.push(serde_json::json!({
-                "id": item.id, "status": "invalid", "error": error, "message": message,
-            }));
-            continue;
-        }
-        // Ask for one more than we will report, so "exactly one" is decided by
-        // the count rather than by the page size.
-        let outcome = engine.search(
-            "",
-            &item.filters,
-            &[],
-            &crate::search::SortOrder::Relevance,
-            candidates,
-            0,
-            false,
-            true,
-            req.full,
-        );
-        match outcome {
-            Ok(found) => {
-                let count = found.count.unwrap_or(found.returned);
-                if count == 0 {
-                    not_found += 1;
+        for item in &req.items {
+            if let Err((error, message)) = validate_filters(engine, &item.filters) {
+                invalid += 1;
+                results.push(serde_json::json!({
+                    "id": item.id, "status": "invalid", "error": error, "message": message,
+                }));
+                continue;
+            }
+            // Ask for one more than we will report, so "exactly one" is
+            // decided by the count rather than by the page size.
+            let outcome = engine.search(
+                "",
+                &item.filters,
+                &[],
+                &crate::search::SortOrder::Relevance,
+                candidates,
+                0,
+                false,
+                true,
+                req.full,
+            );
+            match outcome {
+                Ok(found) => {
+                    let count = found.count.unwrap_or(found.returned);
+                    if count == 0 {
+                        not_found += 1;
+                        results.push(serde_json::json!({
+                            "id": item.id, "status": "not_found", "count": 0,
+                        }));
+                    } else if count == 1 {
+                        matched += 1;
+                        results.push(serde_json::json!({
+                            "id": item.id, "status": "matched", "count": 1,
+                            "document": found.results.into_iter().next(),
+                        }));
+                    } else {
+                        ambiguous += 1;
+                        results.push(serde_json::json!({
+                            "id": item.id, "status": "ambiguous", "count": count,
+                            "candidates": found.results,
+                        }));
+                    }
+                }
+                Err(e) => {
+                    invalid += 1;
                     results.push(serde_json::json!({
-                        "id": item.id, "status": "not_found", "count": 0,
-                    }));
-                } else if count == 1 {
-                    matched += 1;
-                    results.push(serde_json::json!({
-                        "id": item.id, "status": "matched", "count": 1,
-                        "document": found.results.into_iter().next(),
-                    }));
-                } else {
-                    ambiguous += 1;
-                    results.push(serde_json::json!({
-                        "id": item.id, "status": "ambiguous", "count": count,
-                        "candidates": found.results,
+                        "id": item.id, "status": "error", "message": e.to_string(),
                     }));
                 }
             }
-            Err(e) => {
-                invalid += 1;
-                results.push(serde_json::json!({
-                    "id": item.id, "status": "error", "message": e.to_string(),
-                }));
-            }
         }
-    }
 
-    Json(serde_json::json!({
-        "took_ms": round_ms(start),
-        "summary": {
-            "items": req.items.len(),
-            "matched": matched,
-            "not_found": not_found,
-            "ambiguous": ambiguous,
-            "invalid": invalid,
-        },
-        "results": results,
-    }))
-    .into_response()
+        serde_json::json!({
+            "took_ms": round_ms(start),
+            "summary": {
+                "items": req.items.len(),
+                "matched": matched,
+                "not_found": not_found,
+                "ambiguous": ambiguous,
+                "invalid": invalid,
+            },
+            "results": results,
+        })
+    })
+    .await;
+
+    match outcome {
+        Ok(body) => Json(body).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// Ranked candidate matching for names — record linkage rather than a join.
@@ -717,81 +785,94 @@ async fn handle_match(State(state): State<Arc<AppState>>, body: axum::body::Byte
         .clamp(1, MAX_CANDIDATES);
 
     let start = Instant::now();
-    let mut results = Vec::with_capacity(req.items.len());
-    let mut with_hits = 0usize;
+    let outcome = run_blocking(&state, move |app| {
+        let engine = &app.engine;
+        let mut results = Vec::with_capacity(req.items.len());
+        let mut with_hits = 0usize;
 
-    for item in &req.items {
-        let query = item.q.trim();
-        if query.is_empty() {
-            results.push(serde_json::json!({
-                "id": item.id, "status": "invalid", "error": "empty_query",
-                "message": "q is empty; an empty query cannot rank anything",
-            }));
-            continue;
-        }
-        if query.chars().count() > MAX_MATCH_QUERY_LEN {
-            results.push(serde_json::json!({
-                "id": item.id, "status": "invalid", "error": "query_too_long",
-                "message": format!("q is limited to {} characters", MAX_MATCH_QUERY_LEN),
-            }));
-            continue;
-        }
-        if !item.filters.is_empty() {
-            if let Err((error, message)) = validate_filters(engine, &item.filters) {
+        for item in &req.items {
+            let query = item.q.trim();
+            if query.is_empty() {
                 results.push(serde_json::json!({
-                    "id": item.id, "status": "invalid", "error": error, "message": message,
+                    "id": item.id, "status": "invalid", "error": "empty_query",
+                    "message": "q is empty; an empty query cannot rank anything",
                 }));
                 continue;
             }
-        }
-        // No count: trigram matching gives almost every document a weak
-        // score, so the "number of matches" for a name runs to hundreds of
-        // thousands and means nothing a caller should act on. Reporting it
-        // would invite exactly the wrong reading. Skipping it is also free
-        // speed, since nothing has to traverse the whole matching set.
-        let outcome = engine.search(
-            query,
-            &item.filters,
-            &[],
-            &crate::search::SortOrder::Relevance,
-            candidates,
-            0,
-            false,
-            false,
-            req.full,
-        );
-        match outcome {
-            Ok(found) => {
-                if !found.results.is_empty() {
-                    with_hits += 1;
-                }
+            if query.chars().count() > MAX_MATCH_QUERY_LEN {
                 results.push(serde_json::json!({
-                    "id": item.id,
-                    "status": if found.results.is_empty() { "not_found" } else { "candidates" },
-                    "returned": found.results.len(),
-                    // Relative distance between the best candidate and the
-                    // runner-up. BM25 scores are not comparable across
-                    // queries, so an absolute score is not a confidence
-                    // signal and thresholding on one is a classic linkage
-                    // bug; the gap within a single ranking is meaningful.
-                    // 1.0 means the leader stands alone, near 0 means a tie
-                    // the caller should look at.
-                    "margin": top_margin(&found.results),
-                    "candidates": found.results,
+                    "id": item.id, "status": "invalid", "error": "query_too_long",
+                    "message": format!("q is limited to {} characters", MAX_MATCH_QUERY_LEN),
                 }));
+                continue;
             }
-            Err(e) => results.push(serde_json::json!({
-                "id": item.id, "status": "error", "message": e.to_string(),
-            })),
+            if !item.filters.is_empty() {
+                if let Err((error, message)) = validate_filters(engine, &item.filters) {
+                    results.push(serde_json::json!({
+                        "id": item.id, "status": "invalid", "error": error, "message": message,
+                    }));
+                    continue;
+                }
+            }
+            // No count: trigram matching gives almost every document a weak
+            // score, so the "number of matches" for a name runs to hundreds
+            // of thousands and means nothing a caller should act on.
+            // Reporting it would invite exactly the wrong reading. Skipping
+            // it is also free speed, since nothing has to traverse the whole
+            // matching set.
+            let outcome = engine.search(
+                query,
+                &item.filters,
+                &[],
+                &crate::search::SortOrder::Relevance,
+                candidates,
+                0,
+                false,
+                false,
+                req.full,
+            );
+            match outcome {
+                Ok(found) => {
+                    if !found.results.is_empty() {
+                        with_hits += 1;
+                    }
+                    results.push(serde_json::json!({
+                        "id": item.id,
+                        "status": if found.results.is_empty() { "not_found" } else { "candidates" },
+                        "returned": found.results.len(),
+                        // Relative distance between the best candidate and the
+                        // runner-up. BM25 scores are not comparable across
+                        // queries, so an absolute score is not a confidence
+                        // signal and thresholding on one is a classic linkage
+                        // bug; the gap within a single ranking is meaningful.
+                        // 1.0 means the leader stands alone, near 0 means a
+                        // tie the caller should look at.
+                        "margin": top_margin(&found.results),
+                        "candidates": found.results,
+                    }));
+                }
+                Err(e) => results.push(serde_json::json!({
+                    "id": item.id, "status": "error", "message": e.to_string(),
+                })),
+            }
         }
-    }
 
-    Json(serde_json::json!({
-        "took_ms": round_ms(start),
-        "summary": { "items": req.items.len(), "with_candidates": with_hits },
-        "results": results,
-    }))
-    .into_response()
+        serde_json::json!({
+            "took_ms": round_ms(start),
+            "summary": { "items": req.items.len(), "with_candidates": with_hits },
+            "results": results,
+        })
+    })
+    .await;
+
+    match outcome {
+        Ok(body) => Json(body).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn handle_docs_batch(
@@ -848,7 +929,11 @@ async fn handle_docs_batch(
     }
 
     let start = Instant::now();
-    match state.engine.get_full_many(&refs) {
+    let batch = refs.clone();
+    let outcome = run_blocking(&state, move |app| app.engine.get_full_many(&batch))
+        .await
+        .and_then(|result| result);
+    match outcome {
         Ok(fulls) => {
             let results: Vec<Option<DocsBatchEntry>> = refs
                 .iter()
@@ -923,100 +1008,107 @@ async fn handle_api_index(State(state): State<Arc<AppState>>) -> Json<serde_json
 }
 
 async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // The sysinfo refresh and the index-directory walk are blocking work
+    // too — a stats poller must not be able to stall queries, or vice versa.
+    let outcome = run_blocking(&state, move |state| {
+        let mut sys = System::new_all();
+        sys.refresh_all();
 
-    let pid = sysinfo::get_current_pid().ok();
-    let process_info = pid.and_then(|p| sys.process(p));
+        let pid = sysinfo::get_current_pid().ok();
+        let process_info = pid.and_then(|p| sys.process(p));
 
-    let process_memory = process_info.map(|p| p.memory()).unwrap_or(0);
-    let process_virtual = process_info.map(|p| p.virtual_memory()).unwrap_or(0);
+        let process_memory = process_info.map(|p| p.memory()).unwrap_or(0);
+        let process_virtual = process_info.map(|p| p.virtual_memory()).unwrap_or(0);
 
-    let uptime_secs = state.started_at.elapsed().as_secs();
-    let index_path = &state.engine.config.server.index_path;
+        let uptime_secs = state.started_at.elapsed().as_secs();
+        let index_path = &state.engine.config.server.index_path;
 
-    // Calculate index size on disk
-    let index_size = dir_size(index_path).unwrap_or(0);
+        // Calculate index size on disk
+        let index_size = dir_size(index_path).unwrap_or(0);
 
-    // Count segments
-    let segment_count = state
-        .engine
-        .index
-        .searchable_segment_metas()
-        .map(|s| s.len())
-        .unwrap_or(0);
+        // Count segments
+        let segment_count = state
+            .engine
+            .index
+            .searchable_segment_metas()
+            .map(|s| s.len())
+            .unwrap_or(0);
 
-    let num_docs = state.engine.reader.searcher().num_docs();
+        let num_docs = state.engine.reader.searcher().num_docs();
 
-    let store_stats = match state.engine.store.as_ref() {
-        Some(store) => {
-            let s = store.stats();
-            serde_json::json!({
-                "enabled": true,
-                "status": "ok",
-                "documents": s.doc_count,
-                "blocks": s.block_count,
-                "generation": s.generation,
-                "source_mode": s.source_mode,
-                "raw_bytes": s.raw_bytes,
-                "raw_human": format_bytes(s.raw_bytes),
-                "size_bytes": s.compressed_bytes,
-                "size_human": format_bytes(s.compressed_bytes),
-                "cache": {
-                    "capacity_bytes": s.cache_capacity_bytes,
-                    "used_bytes": s.cache_used_bytes,
-                    "entries": s.cache_entries,
-                    "hits": s.cache_hits,
-                    "misses": s.cache_misses,
-                },
-            })
-        }
-        None => serde_json::json!({
-            "enabled": state.engine.config.store.enabled,
-            "status": state.engine.store_status.as_str(),
-        }),
-    };
+        let store_stats = match state.engine.store.as_ref() {
+            Some(store) => {
+                let s = store.stats();
+                serde_json::json!({
+                    "enabled": true,
+                    "status": "ok",
+                    "documents": s.doc_count,
+                    "blocks": s.block_count,
+                    "generation": s.generation,
+                    "source_mode": s.source_mode,
+                    "raw_bytes": s.raw_bytes,
+                    "raw_human": format_bytes(s.raw_bytes),
+                    "size_bytes": s.compressed_bytes,
+                    "size_human": format_bytes(s.compressed_bytes),
+                    "cache": {
+                        "capacity_bytes": s.cache_capacity_bytes,
+                        "used_bytes": s.cache_used_bytes,
+                        "entries": s.cache_entries,
+                        "hits": s.cache_hits,
+                        "misses": s.cache_misses,
+                    },
+                })
+            }
+            None => serde_json::json!({
+                "enabled": state.engine.config.store.enabled,
+                "status": state.engine.store_status.as_str(),
+            }),
+        };
 
-    Json(serde_json::json!({
-        "status": "online",
-        "uptime_seconds": uptime_secs,
-        "uptime_human": format_duration(uptime_secs),
-        "documents": num_docs,
-        "index": {
-            "path": index_path.display().to_string(),
-            "size_bytes": index_size,
-            "size_human": format_bytes(index_size),
-            "segments": segment_count,
-        },
-        "store": store_stats,
-        "memory": {
-            "rss_bytes": process_memory,
-            "rss_human": format_bytes(process_memory),
-            "virtual_bytes": process_virtual,
-            "virtual_human": format_bytes(process_virtual),
-            "budget": state.engine.config.server.memory_budget,
-        },
-        "system": {
-            "total_memory_bytes": sys.total_memory(),
-            "total_memory_human": format_bytes(sys.total_memory()),
-            "available_memory_bytes": sys.available_memory(),
-            "available_memory_human": format_bytes(sys.available_memory()),
-            "cpu_count": sys.cpus().len(),
-        },
-            "schema": {
-                "fields": state.engine.config.schema.fields.iter().map(|f| {
-                    let metadata = state.engine.field_metadata.get(&f.name);
-                    serde_json::json!({
-                        "name": f.name,
-                        "type": format!("{:?}", f.field_type).to_lowercase(),
-                        "search": f.search.as_ref().map(|s| s.as_str()),
-                        "description": f.description,
-                        "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
-                        "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
-                    })
-                }).collect::<Vec<_>>(),
+        serde_json::json!({
+            "status": "online",
+            "uptime_seconds": uptime_secs,
+            "uptime_human": format_duration(uptime_secs),
+            "documents": num_docs,
+            "index": {
+                "path": index_path.display().to_string(),
+                "size_bytes": index_size,
+                "size_human": format_bytes(index_size),
+                "segments": segment_count,
             },
-    }))
+            "store": store_stats,
+            "memory": {
+                "rss_bytes": process_memory,
+                "rss_human": format_bytes(process_memory),
+                "virtual_bytes": process_virtual,
+                "virtual_human": format_bytes(process_virtual),
+                "budget": state.engine.config.server.memory_budget,
+            },
+            "system": {
+                "total_memory_bytes": sys.total_memory(),
+                "total_memory_human": format_bytes(sys.total_memory()),
+                "available_memory_bytes": sys.available_memory(),
+                "available_memory_human": format_bytes(sys.available_memory()),
+                "cpu_count": sys.cpus().len(),
+            },
+                "schema": {
+                    "fields": state.engine.config.schema.fields.iter().map(|f| {
+                        let metadata = state.engine.field_metadata.get(&f.name);
+                        serde_json::json!({
+                            "name": f.name,
+                            "type": format!("{:?}", f.field_type).to_lowercase(),
+                            "search": f.search.as_ref().map(|s| s.as_str()),
+                            "description": f.description,
+                            "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
+                            "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
+                        })
+                    }).collect::<Vec<_>>(),
+                },
+        })
+    })
+    .await;
+
+    Json(outcome.unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })))
 }
 
 async fn handle_health() -> Json<serde_json::Value> {
