@@ -334,27 +334,73 @@ impl SearchEngine {
         Some(BooleanQuery::new(clauses))
     }
 
-    /// Fuzzy `q` as ONE flat Should-union with a TermQuery per
-    /// (fuzzy field, query trigram).
+    /// Fuzzy `q` as ONE flat Should-union with a TermQuery per fuzzy field
+    /// per selected trigram: for each query word, the `RARE_DRIVE_TERMS`
+    /// rarest of that word's trigrams by document frequency (all of them
+    /// when the word has that few).
+    ///
+    /// Two properties carry the whole fuzzy path:
     ///
     /// Flat matters: tantivy specializes a union into its block-WAND top-k
     /// pruning path only when every clause of a single BooleanQuery is a raw
-    /// term query. The previous shape — a union of per-field unions — never
-    /// qualified, so every document sharing even one trigram with the query
-    /// was fully BM25-scored. Scores are sums either way, so flattening
-    /// changes no ranking. WithFreqs, not positions: BM25 needs term
-    /// frequency, and nothing reads positions.
-    fn fuzzy_clauses(&self, fields: &[Field], text: &str) -> Vec<(Occur, Box<dyn Query>)> {
-        let ngrams = query_trigrams(text);
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> =
-            Vec::with_capacity(ngrams.len() * fields.len());
-        for &field in fields {
-            for ng in &ngrams {
-                let term = Term::from_field_text(field, ng);
-                clauses.push((
-                    Occur::Should,
-                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>,
-                ));
+    /// term query. A union of per-field unions never qualified, so every
+    /// document sharing even one trigram with the query was fully
+    /// BM25-scored.
+    ///
+    /// Rare matters: traversal cost is the summed posting lengths of the
+    /// clauses, and the rarest trigrams are orders of magnitude cheaper than
+    /// the commonest while carrying nearly all of the IDF weight — the
+    /// trigrams dropped are exactly the ones BM25 scores lowest. Recall is
+    /// pigeonholed: one edit destroys at most three of a word's trigrams, so
+    /// of any four at least one survives in every document within edit
+    /// distance 1 of that word. Documents sharing only the query's common
+    /// trigrams — the bulk of the old candidate set — stop matching, which
+    /// is the point. Ties on document frequency break on the trigram itself
+    /// so the selection cannot vary between runs.
+    ///
+    /// WithFreqs, not positions: BM25 needs term frequency, and nothing
+    /// reads positions.
+    fn fuzzy_clauses(
+        &self,
+        searcher: &tantivy::Searcher,
+        fields: &[Field],
+        text: &str,
+    ) -> Vec<(Occur, Box<dyn Query>)> {
+        const RARE_DRIVE_TERMS: usize = 4;
+        let lowered = text.to_lowercase();
+        let mut seen: std::collections::HashSet<Term> = std::collections::HashSet::new();
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for word in lowered.split_whitespace() {
+            let mut ngrams = generate_ngrams(word, 3, 3);
+            ngrams.sort_unstable();
+            ngrams.dedup();
+            if ngrams.is_empty() {
+                continue;
+            }
+            for &field in fields {
+                let mut ranked: Vec<(u64, &String)> = ngrams
+                    .iter()
+                    .map(|ng| {
+                        let term = Term::from_field_text(field, ng);
+                        let df = if ngrams.len() > RARE_DRIVE_TERMS {
+                            searcher.doc_freq(&term).unwrap_or(u64::MAX)
+                        } else {
+                            0 // short word: everything is kept, skip the lookups
+                        };
+                        (df, ng)
+                    })
+                    .collect();
+                ranked.sort();
+                for (_, ng) in ranked.into_iter().take(RARE_DRIVE_TERMS) {
+                    let term = Term::from_field_text(field, ng);
+                    if seen.insert(term.clone()) {
+                        clauses.push((
+                            Occur::Should,
+                            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>,
+                        ));
+                    }
+                }
             }
         }
         clauses
@@ -433,7 +479,7 @@ impl SearchEngine {
         // Fuzzy search with trigrams
         let mut fuzzy_clauses: Option<Vec<(Occur, Box<dyn Query>)>> = None;
         if !query_text.is_empty() {
-            let clauses = self.fuzzy_clauses(&fuzzy_fields, query_text);
+            let clauses = self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text);
             if clauses.is_empty() {
                 // No fuzzy field, or a query too short to form a trigram.
                 // Previously this fell through to AllQuery and returned the
@@ -1549,6 +1595,102 @@ pub mod tests {
 
         // A query that is nothing but one repeated trigram still works.
         assert_eq!(run("aaaa", &HashMap::new(), true).count, Some(0));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Long fuzzy queries (and filtered ones) are driven by their rarest
+    /// trigrams. The pigeonhole guarantee: every document within one edit of
+    /// a query word stays reachable, while documents sharing only common
+    /// trigrams — the bulk of the old candidate set — drop out.
+    #[test]
+    fn rare_trigram_driving_keeps_typo_matches_and_sheds_noise() {
+        let dir = test_index_dir("rare-driving");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Fuzzy);
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for (n, c) in [
+                ("Storgruppen Konsern", "OSLO"), // the real match
+                ("Historie AS", "OSLO"),         // shares only sto/tor — noise
+                ("Gruppen Invest", "BERGEN"),    // shares the gruppen tail
+                ("Fjordkraft AS", "OSLO"),
+            ] {
+                writer
+                    .add_document(doc!(city => c, revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string()],
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |q: &str, filters: &HashMap<String, String>| {
+            engine
+                .search(
+                    q,
+                    filters,
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // 9 trigrams, of which the 4 rarest are kept. The full-name doc and
+        // the tail-sharing doc survive; the doc sharing only the two
+        // commonest trigrams does not.
+        let result = run("storgruppen", &HashMap::new());
+        assert_eq!(result.count, Some(2), "common-trigram-only noise is shed");
+        assert_eq!(
+            result.results[0]["name"], "Storgruppen Konsern",
+            "full-union scoring still ranks the real match first"
+        );
+
+        // One edit destroys at most three trigrams, so a typo'd query must
+        // still reach the real document through its driving terms.
+        let typo = run("storgrappen", &HashMap::new());
+        assert_eq!(typo.results[0]["name"], "Storgruppen Konsern");
+
+        // A document matching only one word of a multi-word query stays
+        // reachable: driving terms are chosen per word.
+        let multi = run("blahblah fjordkraft", &HashMap::new());
+        assert_eq!(multi.results[0]["name"], "Fjordkraft AS");
+
+        // Filters compose with driving (filtered fuzzy also takes this arm).
+        let mut filters = HashMap::new();
+        filters.insert("city".to_string(), "OSLO".to_string());
+        let filtered = run("storgruppen", &filters);
+        assert_eq!(filtered.count, Some(1), "BERGEN tail match filtered out");
+        assert_eq!(filtered.results[0]["name"], "Storgruppen Konsern");
 
         let _ = std::fs::remove_dir_all(dir);
     }
