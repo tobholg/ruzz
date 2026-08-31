@@ -136,19 +136,26 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
         }
     }
 
-    // Create or open index
-    let index_path = &config.server.index_path;
-    if index_path.exists() {
-        std::fs::remove_dir_all(index_path)?;
-    }
-    std::fs::create_dir_all(index_path)?;
-
-    // Prepare the store directory (or clear a stale store from a previous
-    // store-enabled import so it can't outlive the index it belonged to).
-    let mut store_import = if store_enabled {
-        if store_path.exists() {
-            std::fs::remove_dir_all(&store_path)?;
+    // Build into staging directories beside the final paths. The previous
+    // index used to be deleted before the first row was read, so a failed
+    // or interrupted import left nothing to serve; now it survives, live
+    // and untouched, until the replacement is complete — only then do a
+    // couple of renames put the new one in place. A crash mid-import
+    // leaves at worst a *.building leftover, cleared on the next run.
+    let final_index_path = config.server.index_path.clone();
+    let index_path = staging_path(&final_index_path);
+    let final_store_path = store_path;
+    let store_path = staging_path(&final_store_path);
+    for stale in [&index_path, &store_path] {
+        if stale.exists() {
+            std::fs::remove_dir_all(stale).with_context(|| {
+                format!("clearing leftover staging directory {}", stale.display())
+            })?;
         }
+    }
+    std::fs::create_dir_all(&index_path)?;
+
+    let mut store_import = if store_enabled {
         std::fs::create_dir_all(&store_path)?;
         if legacy_in_the_way {
             println!(
@@ -166,19 +173,10 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             next_ref: 0,
         })
     } else {
-        // Clear both locations: a store left behind at either path would
-        // otherwise outlive the index it was built for, and the legacy one
-        // would still be picked up when serving.
-        for stale in [&store_path, &legacy_path] {
-            if store::looks_like_store_dir(stale) {
-                std::fs::remove_dir_all(stale)?;
-                println!("  removed stale document store at {}", stale.display());
-            }
-        }
         None
     };
 
-    let index = tantivy::Index::create_in_dir(index_path, schema.clone())?;
+    let index = tantivy::Index::create_in_dir(&index_path, schema.clone())?;
 
     // Register trigram tokenizer for fuzzy fields
     register_trigram_tokenizer(&index);
@@ -286,7 +284,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     }
     merge_pb.finish_with_message("Segments merged.");
 
-    write_stored_field_metadata(&config.server.index_path, &metadata_collector.into_stored())?;
+    write_stored_field_metadata(&index_path, &metadata_collector.into_stored())?;
 
     // Finalize the store: meta.json is written last, after both the index
     // commit and the store data files succeeded (commit marker semantics).
@@ -315,16 +313,36 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         store::write_meta(&store_path, &meta)?;
-        store::write_index_pairing(&config.server.index_path, &generation)?;
+        store::write_index_pairing(&index_path, &generation)?;
         println!(
             "✓ document store: {} docs, {} raw → {} on disk ({:.1}x) → {}",
             outcome.doc_count,
             format_bytes(outcome.raw_bytes),
             format_bytes(outcome.compressed_bytes),
             outcome.raw_bytes.max(1) as f64 / outcome.compressed_bytes.max(1) as f64,
-            store_path.display()
+            final_store_path.display()
         );
     }
+
+    // Everything is built and internally consistent — put it live. Store
+    // first: if interrupted between the two swaps, the old index pairs with
+    // the new store, the generation check fails safe (store endpoints down,
+    // search up on the old data) and the next import heals it.
+    if store_enabled {
+        swap_into_place(&store_path, &final_store_path)?;
+    } else {
+        // A store left behind at either path would outlive the index it was
+        // built for, and the legacy one would still be picked up when
+        // serving. Cleared only now: the build has succeeded, so final
+        // state may be touched.
+        for stale in [&final_store_path, &legacy_path] {
+            if store::looks_like_store_dir(stale) {
+                std::fs::remove_dir_all(stale)?;
+                println!("  removed stale document store at {}", stale.display());
+            }
+        }
+    }
+    swap_into_place(&index_path, &final_index_path)?;
 
     stats.total_duration_secs = start.elapsed().as_secs_f64();
 
@@ -336,6 +354,45 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     );
 
     Ok(stats)
+}
+
+/// Sibling staging directory a new index or store is built into before the
+/// swap: "<path>.building". Beside the destination, so the final rename
+/// stays on one filesystem and therefore atomic.
+fn staging_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "index".to_string());
+    path.with_file_name(format!("{name}.building"))
+}
+
+/// Replace `dest` with `build` by rename. Each rename is atomic; between
+/// the two there is a moment where `dest` is absent and "<dest>.previous"
+/// holds the old data — a crash in that window is recoverable by hand and
+/// the next import clears the leftovers. A serving process keeps the files
+/// it has mapped either way (the inode outlives the directory entry) and
+/// picks the new data up on restart.
+fn swap_into_place(build: &Path, dest: &Path) -> anyhow::Result<()> {
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "index".to_string());
+    let previous = dest.with_file_name(format!("{name}.previous"));
+    if previous.exists() {
+        std::fs::remove_dir_all(&previous)
+            .with_context(|| format!("clearing {}", previous.display()))?;
+    }
+    if dest.exists() {
+        std::fs::rename(dest, &previous)
+            .with_context(|| format!("moving {} aside", dest.display()))?;
+    }
+    std::fs::rename(build, dest)
+        .with_context(|| format!("moving {} into place", dest.display()))?;
+    if previous.exists() {
+        let _ = std::fs::remove_dir_all(&previous);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -680,6 +737,63 @@ org_number,company_name,city,secret_extra
             use_mapping: None,
             sidecar,
         }
+    }
+
+    /// A failed import must not cost the previous index. It used to: the
+    /// old index was deleted before the first row was read, so any import
+    /// error — a renamed CSV, a full disk, ctrl-C — left nothing to serve.
+    #[test]
+    fn failed_import_leaves_the_previous_index_intact() {
+        let dir = temp_dir("atomic");
+        write_csv(&dir.join("data.csv"), CSV);
+        let good = test_config(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig {
+                enabled: true,
+                ..StoreConfig::default()
+            },
+        );
+        run_import(&good).unwrap();
+
+        // Same config, but the source file is gone: the import fails.
+        let mut broken_source = source(&dir, None);
+        broken_source.path = dir.join("no-such-file.csv");
+        let broken = test_config(
+            &dir,
+            vec![broken_source],
+            StoreConfig {
+                enabled: true,
+                ..StoreConfig::default()
+            },
+        );
+        run_import(&broken).expect_err("import of a missing file must fail");
+
+        // The previous index and its store still serve, unharmed.
+        let engine = SearchEngine::open(good.clone()).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+        let result = engine
+            .search(
+                "acme",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(result.total, 1, "old data still searchable");
+
+        // And the staging leftovers do not trip the next successful import.
+        drop(engine);
+        run_import(&good).unwrap();
+        let engine = SearchEngine::open(good).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A numeric cell that is empty or unparseable used to be stored as 0.0,
