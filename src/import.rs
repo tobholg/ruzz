@@ -647,7 +647,7 @@ pub fn register_trigram_tokenizer_pub(index: &tantivy::Index) {
 mod tests {
     use super::*;
     use crate::config::{
-        Config, FieldConfig, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
+        Config, DashboardConfig, FieldConfig, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
     };
     use crate::search::{SearchEngine, SortOrder, StoreStatus};
     use std::path::PathBuf;
@@ -712,6 +712,7 @@ mod tests {
             sources,
             mappings: HashMap::new(),
             store,
+            dashboard: DashboardConfig::default(),
         })
     }
 
@@ -848,6 +849,7 @@ org_number,company_name,city,secret_extra
             }],
             mappings: HashMap::new(),
             store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
         });
 
         run_import(&config).unwrap();
