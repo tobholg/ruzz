@@ -1091,6 +1091,9 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 "available_memory_human": format_bytes(sys.available_memory()),
                 "cpu_count": sys.cpus().len(),
             },
+                "dashboard": {
+                    "columns": state.engine.config.dashboard.columns,
+                },
                 "schema": {
                     "fields": state.engine.config.schema.fields.iter().map(|f| {
                         let metadata = state.engine.field_metadata.get(&f.name);

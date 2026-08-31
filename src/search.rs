@@ -946,7 +946,8 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 pub mod tests {
     use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder};
     use crate::config::{
-        Config, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig, StoreConfig,
+        Config, DashboardConfig, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig,
+        StoreConfig,
     };
     use crate::schema::build_schema;
     use std::collections::HashMap;
@@ -1021,6 +1022,7 @@ pub mod tests {
             sources: Vec::<SourceConfig>::new(),
             mappings: HashMap::new(),
             store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
         });
 
         let (schema, _) = build_schema(&config.schema, false);
@@ -1936,6 +1938,7 @@ pub mod tests {
             sources: Vec::<SourceConfig>::new(),
             mappings: HashMap::new(),
             store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
         })
     }
 
@@ -2116,6 +2119,7 @@ pub mod tests {
             sources: Vec::new(),
             mappings: HashMap::new(),
             store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
         });
         let (schema, _) = crate::schema::build_schema(&config.schema, false);
         let index = tantivy::Index::create_in_dir(dir, schema).unwrap();

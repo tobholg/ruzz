@@ -11,6 +11,19 @@ pub struct Config {
     pub mappings: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub store: StoreConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
+}
+
+/// Presentation defaults for the built-in web dashboard. Purely cosmetic —
+/// nothing here changes what the API serves.
+#[derive(Debug, Default, Deserialize)]
+pub struct DashboardConfig {
+    /// Columns the results table shows by default, in order. Unset means
+    /// the dashboard picks: the fuzzy field first, then schema order.
+    /// Users can still override this per browser from the Columns menu.
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
 }
 
 /// Optional on-disk document store for full records behind the compact
@@ -336,6 +349,7 @@ mod tests {
 
     fn config_for(index_path: &str, store_path: Option<&str>) -> Config {
         Config {
+            dashboard: DashboardConfig::default(),
             server: ServerConfig {
                 port: 8888,
                 index_path: PathBuf::from(index_path),
