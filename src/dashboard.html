@@ -242,7 +242,12 @@
   #settings-modal .modal { display: flex; flex-direction: column; max-height: 92vh; overflow: hidden; }
   #settings-modal .modal-header { flex-shrink: 0; }
   #settings-modal .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  /* Only the scroll area may give up height — every other flex child keeps
+     its natural size or the find-field input gets squashed. */
+  #settings-modal .settings-section:not(.settings-section-filters) { flex-shrink: 0; }
   .settings-section-filters { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .settings-section-filters > .export-panel-title,
+  .settings-section-filters > .export-search-wrap { flex-shrink: 0; }
   .settings-filters-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); padding: 8px 2px; }
   .settings-filters-grid { align-content: start; }
   .settings-section { margin-bottom: 18px; }
