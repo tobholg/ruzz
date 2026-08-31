@@ -171,6 +171,21 @@ impl StoreWriter {
     }
 }
 
+/// A writer abandoned mid-import (the import failed before `finish`) must
+/// not leave its thread running: closing the channel wakes it, and it then
+/// flushes and CREATES files in the staging directory — racing the next
+/// import's cleanup of that same path (observed as a flaky ENOTEMPTY from
+/// `remove_dir_all`). Joining bounds the wait to draining an already-closed
+/// channel and one flush.
+impl Drop for StoreWriter {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn writer_thread(
     docs_file: File,
     blocks_path: PathBuf,
