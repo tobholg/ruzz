@@ -10,7 +10,6 @@ mod server;
 mod store;
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
@@ -76,10 +75,7 @@ async fn serve(config: Arc<config::Config>) -> anyhow::Result<()> {
 
     let port = config.server.port;
 
-    let state = Arc::new(server::AppState {
-        engine,
-        started_at: Instant::now(),
-    });
+    let state = Arc::new(server::AppState::new(engine));
 
     let app = server::create_router(state);
 
