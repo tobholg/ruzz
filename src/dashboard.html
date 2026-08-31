@@ -236,8 +236,17 @@
   .columns-search { flex: 1; min-width: 0; border: none; background: none; outline: none; font-size: 12px; }
   .columns-more { padding: 5px 9px 2px 9px; font-size: 10.5px; color: var(--text-dim); }
 
-  /* ── Search settings modal ── */
+  /* ── Search settings modal ──
+     Framed like the slideout: header, sort, result size and the footer
+     buttons always visible; only the filters grid scrolls. */
+  #settings-modal .modal { display: flex; flex-direction: column; max-height: 92vh; overflow: hidden; }
+  #settings-modal .modal-header { flex-shrink: 0; }
+  #settings-modal .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .settings-section-filters { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .settings-filters-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); padding: 8px 2px; }
+  .settings-filters-grid { align-content: start; }
   .settings-section { margin-bottom: 18px; }
+  #settings-modal .modal-footer { flex-shrink: 0; }
   .settings-sort-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .settings-note { font-size: 11px; color: var(--text-dim); }
   .settings-filters-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -551,14 +560,16 @@
           <div class="settings-note">Clicking a table column header sorts by it too. Text fields cannot be sorted.</div>
         </div>
       </div>
-      <div class="settings-section">
+      <div class="settings-section settings-section-filters">
         <div class="export-panel-title">FILTERS</div>
         <div class="export-search-wrap">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
           <input class="export-search-input" id="settings-filter-search" type="text" placeholder="Find field…" autocomplete="off" spellcheck="false">
         </div>
-        <div class="settings-filters-grid" id="settings-filters-grid"></div>
-        <div class="settings-note" id="settings-filters-empty" hidden>No filters match that field name.</div>
+        <div class="settings-filters-scroll">
+          <div class="settings-filters-grid" id="settings-filters-grid"></div>
+          <div class="settings-note" id="settings-filters-empty" hidden>No filters match that field name.</div>
+        </div>
       </div>
       <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
