@@ -131,13 +131,21 @@
   /* ── Filter strip ── */
   .filter-strip { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0 12px 0; border-bottom: 1px solid var(--hairline); }
   .filter-flow { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-  .field-search-wrap { display: flex; align-items: center; gap: 8px; width: 160px; height: 34px; padding: 0 11px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; flex-shrink: 0; }
+  .field-search-wrap { position: relative; display: flex; align-items: center; gap: 8px; width: 170px; height: 34px; padding: 0 11px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; flex-shrink: 0; }
+  .field-search-wrap:focus-within { border-color: var(--accent-ring); }
   .field-search-wrap svg { color: var(--text-dim); flex-shrink: 0; }
   .field-search { flex: 1; min-width: 0; border: none; background: none; outline: none; font-size: 12px; }
+  .field-add-pop { position: absolute; top: calc(100% + 8px); left: 0; z-index: 45; width: 270px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; }
+  .field-add-pop[hidden] { display: none; }
+  .field-add-option { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 9px; border-radius: 7px; text-align: left; }
+  .field-add-option .fa-name { font-family: var(--mono); font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .field-add-option .fa-meta { font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
+  .field-add-option:hover, .field-add-option.hl { background: var(--accent-tint); }
+  .field-add-more { padding: 5px 9px 3px 9px; font-size: 10.5px; color: var(--text-dim); }
   .filter-group { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 4px 0 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; max-width: 300px; }
   .filter-group.hidden { display: none; }
   .filter-group.is-set { background: var(--input); border-color: var(--accent-ring); }
-  .filter-label { color: var(--text-muted); white-space: nowrap; }
+  .filter-label { color: var(--text-muted); white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
   .filter-group input.filter-input { width: 92px; border: none; background: none; outline: none; font-size: 12px; padding: 0 4px; }
   .filter-group input.filter-input[type="number"] { width: 58px; font-family: var(--mono); font-size: 11px; }
   .range-sep { color: var(--text-dim); }
@@ -228,8 +236,22 @@
   .columns-search { flex: 1; min-width: 0; border: none; background: none; outline: none; font-size: 12px; }
   .columns-more { padding: 5px 9px 2px 9px; font-size: 10.5px; color: var(--text-dim); }
 
-  /* ── Search settings modal ── */
+  /* ── Search settings modal ──
+     Framed like the slideout: header, sort, result size and the footer
+     buttons always visible; only the filters grid scrolls. */
+  #settings-modal .modal { display: flex; flex-direction: column; max-height: 92vh; overflow: hidden; }
+  #settings-modal .modal-header { flex-shrink: 0; }
+  #settings-modal .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  /* Only the scroll area may give up height — every other flex child keeps
+     its natural size or the find-field input gets squashed. */
+  #settings-modal .settings-section:not(.settings-section-filters) { flex-shrink: 0; }
+  .settings-section-filters { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .settings-section-filters > .export-panel-title,
+  .settings-section-filters > .export-search-wrap { flex-shrink: 0; }
+  .settings-filters-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); padding: 8px 2px; }
+  .settings-filters-grid { align-content: start; }
   .settings-section { margin-bottom: 18px; }
+  #settings-modal .modal-footer { flex-shrink: 0; }
   .settings-sort-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .settings-note { font-size: 11px; color: var(--text-dim); }
   .settings-filters-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -543,14 +565,16 @@
           <div class="settings-note">Clicking a table column header sorts by it too. Text fields cannot be sorted.</div>
         </div>
       </div>
-      <div class="settings-section">
+      <div class="settings-section settings-section-filters">
         <div class="export-panel-title">FILTERS</div>
         <div class="export-search-wrap">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
           <input class="export-search-input" id="settings-filter-search" type="text" placeholder="Find field…" autocomplete="off" spellcheck="false">
         </div>
-        <div class="settings-filters-grid" id="settings-filters-grid"></div>
-        <div class="settings-note" id="settings-filters-empty" hidden>No filters match that field name.</div>
+        <div class="settings-filters-scroll">
+          <div class="settings-filters-grid" id="settings-filters-grid"></div>
+          <div class="settings-note" id="settings-filters-empty" hidden>No filters match that field name.</div>
+        </div>
       </div>
       <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
@@ -583,7 +607,6 @@ let schema = [];
 let fuzzyField = null;
 let statsData = null;
 let authToken = sessionStorage.getItem('ruzz_token') || '';
-const DEFAULT_VISIBLE_FILTERS = 6;
 const DEFAULT_RESULT_LIMIT = 30;
 const MIN_RESULT_LIMIT = 1;
 const MAX_RESULT_LIMIT = 1000;
@@ -682,7 +705,8 @@ function searchTabMarkup() {
       <div class="filter-flow" id="filters-flow">
         <div class="field-search-wrap">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
-          <input class="field-search" id="filter-search" type="text" placeholder="Find field…" autocomplete="off" spellcheck="false">
+          <input class="field-search" id="filter-search" type="text" placeholder="Add filter…" autocomplete="off" spellcheck="false">
+          <div class="field-add-pop" id="field-add-pop" hidden></div>
         </div>
         <div class="filters-empty" id="filters-empty">No filters match that field name.</div>
       </div>
@@ -814,7 +838,35 @@ document.querySelectorAll('.topbar .tab').forEach(tab => {
 
 function bindSearchTabEvents() {
   document.getElementById('search')?.addEventListener('input', scheduleSearch);
-  document.getElementById('filter-search')?.addEventListener('input', applyFilterFieldSearch);
+  const fieldSearch = document.getElementById('filter-search');
+  fieldSearch?.addEventListener('input', () => {
+    fieldAddHighlight = 0;
+    renderFieldAddPop();
+    const pop = document.getElementById('field-add-pop');
+    if (pop) pop.hidden = false;
+  });
+  fieldSearch?.addEventListener('focus', openFieldAddPop);
+  fieldSearch?.addEventListener('keydown', event => {
+    const pop = document.getElementById('field-add-pop');
+    if (!pop || pop.hidden) return;
+    const shown = pop.querySelectorAll('.field-add-option');
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      fieldAddHighlight = Math.min(shown.length - 1, fieldAddHighlight + 1);
+      renderFieldAddPop();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      fieldAddHighlight = Math.max(0, fieldAddHighlight - 1);
+      renderFieldAddPop();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      shown[fieldAddHighlight]?.click();
+    } else if (event.key === 'Escape') {
+      event.stopPropagation();
+      closeFieldAddPop();
+      fieldSearch.blur();
+    }
+  });
   document.getElementById('filters-toggle')?.addEventListener('click', openSettingsModal);
   document.getElementById('reset-search-btn')?.addEventListener('click', resetSearchState);
   document.getElementById('export-btn')?.addEventListener('click', openExportModal);
@@ -912,6 +964,8 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     if (document.getElementById('export-modal')?.classList.contains('open')) { closeExportModal(); return; }
     if (document.getElementById('settings-modal')?.classList.contains('open')) { closeSettingsModal(); return; }
+    const addPop = document.getElementById('field-add-pop');
+    if (addPop && !addPop.hidden) { closeFieldAddPop(); return; }
     const pop = document.getElementById('columns-pop');
     if (pop && !pop.hidden) { pop.hidden = true; return; }
     closeSlideout();
@@ -937,7 +991,7 @@ document.addEventListener('keydown', event => {
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(applyFilterFieldSearch, 120);
+  resizeTimer = setTimeout(layoutFilterStrip, 120);
 });
 
 document.addEventListener('click', event => {
@@ -952,6 +1006,7 @@ document.addEventListener('click', event => {
     const pop = document.getElementById('columns-pop');
     if (pop) pop.hidden = true;
   }
+  if (!event.target.closest('.field-search-wrap')) closeFieldAddPop();
   // Clicking outside the detail slideout dismisses it — except clicks that
   // are themselves navigation (another row) or belong to an overlay with
   // its own dismissal (modals, pickers, menus).
@@ -998,6 +1053,10 @@ function buildSearchTab() {
   selectedIndex = -1;
   buildFilters();
   buildSortControls();
+  // The one-row fill must measure the strip as it will actually render:
+  // after the sort control exists, and again once webfonts settle.
+  layoutFilterStrip();
+  document.fonts?.ready?.then(layoutFilterStrip);
   renderColumnsPop();
   updateLimitControls();
   renderIdleResultsState();
@@ -1121,9 +1180,17 @@ function buildFilters() {
   const flow = document.getElementById('filters-flow');
   flow.querySelectorAll('.filter-group').forEach(node => node.remove());
   const emptyNode = document.getElementById('filters-empty');
-  for (const field of schema) {
+  // [dashboard] filters names the hot fields; they come first so the
+  // one-row fill offers them before schema order.
+  const preferred = Array.isArray(statsData?.dashboard?.filters) ? statsData.dashboard.filters : [];
+  const orderedFields = [
+    ...preferred.map(name => schema.find(field => field.name === name)).filter(Boolean),
+    ...schema.filter(field => !preferred.includes(field.name)),
+  ];
+  for (const field of orderedFields) {
     if (field.search === 'fuzzy') continue;
     const group = el('div', 'filter-group');
+    group.dataset.fieldName = field.name;
     group.dataset.fieldLabel = (field.name + ' ' + formatFieldName(field.name)).toLowerCase();
     const labelSpan = el('span', 'filter-label');
     labelSpan.textContent = formatFieldName(field.name);
@@ -1157,7 +1224,7 @@ function buildFilters() {
     }
     flow.insertBefore(group, emptyNode);
   }
-  applyFilterFieldSearch();
+  layoutFilterStrip();
 }
 
 function markSetState(group) {
@@ -1165,35 +1232,91 @@ function markSetState(group) {
   group.classList.toggle('is-set', hasValue);
 }
 
-/* How many idle filter chips the strip shows before the rest live behind
-   the settings modal — fewer as the window narrows, none on a phone.
-   Active filters are always pinned visible regardless. */
-function stripFilterCap() {
-  const width = window.innerWidth;
-  if (width < 800) return 0;
-  if (width < 1280) return 3;
-  return DEFAULT_VISIBLE_FILTERS;
-}
-
-function applyFilterFieldSearch() {
-  const needle = (document.getElementById('filter-search')?.value || '').trim().toLowerCase();
-  const groups = [...document.querySelectorAll('#filters-flow .filter-group')].filter(g => !g.classList.contains('sort-chip'));
-  const cap = stripFilterCap();
-  let matched = 0;
-  groups.forEach((group, index) => {
-    const matches = !needle || group.dataset.fieldLabel.includes(needle);
-    if (matches) matched += 1;
-    // Active filters stay pinned in the strip; the rest collapse behind the
-    // "All filters" modal past the first few.
-    const pinned = group.classList.contains('is-set');
-    const collapsed = !needle && !pinned && index >= cap;
-    group.classList.toggle('hidden', !(matches && !collapsed));
+/* The strip never grows with the schema: pinned chips (active filters and
+   ones deliberately added) always show, and idle default chips are then
+   added greedily only while the first row still has room — measured, not
+   guessed, so 5-field and 193-field schemas both get one tidy row. */
+function layoutFilterStrip() {
+  const flow = document.getElementById('filters-flow');
+  if (!flow) return;
+  const groups = [...flow.querySelectorAll('.filter-group')];
+  const anchor = flow.querySelector('.field-search-wrap');
+  groups.forEach(group => {
+    const pinned = group.classList.contains('is-set') || group.classList.contains('is-added');
+    group.classList.toggle('hidden', !pinned);
   });
-  document.getElementById('filters-empty')?.classList.toggle('visible', matched === 0 && schema.some(field => field.search !== 'fuzzy'));
+  const rowTop = anchor ? anchor.offsetTop : (groups[0]?.offsetTop ?? 0);
+  for (const group of groups) {
+    if (!group.classList.contains('hidden')) continue;
+    group.classList.remove('hidden');
+    if (group.offsetTop > rowTop) {
+      group.classList.add('hidden');
+      break;
+    }
+  }
   const toggle = document.getElementById('filters-toggle');
   if (toggle) {
     toggle.hidden = false;
     toggle.textContent = `All filters (${groups.length}) ▸`;
+  }
+}
+
+/* ── add-filter combobox: typing searches the schema in a dropdown and
+     picking a field pins its chip into the strip — matches never render
+     inline, so 193 fields cannot bury the results. ── */
+const FIELD_ADD_CAP = 8;
+let fieldAddHighlight = 0;
+
+function fieldAddMatches() {
+  const needle = (document.getElementById('filter-search')?.value || '').trim().toLowerCase();
+  return schema
+    .filter(field => field.search !== 'fuzzy')
+    .filter(field => !needle || (field.name + ' ' + formatFieldName(field.name)).toLowerCase().includes(needle));
+}
+
+function renderFieldAddPop() {
+  const pop = document.getElementById('field-add-pop');
+  if (!pop) return;
+  const matches = fieldAddMatches();
+  const shown = matches.slice(0, FIELD_ADD_CAP);
+  if (fieldAddHighlight >= shown.length) fieldAddHighlight = Math.max(0, shown.length - 1);
+  const rows = shown.map((field, index) =>
+    `<button class="field-add-option${index === fieldAddHighlight ? ' hl' : ''}" type="button" data-field="${esc(field.name)}"><span class="fa-name">${esc(formatFieldName(field.name))}</span><span class="fa-meta">${esc(field.type)}</span></button>`).join('');
+  const overflow = matches.length > shown.length
+    ? `<div class="field-add-more">+${matches.length - shown.length} more — type to narrow</div>` : '';
+  pop.innerHTML = (rows || '<div class="field-add-more">No fields match.</div>') + overflow;
+  pop.querySelectorAll('.field-add-option').forEach(button => {
+    button.addEventListener('click', () => addFilterChip(button.dataset.field));
+  });
+}
+
+function openFieldAddPop() {
+  fieldAddHighlight = 0;
+  renderFieldAddPop();
+  const pop = document.getElementById('field-add-pop');
+  if (pop) pop.hidden = false;
+}
+
+function closeFieldAddPop() {
+  const pop = document.getElementById('field-add-pop');
+  if (pop) pop.hidden = true;
+}
+
+function addFilterChip(name) {
+  closeFieldAddPop();
+  const input = document.getElementById('filter-search');
+  if (input) input.value = '';
+  const group = [...document.querySelectorAll('#filters-flow .filter-group, #settings-filters-grid .filter-group')]
+    .find(g => g.dataset.fieldName === name);
+  if (!group) return;
+  group.classList.add('is-added');
+  layoutFilterStrip();
+  const firstInput = group.querySelector('input.filter-input:not([type="hidden"])');
+  if (firstInput) {
+    firstInput.focus();
+  } else {
+    closeAllPickers();
+    group.querySelector('.picker-trigger')?.click();
   }
 }
 
@@ -1288,7 +1411,7 @@ function closeSettingsModal() {
   document.querySelectorAll('#settings-filters-grid .filter-group').forEach(group => {
     flow.insertBefore(group, emptyNode);
   });
-  applyFilterFieldSearch();
+  layoutFilterStrip();
   const modal = document.getElementById('settings-modal');
   modal.classList.remove('open');
   modal.setAttribute('aria-hidden', 'true');
@@ -1315,7 +1438,7 @@ function bindSettingsModalEvents() {
       input.value = '';
       input.dispatchEvent(new Event('change'));
     });
-    document.querySelectorAll('.filter-group').forEach(group => group.classList.remove('is-set'));
+    document.querySelectorAll('.filter-group').forEach(group => group.classList.remove('is-set', 'is-added'));
     sortBy = '';
     sortOrder = 'desc';
     syncSortUI();
@@ -1503,7 +1626,8 @@ function resetSearchState() {
     input.value = '';
     input.dispatchEvent(new Event('change'));
   });
-  document.querySelectorAll('#filters-flow .filter-group').forEach(group => group.classList.remove('is-set'));
+  document.querySelectorAll('#filters-flow .filter-group').forEach(group => group.classList.remove('is-set', 'is-added'));
+  closeFieldAddPop();
   sortBy = '';
   sortOrder = 'desc';
   syncSortUI();
@@ -1514,7 +1638,7 @@ function resetSearchState() {
   closeAllPickers();
   closeLimitMenu();
   updateLimitControls();
-  applyFilterFieldSearch();
+  layoutFilterStrip();
   renderIdleResultsState();
   document.getElementById('search')?.focus();
 }
