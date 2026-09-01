@@ -1,14 +1,4 @@
-mod config;
-mod dashboard;
-mod field_meta;
-mod import;
-mod memory;
-mod params;
-mod schema;
-mod search;
-mod server;
-mod sort;
-mod store;
+use ruzz::{config, import, memory, search, server};
 
 use std::sync::Arc;
 
