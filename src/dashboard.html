@@ -2499,7 +2499,7 @@ Content-Type: application/json
     <h3>POST /match</h3>
     <p>Ranked candidate matching for names — record linkage rather than a join. Capped at <strong>25</strong> items.</p>
     <pre>${esc(matchExample)}</pre>
-    <p>Returns ranked <code>candidates</code> per item and never decides between them. Use <code>margin</code> — how far the leader stands clear of the runner-up — rather than thresholding on <code>_score</code>: BM25 scores are not comparable between queries.</p>
+    <p>Returns ranked <code>candidates</code> per item and never decides between them. <code>_score</code> is a 0–1 name similarity; use it together with <code>margin</code> — how far the leader stands clear of the runner-up — to decide when a match stands alone.</p>
 
     <h3>GET /stats</h3>
     <p>Runtime stats: document count, index size, memory usage, uptime, schema.</p>
@@ -2585,7 +2585,7 @@ Bulk fuzzy matching, up to 25 items — each is a separate ranked query, so the 
 ${matchExample.split('\n').slice(2).join('\n')}
 \`\`\`
 
-Returns ranked \`candidates\` per item and never decides between them. Use \`margin\` — the gap between the best candidate and the runner-up as a fraction of the top score. Do not threshold on \`_score\`; BM25 scores are not comparable across queries.
+Returns ranked \`candidates\` per item and never decides between them. \`_score\` is a 0–1 name similarity; use it together with \`margin\` — the gap between the best candidate and the runner-up as a fraction of the top score — to decide when a match stands alone.
 
 ## GET /stats
 

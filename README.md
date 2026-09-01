@@ -29,9 +29,10 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
 - **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any keyword/enum/boolean/number field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🧮 Multi-value fields & OR** — one row can hold `"LEDE,DAGL"` and match either. Pass `role=LEDE,DAGL` to OR across values on any filter. Case-insensitive by default; substring search where you want it.
-- **🔢 Real counts** — `count` is the exact number of matches for the current search state, not a capped estimate. That's the number your UI wants to print.
+- **🔢 Real counts** — `count` is the exact number of matches for the current search state, not a capped estimate. For fuzzy queries it counts plausible matches (documents sharing the query's informative trigrams), not every document that grazes a common trigram. That's the number your UI wants to print.
 - **📖 Self-documenting API** — `/fields`, `/docs`, `/openapi.json` are generated from your schema, so the docs can't drift. Unknown parameters can be rejected with a spelling suggestion instead of silently ignored.
-- **🖥 Web dashboard** — ships with a built-in search UI. Dark mode. Light mode.
+- **🏅 Ranking that reads right** — results are reranked by true string similarity against the stored value, so the exact name beats a lucky partial match and `_score` is a meaningful 0–1, not an opaque BM25 number. Two-typo queries get an automatic wider second pass.
+- **🖥 Web dashboard** — a data-table UI with sortable columns, a detail pane with the full stored document, and configurable default columns/filters (`[dashboard]` in `ruzz.toml`). Light and dark, desktop to phone.
 - **📊 Stats & health endpoints** — memory usage, index size, document count, uptime. Ready for monitoring and load balancers.
 
 ## Quickstart
@@ -142,7 +143,7 @@ curl 'localhost:8888/search?q=equinor&street=forusbeen'
 
 Substring matching needs at least 3 characters (it works on trigrams). A query that can't be satisfied returns no rows rather than everything.
 
-Enum and boolean fields are indexed as exact-match filters with canonical uppercase values:
+Enum and boolean fields are indexed as exact-match filters. Enums keep the casing the source gave them and match case-insensitively; booleans are canonicalized to `TRUE`/`FALSE`:
 
 ```toml
 { name = "currency", type = "enum", values = ["NOK", "SEK", "USD"] }
@@ -360,19 +361,27 @@ The built-in web dashboard. Try it.
 
 ## Memory Budget
 
-ruzz lets you control exactly how much RAM to dedicate to the search index:
+ruzz controls how much of the index it pre-warms into the OS page cache at startup:
 
 ```toml
-memory_budget = "100%"     # Keep everything in memory (fastest, default)
+memory_budget = "100%"     # Warm everything (fastest, default)
 memory_budget = "unlimited" # Same as 100%
-memory_budget = "2GB"       # Absolute limit
-memory_budget = "50%"       # Half the index stays warm
-memory_budget = "50MB"      # Minimal footprint, queries still work
+memory_budget = "2GB"       # Warm the hottest 2GB
+memory_budget = "50%"       # Warm half the index
+memory_budget = "50MB"      # Minimal warm-up, queries still work
 ```
 
-When budget < index size, ruzz pre-warms the most important index pages (term dictionaries, posting list heads) and lets the OS handle the rest via mmap. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
+When budget < index size, ruzz warms the structures every query touches first — term dictionaries and fast fields, then posting lists — and lets the OS page the rest in via mmap on demand. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
+
+To be clear about what this is: a warm-up, not a cap. Residency is always the OS's call — to actually bound the process's memory, use your platform's mechanism (cgroups, container limits).
 
 ## Performance
+
+> The tables below were measured on v0.1, before the query-engine rework
+> (block-WAND pruning, rare-trigram driving, similarity reranking). The
+> current engine measures 2–8x faster on the fuzzy paths at 5M–20M docs and
+> its latency is flat in query length; run `cargo bench` or your own
+> dataset for current numbers.
 
 Tested on 1.15M records (single dataset):
 
@@ -431,18 +440,17 @@ delete `target/tmp/ruzz-bench-*` to force a fixture rebuild.
 
 ## Concurrency
 
-Search runs synchronously on Tokio's async worker threads, one per core by default. Every request being a few milliseconds makes that invisible, and it is what ruzz was shaped around.
+Query work runs off the async runtime on a blocking pool, gated by a semaphore sized to the core count: a flood of requests queues instead of oversubscribing the CPUs, and the runtime always has threads free to accept connections and answer `/health` — a saturated server stays responsive rather than reading as dead to a load balancer.
 
-Long requests change the arithmetic. A `/match` batch of 25 names is 25 ranked queries and holds a worker for a few hundred milliseconds, so on a 4-core box four of them occupy every worker and short interactive searches queue behind them at the runtime level. Measured on a 1.3M-document index: 16 concurrent maximum-size `/match` clients degraded interactive p50 by 8.8x, while server-side processing time barely moved — the latency was queueing, not work. `/resolve` is far milder, because each request is tens of milliseconds rather than hundreds.
-
-If you drive bulk endpoints hard alongside interactive traffic, either keep bulk concurrency near your core count, or use smaller batches: head-of-line blocking scales with how long a single request holds a worker, so the same names per second in smaller requests cost less interactive latency.
+Bulk endpoints (`/match`, `/resolve`) share that same pool, so heavy batches compete with interactive searches for cores like any CPU-bound work — but they can no longer stall the runtime itself. If you drive maximum-size `/match` batches hard alongside interactive traffic, smaller batches still spread the load more fairly.
 
 ## Roadmap
 
 - [x] Document store — full records behind compact search rows
-- [ ] Bulk endpoints off the async workers (`spawn_blocking` + a concurrency bound)
-- [ ] Zero-downtime re-imports (generational index + store, atomic swap)
+- [x] Bulk endpoints off the async workers (`spawn_blocking` + a concurrency bound)
+- [x] Atomic re-imports — staged build + swap; a failed import leaves the previous index serving (a running server picks the new index up on restart)
 - [ ] Incremental delta imports (append/update without full rebuild)
+- [ ] Cursor-based pagination (`search_after`) beyond the 100k window
 - [ ] JSON import (native nested-document sources)
 - [ ] Direct Postgres/MySQL import
 - [ ] Disk-optimized tree index for reduced memory footprint

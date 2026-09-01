@@ -1372,7 +1372,6 @@ dependencies = [
  "criterion",
  "csv",
  "indicatif",
- "libc",
  "serde",
  "serde_json",
  "sysinfo",

@@ -25,4 +25,3 @@ clap = { version = "4", features = ["derive"] }
 sysinfo = "0.33"
 chrono = "0.4"
 anyhow = "1.0.102"
-libc = "0.2.183"
