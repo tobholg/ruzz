@@ -194,6 +194,7 @@ fn bench_config(dir: &std::path::Path) -> Arc<Config> {
             strict_params: false,
         },
         schema: SchemaConfig {
+            primary_key: None,
             fields: vec![
                 field("name", FieldType::Text, Some(SearchMode::Fuzzy)),
                 field("org_number", FieldType::Keyword, None),

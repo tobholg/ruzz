@@ -55,6 +55,13 @@ pub struct StoreMeta {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexPairing {
     pub generation: String,
+    /// Total refs ever issued against this store. After incremental updates
+    /// the index holds fewer live docs than the store holds versions, so
+    /// this — not the index doc count — is what the store must match.
+    /// Absent on indexes written before incremental updates existed; those
+    /// still require store doc count == index doc count.
+    #[serde(default)]
+    pub doc_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,6 +130,17 @@ pub struct WriterOutcome {
     pub compressed_bytes: u64,
 }
 
+/// Where the writer thread starts: fresh for a full import, mid-file for an
+/// incremental append. All counters are store totals, so the outcome always
+/// describes the whole store.
+struct WriterInit {
+    blocks: Vec<BlockEntry>,
+    offset: u64,
+    next_ref: u64,
+    raw_bytes: u64,
+    compressed_bytes: u64,
+}
+
 /// Accepts full-document bytes in ref order and writes docs.dat + blocks.idx
 /// on a background thread. `meta.json` is NOT written here — the caller writes
 /// it after the search index has committed, so a missing meta marks the store
@@ -130,24 +148,93 @@ pub struct WriterOutcome {
 pub struct StoreWriter {
     tx: Option<SyncSender<Vec<u8>>>,
     handle: Option<JoinHandle<anyhow::Result<WriterOutcome>>>,
+    first_ref: u64,
 }
 
 impl StoreWriter {
     pub fn create(dir: &Path, block_size: u64, level: i32) -> anyhow::Result<Self> {
         let docs_path = dir.join(DOCS_FILE);
-        let blocks_path = dir.join(BLOCKS_FILE);
-        let docs_file = File::create(&docs_path)
+        let mut docs_file = File::create(&docs_path)
             .with_context(|| format!("failed creating {}", docs_path.display()))?;
+        docs_file.write_all(DOCS_MAGIC)?;
 
+        let init = WriterInit {
+            blocks: Vec::new(),
+            offset: DOCS_MAGIC.len() as u64,
+            next_ref: 0,
+            raw_bytes: 0,
+            compressed_bytes: 0,
+        };
+        Self::spawn(dir, docs_file, init, block_size, level)
+    }
+
+    /// Open an existing, committed store to append documents after its
+    /// current tail. New docs continue the ref sequence at `next_ref()`.
+    /// Nothing already in the store is touched, and until the caller writes
+    /// an updated meta.json the appended tail is invisible to readers — so a
+    /// failed append leaves the store exactly as it was.
+    pub fn append_to(dir: &Path, block_size: u64, level: i32) -> anyhow::Result<Self> {
+        let meta = read_meta(dir)?;
+        let blocks = read_block_table(dir, &meta)?;
+
+        let docs_path = dir.join(DOCS_FILE);
+        let mut docs_file = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&docs_path)
+            .with_context(|| format!("failed opening {} for append", docs_path.display()))?;
+        let mut magic = [0u8; 8];
+        docs_file
+            .read_exact(&mut magic)
+            .context("docs.dat truncated")?;
+        if &magic != DOCS_MAGIC {
+            bail!("docs.dat has wrong magic");
+        }
+        // Appends land at the physical end of the file, which can sit past
+        // the last committed block if a previous append crashed before its
+        // meta.json. Offsets in the block table are explicit, so the dead
+        // gap is merely wasted bytes, not corruption.
+        let end = docs_file.metadata()?.len();
+        if let Some(last) = blocks.last() {
+            if end < last.offset + last.comp_len as u64 {
+                bail!("docs.dat is shorter than its block table describes");
+            }
+        }
+
+        let init = WriterInit {
+            blocks,
+            offset: end,
+            next_ref: meta.doc_count,
+            raw_bytes: meta.raw_bytes,
+            compressed_bytes: meta.compressed_bytes,
+        };
+        Self::spawn(dir, docs_file, init, block_size, level)
+    }
+
+    fn spawn(
+        dir: &Path,
+        docs_file: File,
+        init: WriterInit,
+        block_size: u64,
+        level: i32,
+    ) -> anyhow::Result<Self> {
+        let blocks_path = dir.join(BLOCKS_FILE);
+        let first_ref = init.next_ref;
         let (tx, rx) = sync_channel::<Vec<u8>>(CHANNEL_DEPTH);
         let handle = std::thread::Builder::new()
             .name("ruzz-store-writer".to_string())
-            .spawn(move || writer_thread(docs_file, blocks_path, rx, block_size, level))?;
+            .spawn(move || writer_thread(docs_file, blocks_path, rx, block_size, level, init))?;
 
         Ok(Self {
             tx: Some(tx),
             handle: Some(handle),
+            first_ref,
         })
+    }
+
+    /// The ref the next `add` will be stored under.
+    pub fn next_ref_start(&self) -> u64 {
+        self.first_ref
     }
 
     pub fn add(&self, doc: Vec<u8>) -> anyhow::Result<()> {
@@ -192,18 +279,18 @@ fn writer_thread(
     rx: Receiver<Vec<u8>>,
     block_size: u64,
     level: i32,
+    init: WriterInit,
 ) -> anyhow::Result<WriterOutcome> {
     let mut docs = BufWriter::with_capacity(1024 * 1024, docs_file);
-    docs.write_all(DOCS_MAGIC)?;
-    let mut offset = DOCS_MAGIC.len() as u64;
+    let mut offset = init.offset;
 
-    let mut blocks: Vec<BlockEntry> = Vec::new();
+    let mut blocks: Vec<BlockEntry> = init.blocks;
     let mut buf: Vec<u8> = Vec::with_capacity(block_size as usize + 64 * 1024);
     let mut lens: Vec<u32> = Vec::new();
-    let mut first_ref = 0u64;
-    let mut next_ref = 0u64;
-    let mut raw_bytes = 0u64;
-    let mut compressed_bytes = 0u64;
+    let mut first_ref = init.next_ref;
+    let mut next_ref = init.next_ref;
+    let mut raw_bytes = init.raw_bytes;
+    let mut compressed_bytes = init.compressed_bytes;
 
     let flush_block = |buf: &mut Vec<u8>,
                        lens: &mut Vec<u32>,
@@ -271,22 +358,21 @@ fn writer_thread(
     let docs_file = docs.into_inner().context("flushing docs.dat")?;
     docs_file.sync_all()?;
 
-    let mut idx = BufWriter::new(
-        File::create(&blocks_path)
-            .with_context(|| format!("failed creating {}", blocks_path.display()))?,
-    );
-    idx.write_all(BLOCKS_MAGIC)?;
-    idx.write_all(&FORMAT_VERSION.to_le_bytes())?;
-    idx.write_all(&(blocks.len() as u64).to_le_bytes())?;
+    // The full block table (existing + appended), written to a temp file and
+    // renamed: an append updates this file in a live store directory, and a
+    // crash mid-write must not clobber the committed table.
+    let mut raw = Vec::with_capacity(20 + blocks.len() * BLOCK_ENTRY_SIZE);
+    raw.extend_from_slice(BLOCKS_MAGIC);
+    raw.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    raw.extend_from_slice(&(blocks.len() as u64).to_le_bytes());
     for b in &blocks {
-        idx.write_all(&b.offset.to_le_bytes())?;
-        idx.write_all(&b.comp_len.to_le_bytes())?;
-        idx.write_all(&b.raw_len.to_le_bytes())?;
-        idx.write_all(&b.first_ref.to_le_bytes())?;
-        idx.write_all(&b.n_docs.to_le_bytes())?;
+        raw.extend_from_slice(&b.offset.to_le_bytes());
+        raw.extend_from_slice(&b.comp_len.to_le_bytes());
+        raw.extend_from_slice(&b.raw_len.to_le_bytes());
+        raw.extend_from_slice(&b.first_ref.to_le_bytes());
+        raw.extend_from_slice(&b.n_docs.to_le_bytes());
     }
-    let idx_file = idx.into_inner().context("flushing blocks.idx")?;
-    idx_file.sync_all()?;
+    write_atomically(&blocks_path, &raw)?;
 
     Ok(WriterOutcome {
         doc_count: next_ref,
@@ -296,23 +382,90 @@ fn writer_thread(
     })
 }
 
-pub fn write_meta(dir: &Path, meta: &StoreMeta) -> anyhow::Result<()> {
-    let path = dir.join(META_FILE);
+/// Write via a temp file + rename, fsynced, so a reader (or a crash) never
+/// sees a half-written file at `path`.
+fn write_atomically(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
     let mut file =
-        File::create(&path).with_context(|| format!("failed creating {}", path.display()))?;
-    file.write_all(serde_json::to_string_pretty(meta)?.as_bytes())?;
+        File::create(&tmp).with_context(|| format!("failed creating {}", tmp.display()))?;
+    file.write_all(contents)?;
     file.sync_all()?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed moving {} into place", path.display()))?;
     Ok(())
 }
 
-pub fn write_index_pairing(index_dir: &Path, generation: &str) -> anyhow::Result<()> {
-    let path = index_dir.join(INDEX_PAIRING_FILE);
+pub fn write_meta(dir: &Path, meta: &StoreMeta) -> anyhow::Result<()> {
+    write_atomically(
+        &dir.join(META_FILE),
+        serde_json::to_string_pretty(meta)?.as_bytes(),
+    )
+}
+
+pub fn read_meta(dir: &Path) -> anyhow::Result<StoreMeta> {
+    let meta_raw = std::fs::read_to_string(dir.join(META_FILE))
+        .with_context(|| format!("store meta missing at {}", dir.join(META_FILE).display()))?;
+    let meta: StoreMeta = serde_json::from_str(&meta_raw).context("invalid store meta.json")?;
+    if meta.format_version != FORMAT_VERSION {
+        bail!(
+            "unsupported store format version {} (expected {})",
+            meta.format_version,
+            FORMAT_VERSION
+        );
+    }
+    Ok(meta)
+}
+
+/// Load the block table, trusting meta.json over blocks.idx: an append that
+/// crashed after rewriting the table but before committing meta leaves extra
+/// trailing entries, which are simply not part of the store yet.
+fn read_block_table(dir: &Path, meta: &StoreMeta) -> anyhow::Result<Vec<BlockEntry>> {
+    let blocks_path = dir.join(BLOCKS_FILE);
+    let mut idx = File::open(&blocks_path)
+        .with_context(|| format!("failed opening {}", blocks_path.display()))?;
+    let mut header = [0u8; 20];
+    idx.read_exact(&mut header)
+        .context("blocks.idx truncated")?;
+    if &header[0..8] != BLOCKS_MAGIC {
+        bail!("blocks.idx has wrong magic");
+    }
+    let n_blocks = u64::from_le_bytes(header[12..20].try_into().unwrap());
+    if n_blocks < meta.block_count {
+        bail!(
+            "blocks.idx has {} blocks, meta.json says {}",
+            n_blocks,
+            meta.block_count
+        );
+    }
+    let mut raw = vec![0u8; meta.block_count as usize * BLOCK_ENTRY_SIZE];
+    idx.read_exact(&mut raw).context("blocks.idx truncated")?;
+
+    let mut blocks = Vec::with_capacity(meta.block_count as usize);
+    for chunk in raw.chunks_exact(BLOCK_ENTRY_SIZE) {
+        blocks.push(BlockEntry {
+            offset: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+            comp_len: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            raw_len: u32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+            first_ref: u64::from_le_bytes(chunk[16..24].try_into().unwrap()),
+            n_docs: u32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+        });
+    }
+    Ok(blocks)
+}
+
+pub fn write_index_pairing(
+    index_dir: &Path,
+    generation: &str,
+    doc_count: u64,
+) -> anyhow::Result<()> {
     let pairing = IndexPairing {
         generation: generation.to_string(),
+        doc_count: Some(doc_count),
     };
-    std::fs::write(&path, serde_json::to_string_pretty(&pairing)?)
-        .with_context(|| format!("failed writing {}", path.display()))?;
-    Ok(())
+    write_atomically(
+        &index_dir.join(INDEX_PAIRING_FILE),
+        serde_json::to_string_pretty(&pairing)?.as_bytes(),
+    )
 }
 
 pub fn read_index_pairing(index_dir: &Path) -> Option<IndexPairing> {
@@ -384,58 +537,34 @@ pub struct StoreStats {
     pub cache_misses: u64,
 }
 
-pub struct StoreReader {
-    file: File,
+/// The mutable view of the store: grows in place when an incremental update
+/// appends documents, refreshed from disk when a ref past the known end shows
+/// up (the tantivy reader picks up commits from another process on its own;
+/// this is the store-side counterpart).
+struct StoreState {
     blocks: Vec<BlockEntry>,
-    pub meta: StoreMeta,
+    meta: StoreMeta,
+}
+
+pub struct StoreReader {
+    dir: PathBuf,
+    file: File,
+    state: std::sync::RwLock<StoreState>,
     cache: Mutex<BlockCache>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Throttles refresh attempts, so a burst of unknown refs cannot turn
+    /// into a burst of meta.json reads.
+    last_refresh: Mutex<std::time::Instant>,
 }
+
+/// Minimum time between two on-disk refresh checks.
+const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl StoreReader {
     pub fn open(dir: &Path, cache_bytes: u64) -> anyhow::Result<Self> {
-        let meta_raw = std::fs::read_to_string(dir.join(META_FILE))
-            .with_context(|| format!("store meta missing at {}", dir.join(META_FILE).display()))?;
-        let meta: StoreMeta = serde_json::from_str(&meta_raw).context("invalid store meta.json")?;
-        if meta.format_version != FORMAT_VERSION {
-            bail!(
-                "unsupported store format version {} (expected {})",
-                meta.format_version,
-                FORMAT_VERSION
-            );
-        }
-
-        let blocks_path = dir.join(BLOCKS_FILE);
-        let mut idx = File::open(&blocks_path)
-            .with_context(|| format!("failed opening {}", blocks_path.display()))?;
-        let mut header = [0u8; 20];
-        idx.read_exact(&mut header)
-            .context("blocks.idx truncated")?;
-        if &header[0..8] != BLOCKS_MAGIC {
-            bail!("blocks.idx has wrong magic");
-        }
-        let n_blocks = u64::from_le_bytes(header[12..20].try_into().unwrap());
-        let mut raw = vec![0u8; n_blocks as usize * BLOCK_ENTRY_SIZE];
-        idx.read_exact(&mut raw).context("blocks.idx truncated")?;
-
-        let mut blocks = Vec::with_capacity(n_blocks as usize);
-        for chunk in raw.chunks_exact(BLOCK_ENTRY_SIZE) {
-            blocks.push(BlockEntry {
-                offset: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-                comp_len: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-                raw_len: u32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-                first_ref: u64::from_le_bytes(chunk[16..24].try_into().unwrap()),
-                n_docs: u32::from_le_bytes(chunk[24..28].try_into().unwrap()),
-            });
-        }
-        if blocks.len() as u64 != meta.block_count {
-            bail!(
-                "blocks.idx has {} blocks, meta.json says {}",
-                blocks.len(),
-                meta.block_count
-            );
-        }
+        let meta = read_meta(dir)?;
+        let blocks = read_block_table(dir, &meta)?;
 
         let docs_path = dir.join(DOCS_FILE);
         let mut file = File::open(&docs_path)
@@ -447,31 +576,82 @@ impl StoreReader {
         }
 
         Ok(Self {
+            dir: dir.to_path_buf(),
             file,
-            blocks,
-            meta,
+            state: std::sync::RwLock::new(StoreState { blocks, meta }),
             cache: Mutex::new(BlockCache::new(cache_bytes)),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            // Backdated so the first refresh attempt is never throttled.
+            last_refresh: Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(REFRESH_INTERVAL)
+                    .unwrap_or_else(std::time::Instant::now),
+            ),
         })
     }
 
     pub fn doc_count(&self) -> u64 {
-        self.meta.doc_count
+        self.state.read().unwrap().meta.doc_count
+    }
+
+    pub fn generation(&self) -> String {
+        self.state.read().unwrap().meta.generation.clone()
+    }
+
+    /// Pick up documents an incremental update appended since this reader
+    /// (last) loaded the store. Only ever moves forward within the same
+    /// generation: a full re-import swaps directories and pairs with a new
+    /// index, so this open handle keeps serving the store it was opened on.
+    fn refresh(&self) -> anyhow::Result<()> {
+        {
+            let mut last = self.last_refresh.lock().unwrap();
+            if last.elapsed() < REFRESH_INTERVAL {
+                return Ok(());
+            }
+            *last = std::time::Instant::now();
+        }
+        let current_doc_count;
+        let current_generation;
+        {
+            let state = self.state.read().unwrap();
+            current_doc_count = state.meta.doc_count;
+            current_generation = state.meta.generation.clone();
+        }
+        let Ok(meta) = read_meta(&self.dir) else {
+            return Ok(()); // store dir mid-swap or gone; keep the loaded view
+        };
+        if meta.generation != current_generation || meta.doc_count <= current_doc_count {
+            return Ok(());
+        }
+        let blocks = read_block_table(&self.dir, &meta)?;
+        let mut state = self.state.write().unwrap();
+        // Another thread may have refreshed while this one read the files.
+        if meta.doc_count > state.meta.doc_count {
+            *state = StoreState { blocks, meta };
+        }
+        Ok(())
     }
 
     /// Fetch the raw bytes of one document. Returns None for refs out of range.
     pub fn get(&self, doc_ref: u64) -> anyhow::Result<Option<Vec<u8>>> {
-        if doc_ref >= self.meta.doc_count {
+        if doc_ref >= self.state.read().unwrap().meta.doc_count {
+            // The index may have committed an update whose store tail this
+            // reader has not seen yet.
+            self.refresh()?;
+        }
+        let state = self.state.read().unwrap();
+        if doc_ref >= state.meta.doc_count {
             return Ok(None);
         }
         // Last block whose first_ref <= doc_ref
-        let idx = self
+        let idx = state
             .blocks
             .partition_point(|b| b.first_ref <= doc_ref)
             .checked_sub(1)
             .context("block table empty for non-empty store")?;
-        let entry = self.blocks[idx];
+        let entry = state.blocks[idx];
+        drop(state);
         if doc_ref >= entry.first_ref + entry.n_docs as u64 {
             bail!("ref {} falls in a gap in the block table", doc_ref);
         }
@@ -520,14 +700,15 @@ impl StoreReader {
     }
 
     pub fn stats(&self) -> StoreStats {
+        let state = self.state.read().unwrap();
         let cache = self.cache.lock().unwrap();
         StoreStats {
-            doc_count: self.meta.doc_count,
-            block_count: self.meta.block_count,
-            raw_bytes: self.meta.raw_bytes,
-            compressed_bytes: self.meta.compressed_bytes,
-            generation: self.meta.generation.clone(),
-            source_mode: self.meta.source_mode.clone(),
+            doc_count: state.meta.doc_count,
+            block_count: state.meta.block_count,
+            raw_bytes: state.meta.raw_bytes,
+            compressed_bytes: state.meta.compressed_bytes,
+            generation: state.meta.generation.clone(),
+            source_mode: state.meta.source_mode.clone(),
             cache_capacity_bytes: cache.capacity_bytes,
             cache_used_bytes: cache.used_bytes,
             cache_entries: cache.entries.len(),
@@ -664,6 +845,62 @@ mod tests {
         }
         let stats = reader.stats();
         assert!(stats.cache_used_bytes <= 10_000);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The incremental path: an append extends a committed store in place,
+    /// an uncommitted append (no meta yet) is invisible, and a reader that
+    /// was already open picks the committed tail up on its own.
+    #[test]
+    fn append_extends_the_store_and_an_open_reader_picks_it_up() {
+        let dir = temp_dir("append");
+        let doc = |i: u64| format!("{{\"id\":{i}}}").into_bytes();
+        let docs: Vec<Vec<u8>> = (0..100).map(doc).collect();
+        write_test_store(&dir, &docs, 1024);
+        let generation = read_meta(&dir).unwrap().generation;
+
+        let reader = StoreReader::open(&dir, 1024 * 1024).unwrap();
+        assert_eq!(reader.doc_count(), 100);
+        assert_eq!(reader.get(100).unwrap(), None);
+
+        let writer = StoreWriter::append_to(&dir, 1024, 1).unwrap();
+        assert_eq!(writer.next_ref_start(), 100);
+        for i in 100..150 {
+            writer.add(doc(i)).unwrap();
+        }
+        let outcome = writer.finish().unwrap();
+        assert_eq!(outcome.doc_count, 150);
+
+        // blocks.idx already lists the appended blocks, but meta.json is the
+        // commit marker: until it is rewritten, readers see the old store.
+        let stale = StoreReader::open(&dir, 0).unwrap();
+        assert_eq!(stale.doc_count(), 100);
+        assert_eq!(stale.get(120).unwrap(), None);
+        assert_eq!(stale.get(50).unwrap().unwrap(), doc(50));
+
+        let mut meta = read_meta(&dir).unwrap();
+        meta.doc_count = outcome.doc_count;
+        meta.block_count = outcome.block_count;
+        meta.raw_bytes = outcome.raw_bytes;
+        meta.compressed_bytes = outcome.compressed_bytes;
+        write_meta(&dir, &meta).unwrap();
+
+        // The reader from before the append refreshes when asked past its
+        // known end — same generation, so this is safe in place. (The get()
+        // above consumed a refresh attempt; wait out the throttle.)
+        std::thread::sleep(REFRESH_INTERVAL);
+        assert_eq!(reader.get(149).unwrap().unwrap(), doc(149));
+        assert_eq!(reader.doc_count(), 150);
+        assert_eq!(reader.get(0).unwrap().unwrap(), doc(0));
+        assert_eq!(reader.generation(), generation);
+
+        // A fresh reader sees the whole store.
+        let fresh = StoreReader::open(&dir, 0).unwrap();
+        for i in 0..150 {
+            assert_eq!(fresh.get(i).unwrap().unwrap(), doc(i), "doc {i}");
+        }
+        assert_eq!(fresh.get(150).unwrap(), None);
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

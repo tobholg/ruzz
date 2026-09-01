@@ -157,6 +157,11 @@ fn default_port() -> u16 {
 #[derive(Debug, Deserialize)]
 pub struct SchemaConfig {
     pub fields: Vec<FieldConfig>,
+    /// Keyword field that uniquely identifies a document. Setting it enables
+    /// incremental updates: `ruzz update` upserts rows by this key and
+    /// `ruzz delete` removes them, without a full re-import.
+    #[serde(default)]
+    pub primary_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -273,6 +278,23 @@ impl Config {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        if let Some(ref pk) = self.schema.primary_key {
+            let Some(fc) = self.schema.fields.iter().find(|f| &f.name == pk) else {
+                anyhow::bail!("primary_key '{}' is not a schema field", pk);
+            };
+            // Delete-by-term needs one exact indexed term per document, so
+            // the key must be a whole-value field and must not fan out.
+            if fc.field_type != FieldType::Keyword {
+                anyhow::bail!(
+                    "primary_key '{}' must be a keyword field, not {:?}",
+                    pk,
+                    fc.field_type
+                );
+            }
+            if fc.multi {
+                anyhow::bail!("primary_key '{}' cannot be a multi field", pk);
+            }
+        }
         if self.store.enabled {
             for fc in &self.schema.fields {
                 if fc.name.starts_with('_') {
@@ -369,7 +391,10 @@ mod tests {
                 auth_token: None,
                 strict_params: false,
             },
-            schema: SchemaConfig { fields: Vec::new() },
+            schema: SchemaConfig {
+                fields: Vec::new(),
+                primary_key: None,
+            },
             sources: Vec::new(),
             mappings: HashMap::new(),
             store: StoreConfig {

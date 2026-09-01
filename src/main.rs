@@ -19,6 +19,33 @@ struct Cli {
 enum Command {
     /// Import CSV sources into the index
     Import,
+    /// Upsert rows from delta CSV files into the existing index
+    ///
+    /// Needs primary_key under [schema]. Each row replaces any document
+    /// carrying the same key, in one commit — no full re-import, and a
+    /// running server picks the change up on its own.
+    Update {
+        /// Delta CSV files, in the same format as a configured source
+        files: Vec<std::path::PathBuf>,
+        /// The [[sources]] entry (by path) whose mapping and defaults the
+        /// delta files follow. Optional when only one source is configured.
+        #[arg(long)]
+        like: Option<std::path::PathBuf>,
+        /// Aligned JSONL sidecar for the delta file (required when
+        /// [store] source = "sidecar"; pairs with exactly one delta file)
+        #[arg(long)]
+        sidecar: Option<std::path::PathBuf>,
+    },
+    /// Delete documents by primary key
+    ///
+    /// Needs primary_key under [schema].
+    Delete {
+        /// Primary key values to delete
+        keys: Vec<String>,
+        /// File with one key per line, in addition to any keys given inline
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+    },
     /// Start the search API server
     Serve,
     /// Import then serve
@@ -41,6 +68,26 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Import => {
             import::run_import(&config)?;
+        }
+        Command::Update {
+            files,
+            like,
+            sidecar,
+        } => {
+            import::run_update(&config, &files, like.as_deref(), sidecar.as_deref())?;
+        }
+        Command::Delete { keys, file } => {
+            let mut keys = keys;
+            if let Some(path) = file {
+                let text = std::fs::read_to_string(&path)?;
+                keys.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from),
+                );
+            }
+            import::run_delete(&config, &keys)?;
         }
         Command::Serve => {
             serve(config).await?;

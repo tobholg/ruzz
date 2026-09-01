@@ -242,6 +242,25 @@ impl ImportFieldMetadataCollector {
         }
     }
 
+    /// Collector for an incremental update: starts from the metadata the
+    /// existing index already carries, so enum values observed by earlier
+    /// imports survive a delta that never mentions them.
+    pub fn seeded(field_configs: &[FieldConfig], existing: &StoredFieldMetadata) -> Self {
+        let mut collector = Self::new(field_configs);
+        for (name, entry) in &existing.fields {
+            let Some(enum_collector) = collector.fields.get_mut(name) else {
+                continue;
+            };
+            if entry.truncated {
+                enum_collector.truncated = true;
+            }
+            for value in &entry.values {
+                enum_collector.observe(value);
+            }
+        }
+        collector
+    }
+
     pub fn observe(&mut self, field: &FieldConfig, value: &str) {
         if field.field_type != FieldType::Enum {
             return;
@@ -341,6 +360,50 @@ mod tests {
         );
         assert_eq!(canonicalize_enum_value("dagl"), Some("dagl".to_string()));
         assert_eq!(canonicalize_enum_value("   "), None);
+    }
+
+    /// A delta import must not forget enum values earlier imports observed,
+    /// and must not resurrect a truncated field's value list.
+    #[test]
+    fn seeded_collector_keeps_existing_enum_values() {
+        let field = FieldConfig {
+            name: "region".to_string(),
+            field_type: FieldType::Enum,
+            search: None,
+            values: None,
+            max_values: Some(10),
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let fields = vec![field.clone()];
+
+        let mut existing = StoredFieldMetadata::default();
+        existing.fields.insert(
+            "region".to_string(),
+            StoredFieldMetadataEntry {
+                values: vec!["Nord".to_string(), "Vest".to_string()],
+                truncated: false,
+            },
+        );
+
+        let mut collector = ImportFieldMetadataCollector::seeded(&fields, &existing);
+        collector.observe(&field, "Sør");
+        let stored = collector.into_stored();
+        assert_eq!(
+            stored.fields["region"].values,
+            vec!["Nord", "Sør", "Vest"],
+            "existing and new values merged"
+        );
+
+        // A field that already overflowed stays truncated.
+        existing.fields.get_mut("region").unwrap().truncated = true;
+        let mut collector = ImportFieldMetadataCollector::seeded(&fields, &existing);
+        collector.observe(&field, "Sør");
+        let stored = collector.into_stored();
+        assert!(stored.fields["region"].truncated);
+        assert!(stored.fields["region"].values.is_empty());
     }
 
     #[test]
