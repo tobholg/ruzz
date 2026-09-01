@@ -102,7 +102,10 @@
   .topbar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
   .wordmark { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; white-space: nowrap; }
   .wordmark span { color: var(--accent); }
-  .index-chip { font-family: var(--mono); font-size: 10px; color: var(--text-muted); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; white-space: nowrap; }
+  /* The dataset title: same type size and box metrics as the tabs beside
+     it (their 5px padding = our 4px + 1px border), so the row reads as one
+     flush, centered line. */
+  .index-chip { font-size: 13px; font-weight: 500; color: var(--text-muted); background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 4px 10px; white-space: nowrap; }
   .tabs { display: flex; gap: 2px; margin-left: 8px; }
   .tab { font-size: 13px; color: var(--text-muted); padding: 5px 11px; border-radius: 7px; }
   .tab:hover { color: var(--text); }

@@ -21,7 +21,8 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 
 ## Features
 
-- **🔍 Fuzzy search** — typos, partial matches, unicode normalization. "amzon" finds "Amazon". Your users can't spell, and that's okay.
+- **🔍 Fuzzy search** — typos, partial matches, diacritic folding. "amzon" finds "Amazon", "sorlandet" finds "Sørlandet", "cafe" finds "Café" — composed or decomposed Unicode, either way. Your users can't spell, and that's okay.
+- **⌨️ Typeahead from the first keystroke** — one- and two-character queries match word prefixes instead of returning nothing, so a search box works from the moment someone starts typing.
 - **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
 - **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
 - **📦 Document store** *(optional)* — keep the full record behind each compact search row in a zstd-compressed on-disk store. Search stays lean and fast; `GET /doc/{ref}` returns everything, including nested JSON your CSV can't hold.
@@ -410,9 +411,9 @@ cargo bench
 To compare a change against the current state, save a baseline first:
 
 ```bash
-cargo bench -- --save-baseline before
+cargo bench --bench search -- --save-baseline before
 # ...make the change...
-cargo bench -- --baseline before
+cargo bench --bench search -- --baseline before
 ```
 
 `RUZZ_BENCH_DOCS=2000000 cargo bench` benches at a different corpus size;

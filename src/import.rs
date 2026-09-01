@@ -422,6 +422,16 @@ fn import_csv(
     }
 
     let ref_field = schema.get_field(REF_FIELD).ok();
+    let prefix_fields: HashMap<String, tantivy::schema::Field> = field_configs
+        .iter()
+        .filter(|fc| fc.search == Some(crate::config::SearchMode::Fuzzy))
+        .filter_map(|fc| {
+            schema
+                .get_field(&crate::schema::prefix_field_name(&fc.name))
+                .ok()
+                .map(|field| (fc.name.clone(), field))
+        })
+        .collect();
     let mut sidecar = match (&store_import, sidecar_path) {
         (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => Some(SidecarReader::open(sp)?),
         _ => None,
@@ -458,6 +468,12 @@ fn import_csv(
                                 metadata_collector.observe(fc, &normalized);
                             }
                             doc.add_text(field, &normalized);
+                            // Fuzzy fields feed their typeahead shadow field
+                            // the same value; the edge_prefix tokenizer does
+                            // the rest.
+                            if let Some(&prefix_field) = prefix_fields.get(&fc.name) {
+                                doc.add_text(prefix_field, &normalized);
+                            }
                         }
                     }
                 }
@@ -627,11 +643,15 @@ fn register_trigram_tokenizer(index: &tantivy::Index) {
 pub fn register_trigram_tokenizer_pub(index: &tantivy::Index) {
     use tantivy::tokenizer::*;
 
-    let tokenizer = TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).unwrap())
-        .filter(LowerCaser)
-        .build();
-
-    index.tokenizers().register("trigram", tokenizer);
+    // Folding happens inside the tokenizers, before trigramming/prefixing —
+    // see crate::analyze for why the order is load-bearing. Only affects
+    // indexing; queries build terms directly and fold on their own side.
+    index
+        .tokenizers()
+        .register("trigram", crate::analyze::FoldingTrigramTokenizer);
+    index
+        .tokenizers()
+        .register("edge_prefix", crate::analyze::EdgePrefixTokenizer);
 
     // Whole value as one token, lowercased — keyword filters match any casing
     // while the stored value keeps its original form.
@@ -738,6 +758,77 @@ org_number,company_name,city,secret_extra
             use_mapping: None,
             sidecar,
         }
+    }
+
+    /// The index-v2 behaviors, through a real import: fuzzy text folds
+    /// (diacritics, ligatures, NFC/NFD) and 1–2 character queries match
+    /// word prefixes instead of nothing.
+    #[test]
+    fn folding_and_typeahead_work_end_to_end() {
+        let dir = temp_dir("fold");
+        write_csv(
+            &dir.join("data.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             100,Sørlandet Café AS,Kristiansand,a\n\
+             200,Sæter Gård DA,Ås,b\n\
+             300,Müller Bygg AS,Oslo,c\n\
+             400,Berg Kraft AS,Bergen,d\n",
+        );
+        let config = test_config(&dir, vec![source(&dir, None)], StoreConfig::default());
+        run_import(&config).unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+
+        let count = |q: &str| {
+            engine
+                .search(
+                    q,
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+                .count
+                .unwrap()
+        };
+
+        // Diacritic folding, both directions, any casing.
+        assert_eq!(count("sorlandet"), 1, "ø folds to o");
+        assert_eq!(count("SØRLANDET"), 1, "folded query side too");
+        assert_eq!(count("cafe"), 1, "é folds to e");
+        assert_eq!(count("saeter"), 1, "æ expands to ae");
+        assert_eq!(count("muller"), 1, "ü folds to u");
+        // NFD input: "é" as e + combining acute folds like the precomposed.
+        assert_eq!(count("cafe\u{0301}"), 1);
+
+        // Typeahead: too short for a trigram, matched through word prefixes.
+        assert_eq!(count("so"), 1, "prefix of sørlandet, folded");
+        assert_eq!(count("mü"), 1, "prefix folds too");
+        assert_eq!(count("b"), 2, "bygg and berg");
+        assert_eq!(count("zz"), 0, "no word starts with zz");
+
+        // A mixed query: trigrams for the long word, a prefix for the short
+        // one — the doc matching both ranks first.
+        let mixed = engine
+            .search(
+                "berg k",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(mixed.results[0]["name"], "Berg Kraft AS");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A failed import must not cost the previous index. It used to: the
