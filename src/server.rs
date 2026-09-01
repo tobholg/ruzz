@@ -41,6 +41,9 @@ const SEARCH_CACHE_CAP: usize = 512;
 pub struct AppState {
     pub engine: SearchEngine,
     pub started_at: Instant,
+    /// Query counters and the resource-sample ring behind /activity's
+    /// search-load and resources views. Filled by `resource_sampler`.
+    pub metrics: crate::metrics::Metrics,
     /// Replayed /search responses — valid for the process lifetime because
     /// the index is: imports swap directories, and a running server only
     /// sees the new one on restart.
@@ -59,6 +62,7 @@ impl AppState {
         Self {
             engine,
             started_at: Instant::now(),
+            metrics: crate::metrics::Metrics::default(),
             search_cache: std::sync::Mutex::new(HashMap::new()),
             query_permits: tokio::sync::Semaphore::new(permits),
         }
@@ -255,6 +259,9 @@ async fn handle_search(
                 obj.insert("took_ms".to_string(), serde_json::json!(took));
                 obj.insert("cached".to_string(), serde_json::json!(true));
             }
+            state
+                .metrics
+                .record_query(started.elapsed().as_secs_f64() * 1000.0);
             return Json(value).into_response();
         }
     }
@@ -406,6 +413,9 @@ async fn handle_search(
                 }
                 cache.insert(key, value.clone());
             }
+            state
+                .metrics
+                .record_query(started.elapsed().as_secs_f64() * 1000.0);
             Json(value).into_response()
         }
         Err(e) => engine_error(e),
@@ -1224,6 +1234,13 @@ async fn handle_activity(State(state): State<Arc<AppState>>) -> Json<serde_json:
         let store = state.engine.store.as_ref().map(|store| {
             let refs_issued = store.doc_count();
             let superseded = refs_issued.saturating_sub(live_docs);
+            let stats = store.stats();
+            let cache_lookups = stats.cache_hits + stats.cache_misses;
+            let cache_hit_pct = if cache_lookups > 0 {
+                stats.cache_hits as f64 * 100.0 / cache_lookups as f64
+            } else {
+                0.0
+            };
             serde_json::json!({
                 "refs_issued": refs_issued,
                 "superseded": superseded,
@@ -1232,6 +1249,29 @@ async fn handle_activity(State(state): State<Arc<AppState>>) -> Json<serde_json:
                 } else {
                     0.0
                 },
+                "size_bytes": store_size,
+                "size_human": format_bytes(store_size),
+                "compression_ratio": stats.raw_bytes.max(1) as f64
+                    / stats.compressed_bytes.max(1) as f64,
+                "cache_hit_pct": cache_hit_pct,
+            })
+        });
+
+        // The latest ring sample plus the decimated series. Empty until the
+        // sampler has run (it fires immediately on serve).
+        let samples = state.metrics.samples(crate::metrics::MAX_POINTS_SERVED);
+        let latest = state.metrics.latest();
+        let resources = latest.map(|s| {
+            serde_json::json!({
+                "rss_bytes": s.rss_bytes,
+                "rss_human": format_bytes(s.rss_bytes),
+                "available_mem": s.available_mem,
+                "total_mem": s.total_mem,
+                "disk_free": s.disk_free,
+                "disk_total": s.disk_total,
+                "cpu_pct": s.cpu_pct,
+                "uptime_seconds": state.started_at.elapsed().as_secs(),
+                "uptime_human": format_duration(state.started_at.elapsed().as_secs()),
             })
         });
 
@@ -1240,9 +1280,17 @@ async fn handle_activity(State(state): State<Arc<AppState>>) -> Json<serde_json:
             "days": log.days,
             "total_events": log.total_events,
             "documents": live_docs,
+            "index_bytes": index_size,
+            "index_human": format_bytes(index_size),
             "disk_bytes": index_size + store_size,
             "disk_human": format_bytes(index_size + store_size),
             "store": store,
+            "resources": resources,
+            "search": {
+                "total_queries": state.metrics.total_queries(),
+                "sample_interval_secs": crate::metrics::SAMPLE_INTERVAL_SECS,
+                "samples": samples,
+            },
         })
     })
     .await;
@@ -1252,6 +1300,69 @@ async fn handle_activity(State(state): State<Arc<AppState>>) -> Json<serde_json:
 
 async fn handle_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Background task feeding the metrics ring: every SAMPLE_INTERVAL_SECS it
+/// takes one cheap, targeted sysinfo reading (this process + memory + the
+/// index volume — never the every-process walk /stats was cured of) and
+/// folds the interval's query counters into a sample. Spawned by `serve`;
+/// the ring simply stays empty when nothing spawns it (tests, embedders).
+pub async fn resource_sampler(state: Arc<AppState>) {
+    let pid = sysinfo::get_current_pid().ok();
+    // One persistent System: process CPU usage is measured between two
+    // refreshes, so a fresh System every tick would always read 0.
+    let mut sys = System::new();
+    let index_path = state
+        .engine
+        .config
+        .server
+        .index_path
+        .canonicalize()
+        .unwrap_or_else(|_| state.engine.config.server.index_path.clone());
+
+    let mut last_tick = Instant::now();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        crate::metrics::SAMPLE_INTERVAL_SECS,
+    ));
+    // First tick fires immediately, so the page has a sample from startup.
+    loop {
+        interval.tick().await;
+        sys.refresh_memory();
+        if let Some(pid) = pid {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        }
+        let process = pid.and_then(|p| sys.process(p));
+        let (disk_free, disk_total) = index_volume_space(&index_path);
+
+        let reading = crate::metrics::ResourceReading {
+            rss_bytes: process.map(|p| p.memory()).unwrap_or(0),
+            available_mem: sys.available_memory(),
+            total_mem: sys.total_memory(),
+            disk_free,
+            disk_total,
+            cpu_pct: process.map(|p| p.cpu_usage()).unwrap_or(0.0),
+        };
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let elapsed = last_tick.elapsed().as_secs_f64();
+        last_tick = Instant::now();
+        state.metrics.sample_tick(now_unix, elapsed, reading);
+    }
+}
+
+/// Free/total bytes of the volume holding the index: the disk whose mount
+/// point is the longest prefix of the index path. (0, 0) when no mount
+/// matches — the dashboard hides the disk views rather than lying.
+fn index_volume_space(index_path: &std::path::Path) -> (u64, u64) {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .iter()
+        .filter(|disk| index_path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .map(|disk| (disk.available_space(), disk.total_space()))
+        .unwrap_or((0, 0))
 }
 
 fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {

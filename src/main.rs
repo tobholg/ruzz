@@ -137,6 +137,7 @@ async fn serve(config: Arc<config::Config>) -> anyhow::Result<()> {
     let port = config.server.port;
 
     let state = Arc::new(server::AppState::new(engine));
+    tokio::spawn(server::resource_sampler(state.clone()));
 
     let app = server::create_router(state);
 

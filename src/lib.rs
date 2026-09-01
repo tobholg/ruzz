@@ -9,6 +9,7 @@ pub mod dashboard;
 pub mod field_meta;
 pub mod import;
 pub mod memory;
+pub mod metrics;
 pub mod params;
 pub mod schema;
 pub mod search;

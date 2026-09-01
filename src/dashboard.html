@@ -408,10 +408,37 @@
   .act-banner .act-sub { color: var(--text-muted); }
   .act-banner .act-src { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
   .act-banner .act-error { flex-basis: 100%; color: var(--red); font-family: var(--mono); font-size: 11.5px; }
-  .act-tiles { display: flex; gap: 28px; flex-wrap: wrap; margin: 22px 2px; font-variant-numeric: tabular-nums; }
+  /* KPI rows spread their entries equally across the card's width. */
+  .act-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 16px; margin: 22px 2px; font-variant-numeric: tabular-nums; }
   .act-tile .act-n { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; }
   .act-tile .act-n.warn { color: var(--accent-strong); }
   .act-tile .act-l { font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); margin-top: 2px; }
+  .act-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: stretch; }
+  .act-cols .act-card { margin-bottom: 0; }
+  @media (max-width: 860px) { .act-cols { grid-template-columns: 1fr; gap: 0; } .act-cols .act-card { margin-bottom: 22px; } }
+  .act-cols-wrap { margin-bottom: 22px; }
+  .rbar-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; margin: 14px 0 6px; }
+  .rbar-head:first-of-type { margin-top: 2px; }
+  .rbar-head b { font-weight: 600; }
+  .rbar-head .rbar-nums { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+  .rbar { position: relative; height: 10px; border-radius: 5px; background: color-mix(in srgb, var(--text) 7%, var(--bg)); }
+  .rbar .rbar-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 5px; background: var(--accent-fill); }
+  .rbar .rbar-seg { position: absolute; top: 0; bottom: 0; background: var(--text-dim); opacity: 0.55; }
+  .rbar .rbar-marker { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); border-radius: 1px; }
+  .rbar-note { font-size: 11.5px; color: var(--text-dim); margin-top: 6px; }
+  .rbar-legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); margin-top: 7px; flex-wrap: wrap; }
+  .rbar-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .act-mini { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 14px; font-variant-numeric: tabular-nums; }
+  .act-mini .act-n { font-size: 16px; font-weight: 600; }
+  .act-mini .act-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); margin-top: 1px; }
+  .act-mini-split { border-top: 1px solid var(--row-line); margin-top: 14px; padding-top: 12px; }
+  .act-sparks { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
+  .act-spark .act-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); }
+  .act-spark .act-n { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 1px 0 4px; }
+  .act-spark svg { width: 100%; height: 34px; display: block; }
+  .act-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+  .act-spark polygon { fill: var(--accent-tint); }
+  .act-collect { height: 34px; display: flex; align-items: center; font-size: 11px; color: var(--text-dim); }
   .act-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 22px; }
   .act-card-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: baseline; }
   .act-card-title .act-legend { display: inline-flex; align-items: center; gap: 3px; text-transform: none; letter-spacing: 0; }
@@ -2775,7 +2802,6 @@ async function buildActivity() {
       <div class="act-tile"><div class="act-n">${Number(data.documents).toLocaleString()}</div><div class="act-l">live docs</div></div>
       ${data.store ? `<div class="act-tile"><div class="act-n">${Number(data.store.refs_issued).toLocaleString()}</div><div class="act-l">refs issued</div></div>` : ''}
       ${superseded}
-      <div class="act-tile"><div class="act-n">${escAct(data.disk_human)}</div><div class="act-l">index${data.store ? ' + store' : ''} on disk</div></div>
       <div class="act-tile"><div class="act-n">${Number(data.total_events).toLocaleString()}</div><div class="act-l">operations logged</div></div>
     </div>`;
 
@@ -2801,6 +2827,8 @@ async function buildActivity() {
       </div>
       ${actHeatmap(data.days || [])}
     </div>
+    ${actResourceCards(data)}
+    ${actStoreCard(data)}
     <div class="act-card">
       <div class="act-card-title"><span>Recent operations</span></div>
       ${rows
@@ -2808,6 +2836,119 @@ async function buildActivity() {
             <thead><tr><th>when</th><th>op</th><th class="num">records</th><th class="num">took</th><th>sources</th><th>status</th></tr></thead>
             <tbody>${rows}</tbody></table></div>`
         : '<div class="act-empty">Nothing yet.</div>'}
+    </div>`;
+}
+
+function actBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function actSpark(samples, get, fmt, label) {
+  const vals = (samples || []).map(get).filter(v => v != null && Number.isFinite(v));
+  const current = vals.length ? fmt(vals[vals.length - 1]) : '—';
+  let body;
+  if (vals.length >= 2) {
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const span = (max - min) || 1;
+    const pts = vals.map((v, i) =>
+      `${((i / (vals.length - 1)) * 100).toFixed(2)},${(31 - ((v - min) / span) * 27).toFixed(2)}`);
+    body = `<svg viewBox="0 0 100 34" preserveAspectRatio="none">
+      <polygon points="0,34 ${pts.join(' ')} 100,34"></polygon>
+      <polyline points="${pts.join(' ')}"></polyline></svg>`;
+  } else {
+    body = '<div class="act-collect">collecting…</div>';
+  }
+  return `<div class="act-spark"><div class="act-l">${label}</div><div class="act-n">${current}</div>${body}</div>`;
+}
+
+/* Resources + search-load cards, side by side. Bar semantics are deliberate:
+   only disk gets a plain fill-toward-full bar (it has a real ceiling); the
+   memory bar is segmented with no alarm framing, because RSS here is mostly
+   reclaimable mmap page cache and memory_budget is a warm-up, not a cap. */
+function actResourceCards(data) {
+  const res = data.resources;
+  if (!res) return '';
+  const samples = data.search?.samples || [];
+
+  let diskBar = '';
+  if (res.disk_total > 0) {
+    const used = res.disk_total - res.disk_free;
+    const usedPct = (used / res.disk_total) * 100;
+    // A full import stages the new index beside the live one, so peak disk
+    // is roughly current usage plus one more index.
+    const peakPct = Math.min(100, ((used + (data.index_bytes || 0)) / res.disk_total) * 100);
+    diskBar = `
+      <div class="rbar-head"><b>Disk</b><span class="rbar-nums">${actBytes(used)} used · ${actBytes(res.disk_free)} free of ${actBytes(res.disk_total)}</span></div>
+      <div class="rbar"><div class="rbar-fill" style="width:${usedPct.toFixed(1)}%"></div>
+        <div class="rbar-marker" style="left:${peakPct.toFixed(1)}%" title="Peak during a full import: current usage + one index (staging + swap)"></div></div>
+      <div class="rbar-note">Marker: full-import peak — staging builds beside the live index, so keep ~one index (${escAct(data.index_human)}) of headroom.</div>`;
+  }
+
+  const rss = res.rss_bytes;
+  const procPct = res.total_mem > 0 ? (rss / res.total_mem) * 100 : 0;
+  // Some platforms (macOS via sysinfo) report no "available" figure; show
+  // only what is actually known rather than a full-looking "other" segment.
+  const hasAvail = res.available_mem > 0;
+  const otherUsed = hasAvail ? Math.max(0, res.total_mem - res.available_mem - rss) : 0;
+  const otherPct = res.total_mem > 0 ? (otherUsed / res.total_mem) * 100 : 0;
+  const memNums = hasAvail
+    ? `rss ${actBytes(rss)} · ${actBytes(res.available_mem)} available of ${actBytes(res.total_mem)}`
+    : `rss ${actBytes(rss)} of ${actBytes(res.total_mem)}`;
+  const memBar = `
+      <div class="rbar-head"><b>Memory</b><span class="rbar-nums">${memNums}</span></div>
+      <div class="rbar"><div class="rbar-fill" style="width:${procPct.toFixed(1)}%"></div>
+        ${hasAvail ? `<div class="rbar-seg" style="left:${procPct.toFixed(1)}%;width:${otherPct.toFixed(1)}%"></div>` : ''}</div>
+      <div class="rbar-legend">
+        <span><i style="background:var(--accent-fill)"></i>this process</span>
+        ${hasAvail ? `<span><i style="background:var(--text-dim);opacity:.55"></i>other</span>
+        <span><i style="background:color-mix(in srgb, var(--text) 7%, var(--bg))"></i>available</span>` : ''}
+      </div>
+      <div class="rbar-note">Mostly reclaimable index pages (mmap) — not a fill-toward-danger number.</div>`;
+
+  const miniStats = `
+      <div class="act-mini act-mini-split">
+        <div><div class="act-n">${escAct(res.uptime_human)}</div><div class="act-l">uptime</div></div>
+        <div><div class="act-n">${res.cpu_pct.toFixed(1)}%</div><div class="act-l">cpu</div></div>
+        <div><div class="act-n">${escAct(data.index_human)}</div><div class="act-l">index on disk</div></div>
+      </div>`;
+
+  const totalQueries = Number(data.search?.total_queries || 0);
+  const searchCard = `
+    <div class="act-card">
+      <div class="act-card-title"><span>Search load</span><span>${totalQueries.toLocaleString()} queries served</span></div>
+      <div class="act-sparks">
+        ${actSpark(samples, s => s.qps, v => v >= 10 ? Math.round(v).toLocaleString() : v.toFixed(1), 'queries / s')}
+        ${actSpark(samples, s => s.p95_ms, v => `${v >= 10 ? Math.round(v) : v.toFixed(1)} ms`, 'p95 latency')}
+        ${actSpark(samples, s => s.rss_bytes, actBytes, 'rss')}
+        ${actSpark(samples, s => s.disk_free, actBytes, 'disk free')}
+      </div>
+    </div>`;
+
+  return `<div class="act-cols act-cols-wrap">
+    <div class="act-card">
+      <div class="act-card-title"><span>Resources</span></div>
+      ${diskBar}${memBar}${miniStats}
+    </div>
+    ${searchCard}
+  </div>`;
+}
+
+function actStoreCard(data) {
+  if (!data.store) return '';
+  return `
+    <div class="act-card">
+      <div class="act-card-title"><span>Document store</span></div>
+      <div class="act-mini">
+        <div><div class="act-n">${escAct(data.store.size_human)}</div><div class="act-l">store on disk</div></div>
+        <div><div class="act-n">${data.store.compression_ratio.toFixed(1)}×</div><div class="act-l">compression</div></div>
+        <div><div class="act-n">${data.store.cache_hit_pct.toFixed(1)}%</div><div class="act-l">cache hit rate</div></div>
+        <div><div class="act-n">${Number(data.store.superseded).toLocaleString()}</div><div class="act-l">superseded refs</div></div>
+      </div>
     </div>`;
 }
 

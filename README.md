@@ -410,7 +410,7 @@ Runtime stats: memory, index size, document count, schema, uptime.
 
 ### `GET /activity`
 
-Operation history for monitoring: recent import/update/delete/gc events (newest first, successes and failures), per-day aggregates for the trailing year, and — with the store enabled — the superseded share a full import would reclaim. Backed by an append-only log at `<index_path>-activity.jsonl` that survives full-import swaps. This is what answers "did last night's delta actually run?"
+Operation history and server health for monitoring: recent import/update/delete/gc events (newest first, successes and failures), per-day aggregates for the trailing year, resource readings (RSS, system memory, disk free/total on the index volume, process CPU), search load (queries served, plus a ~24h in-memory ring of QPS and p95 latency samples at 15s cadence — reset on restart, deliberately not a time-series database), and — with the store enabled — its on-disk size, compression ratio, cache hit rate and the superseded share a full import would reclaim. Backed by an append-only log at `<index_path>-activity.jsonl` that survives full-import swaps. This is what answers "did last night's delta actually run?"
 
 ### `GET /health`
 
@@ -418,7 +418,7 @@ Returns `{"status": "ok"}`. For your load balancer.
 
 ### `GET /`
 
-The built-in web dashboard: a Search tab, an **Activity** tab (freshness banner, a year heatmap of records touched per day, recent operations, store dead-weight), and generated API docs. Try it.
+The built-in web dashboard: a Search tab, an **Activity** tab (freshness banner, a year heatmap of records touched per day, resource bars and load sparklines, store stats, recent operations), and generated API docs. The disk bar marks the full-import peak — staging builds beside the live index, so keep about one index of headroom — and the memory bar deliberately avoids used/max framing: RSS here is mostly reclaimable mmap page cache, and `memory_budget` is a warm-up, not a cap. Try it.
 
 ## Memory Budget
 
@@ -512,6 +512,7 @@ Bulk endpoints (`/match`, `/resolve`) share that same pool, so heavy batches com
 - [x] Atomic re-imports — staged build + swap; a failed import leaves the previous index serving (a running server picks the new index up on restart)
 - [x] Incremental delta imports — `primary_key` + `ruzz update`/`ruzz delete`, picked up by a running server without restart
 - [ ] Cursor-based pagination (`search_after`) beyond the 100k window
+- [ ] Prometheus `/metrics` endpoint — the long-term answer for resource history; the Activity tab's in-memory ring intentionally stops at ~24h
 - [x] JSONL import — native nested-document sources with dotted-path mapping; row-mode store keeps the whole record
 - [x] Activity log + dashboard Activity tab (`GET /activity`) — import/update/delete history, year heatmap, store dead-weight
 - [ ] Direct Postgres/MySQL import
