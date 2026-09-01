@@ -209,6 +209,7 @@ fn bench_config(dir: &std::path::Path) -> Arc<Config> {
             mapping,
             use_mapping: None,
             sidecar: None,
+            format: None,
         }],
         mappings: HashMap::new(),
         store: StoreConfig::default(),

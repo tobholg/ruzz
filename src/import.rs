@@ -8,7 +8,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tantivy::schema::Schema;
 use tantivy::{IndexWriter, TantivyDocument};
 
-use crate::config::{Config, FieldType, StoreSource};
+use crate::config::{Config, FieldType, SourceFormat, StoreSource};
 use crate::field_meta::{
     canonicalize_stored_value, write_stored_field_metadata, ImportFieldMetadataCollector,
 };
@@ -242,8 +242,9 @@ fn run_import_inner(config: &Config) -> anyhow::Result<ImportStats> {
         pb.set_style(style.clone());
         pb.set_prefix(file_name.clone());
 
-        let rows = import_csv(
+        let rows = import_source(
             &source.path,
+            source.resolved_format(),
             source.sidecar.as_deref(),
             &mapping,
             &source.defaults,
@@ -625,9 +626,13 @@ fn run_update_inner(
     };
 
     for path in files {
-        let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
-        let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        // The delta's own extension decides its encoding; the template only
+        // lends its mapping and defaults. A JSONL delta against a CSV source
+        // works when its keys match the mapping's column names.
+        let format = crate::config::detect_format(path);
+        let (mut reader, headers, _bytes) = RecordReader::open(path, format)?;
         let mut indexer = RowIndexer::new(
+            format,
             headers,
             &mapping,
             &template.defaults,
@@ -643,16 +648,15 @@ fn run_update_inner(
         };
 
         let mut count = 0u64;
-        let mut record = csv::StringRecord::new();
-        while rdr.read_record(&mut record)? {
-            let key = indexer.raw_value(&record, &pk_name).unwrap_or_default();
+        while let Some(record) = reader.next()? {
+            let key = indexer.raw_value(record, &pk_name).unwrap_or_default();
             if key.trim().is_empty() {
                 stats.skipped_no_key += 1;
                 continue;
             }
             writer.delete_term(pk_term(&opened, &key));
             let doc = indexer.build_doc(
-                &record,
+                record,
                 &mut metadata_collector,
                 store_import.as_mut(),
                 sidecar_reader.as_mut(),
@@ -771,13 +775,162 @@ fn run_delete_inner(config: &Config, keys: &[String]) -> anyhow::Result<u64> {
     Ok(matched)
 }
 
+/// One source record, whichever encoding it arrived in. `Copy` so it can be
+/// handed to several helpers within one loop iteration.
+#[derive(Clone, Copy)]
+enum RecordRef<'a> {
+    Csv(&'a csv::StringRecord),
+    Json(&'a serde_json::Value),
+}
+
+/// Counts raw bytes read from the underlying file — before any decompression
+/// or parsing — so progress bars track the on-disk file whatever the format.
+struct ByteCounter<R> {
+    inner: R,
+    count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl<R: std::io::Read> std::io::Read for ByteCounter<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+/// Streams records out of one source file, CSV or JSONL.
+enum RecordReader {
+    Csv {
+        rdr: csv::Reader<Box<dyn std::io::Read>>,
+        record: csv::StringRecord,
+    },
+    Jsonl {
+        reader: std::io::BufReader<Box<dyn std::io::Read>>,
+        line: String,
+        value: serde_json::Value,
+        line_no: u64,
+        label: String,
+    },
+}
+
+impl RecordReader {
+    /// Open a source. Returns the reader, the CSV header row (empty for
+    /// JSONL, which addresses values by path instead), and the byte counter
+    /// driving the progress bar.
+    fn open(
+        path: &Path,
+        format: SourceFormat,
+    ) -> anyhow::Result<(
+        Self,
+        Vec<String>,
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+    )> {
+        let file =
+            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let raw: Box<dyn std::io::Read> = Box::new(ByteCounter {
+            inner: file,
+            count: std::sync::Arc::clone(&count),
+        });
+        Self::from_reader(raw, format, &path.display().to_string(), count)
+    }
+
+    fn from_reader(
+        raw: Box<dyn std::io::Read>,
+        format: SourceFormat,
+        label: &str,
+        count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> anyhow::Result<(
+        Self,
+        Vec<String>,
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+    )> {
+        match format {
+            SourceFormat::Csv => {
+                let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(raw);
+                let headers: Vec<String> = rdr
+                    .headers()
+                    .with_context(|| format!("reading CSV header of {}", label))?
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                Ok((
+                    Self::Csv {
+                        rdr,
+                        record: csv::StringRecord::new(),
+                    },
+                    headers,
+                    count,
+                ))
+            }
+            SourceFormat::Jsonl => Ok((
+                Self::Jsonl {
+                    reader: std::io::BufReader::with_capacity(256 * 1024, raw),
+                    line: String::new(),
+                    value: serde_json::Value::Null,
+                    line_no: 0,
+                    label: label.to_string(),
+                },
+                Vec::new(),
+                count,
+            )),
+        }
+    }
+
+    fn next(&mut self) -> anyhow::Result<Option<RecordRef<'_>>> {
+        match self {
+            Self::Csv { rdr, record } => Ok(if rdr.read_record(record)? {
+                Some(RecordRef::Csv(record))
+            } else {
+                None
+            }),
+            Self::Jsonl {
+                reader,
+                line,
+                value,
+                line_no,
+                label,
+            } => loop {
+                line.clear();
+                if std::io::BufRead::read_line(reader, line)? == 0 {
+                    return Ok(None);
+                }
+                *line_no += 1;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue; // blank lines are tolerated, not records
+                }
+                *value = serde_json::from_str(trimmed)
+                    .with_context(|| format!("{} line {} is not valid JSON", label, line_no))?;
+                return Ok(Some(RecordRef::Json(value)));
+            },
+        }
+    }
+}
+
+/// A JSON scalar as the string the rest of the pipeline works in. Arrays and
+/// objects have no single-value form and return None; so does null, which
+/// means "missing", not "the string null".
+fn json_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Per-source machinery shared by full imports and delta updates: turns one
-/// CSV record into an index document (and, with the store enabled, the full
-/// document behind it).
+/// source record into an index document (and, with the store enabled, the
+/// full document behind it).
 struct RowIndexer<'a> {
     headers: Vec<String>,
-    /// schema_field_name → csv_column_index
+    /// CSV: schema_field_name → csv_column_index
     col_indices: HashMap<String, usize>,
+    /// JSONL: schema_field_name → path segments into the document. Every
+    /// schema field has an entry — unmapped fields default to their own name.
+    json_paths: HashMap<String, Vec<String>>,
     defaults: &'a HashMap<String, String>,
     field_configs: &'a [crate::config::FieldConfig],
     field_map: &'a HashMap<String, tantivy::schema::Field>,
@@ -788,6 +941,7 @@ struct RowIndexer<'a> {
 
 impl<'a> RowIndexer<'a> {
     fn new(
+        format: SourceFormat,
         headers: Vec<String>,
         mapping: &HashMap<String, String>,
         defaults: &'a HashMap<String, String>,
@@ -796,9 +950,23 @@ impl<'a> RowIndexer<'a> {
         field_configs: &'a [crate::config::FieldConfig],
     ) -> Self {
         let mut col_indices: HashMap<String, usize> = HashMap::new();
-        for (schema_name, csv_col_name) in mapping {
-            if let Some(idx) = headers.iter().position(|h| h == csv_col_name) {
-                col_indices.insert(schema_name.clone(), idx);
+        let mut json_paths: HashMap<String, Vec<String>> = HashMap::new();
+        match format {
+            SourceFormat::Csv => {
+                for (schema_name, csv_col_name) in mapping {
+                    if let Some(idx) = headers.iter().position(|h| h == csv_col_name) {
+                        col_indices.insert(schema_name.clone(), idx);
+                    }
+                }
+            }
+            SourceFormat::Jsonl => {
+                for fc in field_configs {
+                    let path = mapping
+                        .get(&fc.name)
+                        .map(String::as_str)
+                        .unwrap_or(&fc.name);
+                    json_paths.insert(fc.name.clone(), path.split('.').map(String::from).collect());
+                }
             }
         }
 
@@ -817,6 +985,7 @@ impl<'a> RowIndexer<'a> {
         Self {
             headers,
             col_indices,
+            json_paths,
             defaults,
             field_configs,
             field_map,
@@ -826,18 +995,57 @@ impl<'a> RowIndexer<'a> {
         }
     }
 
-    /// The raw cell for a schema field: CSV column first, then source default.
-    fn raw_value(&self, record: &csv::StringRecord, name: &str) -> Option<String> {
-        self.col_indices
-            .get(name)
-            .and_then(|&idx| record.get(idx))
-            .map(|s| s.to_string())
-            .or_else(|| self.defaults.get(name).cloned())
+    /// Navigate a JSON document to a schema field's value. None for missing
+    /// and for null — both mean "fall back to the source default".
+    fn json_value<'v>(
+        &self,
+        root: &'v serde_json::Value,
+        name: &str,
+    ) -> Option<&'v serde_json::Value> {
+        let mut current = root;
+        for segment in self.json_paths.get(name)? {
+            current = current.get(segment)?;
+        }
+        if current.is_null() {
+            None
+        } else {
+            Some(current)
+        }
+    }
+
+    /// The raw scalar for a schema field: record value first, then source
+    /// default. What primary keys and numeric fields read.
+    fn raw_value(&self, record: RecordRef, name: &str) -> Option<String> {
+        match record {
+            RecordRef::Csv(rec) => self
+                .col_indices
+                .get(name)
+                .and_then(|&idx| rec.get(idx))
+                .map(|s| s.to_string()),
+            RecordRef::Json(root) => self.json_value(root, name).and_then(json_scalar),
+        }
+        .or_else(|| self.defaults.get(name).cloned())
+    }
+
+    /// The indexable values a record contributes to a text-like field. A
+    /// JSON array feeds a multi field its elements directly; a scalar (from
+    /// either format) is split by the field's separator when `multi`.
+    fn text_values(&self, record: RecordRef, fc: &crate::config::FieldConfig) -> Vec<String> {
+        if let RecordRef::Json(root) = record {
+            if let Some(serde_json::Value::Array(items)) = self.json_value(root, &fc.name) {
+                return items.iter().filter_map(json_scalar).collect();
+            }
+        }
+        let value = self.raw_value(record, &fc.name).unwrap_or_default();
+        fc.split_values(&value)
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     fn build_doc(
         &mut self,
-        record: &csv::StringRecord,
+        record: RecordRef,
         metadata_collector: &mut ImportFieldMetadataCollector,
         store_import: Option<&mut StoreImport>,
         sidecar: Option<&mut SidecarReader>,
@@ -850,14 +1058,12 @@ impl<'a> RowIndexer<'a> {
                 None => continue,
             };
 
-            let value = self.raw_value(record, &fc.name).unwrap_or_default();
-
             match fc.field_type {
                 FieldType::Text | FieldType::Keyword | FieldType::Enum | FieldType::Boolean => {
                     // A multi field contributes one term per element, so a
                     // document can match a filter for any of them.
-                    for part in fc.split_values(&value) {
-                        if let Some(normalized) = canonicalize_stored_value(fc, part)? {
+                    for part in self.text_values(record, fc) {
+                        if let Some(normalized) = canonicalize_stored_value(fc, &part)? {
                             if fc.field_type == FieldType::Enum {
                                 metadata_collector.observe(fc, &normalized);
                             }
@@ -876,6 +1082,7 @@ impl<'a> RowIndexer<'a> {
                     // zero. Storing 0.0 for it (as this used to) made every
                     // missing revenue match revenue_max=10, sort as the
                     // smallest value, and equal a genuine zero.
+                    let value = self.raw_value(record, &fc.name).unwrap_or_default();
                     let trimmed = value.trim();
                     if !trimmed.is_empty() {
                         match trimmed.parse::<f64>() {
@@ -893,7 +1100,10 @@ impl<'a> RowIndexer<'a> {
                 doc.add_u64(rf, doc_ref);
             }
             let full = match store_import.mode {
-                StoreSource::Row => build_row_doc(&self.headers, record, self.defaults),
+                StoreSource::Row => match record {
+                    RecordRef::Csv(rec) => build_row_doc(&self.headers, rec, self.defaults),
+                    RecordRef::Json(root) => build_json_row_doc(root, self.defaults),
+                },
                 StoreSource::Sidecar => sidecar
                     .expect("sidecar reader opened for sidecar mode")
                     .next_line()?,
@@ -917,8 +1127,9 @@ impl<'a> RowIndexer<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn import_csv(
+fn import_source(
     path: &Path,
+    format: SourceFormat,
     sidecar_path: Option<&Path>,
     mapping: &HashMap<String, String>,
     defaults: &HashMap<String, String>,
@@ -930,10 +1141,16 @@ fn import_csv(
     mut store_import: Option<&mut StoreImport>,
     pb: &ProgressBar,
 ) -> anyhow::Result<u64> {
-    let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
-
-    let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
-    let mut indexer = RowIndexer::new(headers, mapping, defaults, schema, field_map, field_configs);
+    let (mut reader, headers, bytes_read) = RecordReader::open(path, format)?;
+    let mut indexer = RowIndexer::new(
+        format,
+        headers,
+        mapping,
+        defaults,
+        schema,
+        field_map,
+        field_configs,
+    );
 
     let mut sidecar = match (&store_import, sidecar_path) {
         (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => Some(SidecarReader::open(sp)?),
@@ -941,11 +1158,9 @@ fn import_csv(
     };
 
     let mut count = 0u64;
-    let mut record = csv::StringRecord::new();
-
-    while rdr.read_record(&mut record)? {
+    while let Some(record) = reader.next()? {
         let doc = indexer.build_doc(
-            &record,
+            record,
             metadata_collector,
             store_import.as_deref_mut(),
             sidecar.as_mut(),
@@ -954,7 +1169,7 @@ fn import_csv(
         count += 1;
 
         if count.is_multiple_of(10_000) {
-            pb.set_position(rdr.position().byte());
+            pb.set_position(bytes_read.load(std::sync::atomic::Ordering::Relaxed));
         }
     }
 
@@ -964,7 +1179,7 @@ fn import_csv(
 
     indexer.report_bad_number_cells(path);
 
-    pb.set_position(rdr.position().byte());
+    pb.set_position(bytes_read.load(std::sync::atomic::Ordering::Relaxed));
     Ok(count)
 }
 
@@ -986,6 +1201,24 @@ fn build_row_doc(
         }
     }
     serde_json::to_vec(&serde_json::Value::Object(obj)).expect("string map serializes")
+}
+
+/// Row-mode full document for a JSONL record: the document itself, with
+/// source defaults merged at the top level where absent. Nested structure
+/// survives — this is what makes a JSONL source its own sidecar.
+fn build_json_row_doc(root: &serde_json::Value, defaults: &HashMap<String, String>) -> Vec<u8> {
+    match root {
+        serde_json::Value::Object(obj) => {
+            let mut merged = obj.clone();
+            for (key, value) in defaults {
+                if !merged.contains_key(key) {
+                    merged.insert(key.clone(), serde_json::Value::String(value.clone()));
+                }
+            }
+            serde_json::to_vec(&serde_json::Value::Object(merged)).expect("object serializes")
+        }
+        other => serde_json::to_vec(other).expect("value serializes"),
+    }
 }
 
 /// Reads an aligned JSONL sidecar in lockstep with CSV rows: line i is the
@@ -1202,6 +1435,7 @@ org_number,company_name,city,secret_extra
             ]),
             use_mapping: None,
             sidecar,
+            format: None,
         }
     }
 
@@ -1383,6 +1617,7 @@ org_number,company_name,city,secret_extra
                 ]),
                 use_mapping: None,
                 sidecar: None,
+                format: None,
             }],
             mappings: HashMap::new(),
             store: StoreConfig::default(),
@@ -1765,6 +2000,162 @@ org_number,company_name,city,secret_extra
         assert_eq!(engine.store_status, StoreStatus::Ok);
         assert_eq!(count_of(&engine, "deluxe"), 1);
         assert_eq!(count_of(&engine, ""), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// JSONL as a first-class source: dotted-path mapping, unmapped fields
+    /// defaulting to their own name, arrays feeding multi fields, real JSON
+    /// number/bool/null types, and — with the store in row mode — the record
+    /// itself as the full document, nested structure intact, defaults merged.
+    #[test]
+    fn jsonl_source_end_to_end() {
+        let dir = temp_dir("jsonl");
+        std::fs::write(
+            dir.join("data.jsonl"),
+            r#"{"navn":"Acme Rockets","org":"100","roles":["LEDE","DAGL"],"revenue":1234.5,"address":{"city":"Oslo"},"history":[{"year":2024,"event":"founded"}]}
+{"navn":"Beta Bakery","org":"200","roles":"CHAIR, CEO","revenue":null,"address":{"city":"Bergen"}}
+
+{"navn":"Gamma Gruppen","org":"300","revenue":0}
+"#,
+        )
+        .unwrap();
+
+        let field = |name: &str, ft: FieldType, multi: bool| FieldConfig {
+            name: name.to_string(),
+            field_type: ft,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 0,
+                index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: vec![
+                    text_field("name", true),
+                    field("org_number", FieldType::Keyword, false),
+                    field("country_code", FieldType::Keyword, false),
+                    field("city", FieldType::Keyword, false),
+                    field("roles", FieldType::Keyword, true),
+                    field("revenue", FieldType::Number, false),
+                ],
+            },
+            sources: vec![SourceConfig {
+                path: dir.join("data.jsonl"),
+                defaults: HashMap::from([("country_code".to_string(), "NO".to_string())]),
+                mapping: HashMap::from([
+                    ("name".to_string(), "navn".to_string()),
+                    ("org_number".to_string(), "org".to_string()),
+                    ("city".to_string(), "address.city".to_string()),
+                ]),
+                use_mapping: None,
+                sidecar: None,
+                format: None, // detected from the extension
+            }],
+            mappings: HashMap::new(),
+            store: StoreConfig {
+                enabled: true,
+                ..StoreConfig::default()
+            },
+            dashboard: DashboardConfig::default(),
+        });
+
+        let stats = run_import(&config).unwrap();
+        assert_eq!(stats.total_rows, 3, "blank line is not a record");
+
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+        let filtered = |key: &str, value: &str| {
+            engine
+                .search(
+                    "",
+                    &HashMap::from([(key.to_string(), value.to_string())]),
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // Dotted-path mapping reaches into nested objects.
+        assert_eq!(filtered("city", "Bergen").count, Some(1));
+        // A JSON array feeds a multi field its elements; a comma string in a
+        // multi field still splits like CSV.
+        assert_eq!(filtered("roles", "DAGL").count, Some(1));
+        assert_eq!(filtered("roles", "CEO").count, Some(1));
+        // Top-level defaults apply to every record.
+        assert_eq!(filtered("country_code", "NO").count, Some(3));
+        // JSON null is a missing number; 0 is a value.
+        assert_eq!(filtered("revenue", "0").count, Some(1));
+        let acme = filtered("org_number", "100");
+        assert_eq!(acme.results[0]["revenue"], serde_json::json!(1234.5));
+        let beta = filtered("org_number", "200");
+        assert_eq!(beta.results[0]["revenue"], serde_json::Value::Null);
+
+        // Row-mode store: the record is its own full document — nested
+        // structure survives, defaults merged at the top level.
+        let doc_ref = acme.results[0]["_ref"].as_u64().unwrap();
+        let full: serde_json::Value =
+            serde_json::from_str(&engine.get_full(doc_ref).unwrap().unwrap()).unwrap();
+        assert_eq!(full["history"][0]["event"], "founded");
+        assert_eq!(full["address"]["city"], "Oslo");
+        assert_eq!(full["country_code"], "NO");
+
+        // And a JSONL delta upserts against it.
+        drop(engine);
+        std::fs::write(
+            dir.join("delta.jsonl"),
+            "{\"navn\":\"Acme Rockets International\",\"org\":\"100\",\"address\":{\"city\":\"Oslo\"}}\n",
+        )
+        .unwrap();
+        run_update(&config, &[dir.join("delta.jsonl")], None, None).unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(count_of(&engine, "international"), 1);
+        assert_eq!(count_of(&engine, ""), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A JSONL delta against a CSV source: the template's mapping values
+    /// double as top-level keys in the delta's documents.
+    #[test]
+    fn jsonl_delta_against_csv_source() {
+        let dir = temp_dir("jsonl-delta");
+        write_csv(&dir.join("data.csv"), CSV);
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+
+        std::fs::write(
+            dir.join("delta.jsonl"),
+            "{\"company_name\":\"Acme via JSON\",\"org_number\":\"100\"}\n",
+        )
+        .unwrap();
+        run_update(&config, &[dir.join("delta.jsonl")], None, None).unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(count_of(&engine, "via json"), 1);
+        assert_eq!(count_of(&engine, ""), 3, "upsert, not append");
 
         let _ = std::fs::remove_dir_all(dir);
     }
