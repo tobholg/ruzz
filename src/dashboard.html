@@ -1459,6 +1459,9 @@ function bindSettingsModalEvents() {
   document.getElementById('settings-modal')?.addEventListener('click', event => {
     if (event.target === document.getElementById('settings-modal')) closeSettingsModal();
   });
+  // A fixed-position picker menu would drift from its trigger as the
+  // filters grid scrolls under it — close instead, the standard behavior.
+  document.querySelector('.settings-filters-scroll')?.addEventListener('scroll', closeAllPickers);
 }
 
 /* ── pickers ── */
@@ -1566,6 +1569,19 @@ function openPicker(picker, searchInput) {
   const trigger = picker.querySelector('.picker-trigger');
   if (menu) menu.hidden = false;
   if (trigger) trigger.setAttribute('aria-expanded', 'true');
+  // Inside the settings modal the picker sits in a scroll container whose
+  // overflow clips absolutely-positioned menus at the bottom edge. Fixed
+  // positioning escapes the clip (the backdrop-filtered overlay is the
+  // containing block, which spans the viewport), flipping above the
+  // trigger when there is no room below.
+  if (menu && trigger && picker.closest('.settings-filters-scroll')) {
+    const rect = trigger.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.left = Math.max(8, Math.min(rect.left - 12, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+    const below = rect.bottom + 8;
+    const fitsBelow = below + menu.offsetHeight <= window.innerHeight - 8;
+    menu.style.top = (fitsBelow ? below : Math.max(8, rect.top - 8 - menu.offsetHeight)) + 'px';
+  }
   if (searchInput) {
     searchInput.value = '';
     searchInput.dispatchEvent(new Event('input'));
@@ -1577,7 +1593,12 @@ function closePicker(picker) {
   picker.classList.remove('open');
   const menu = picker.querySelector('.picker-menu');
   const trigger = picker.querySelector('.picker-trigger');
-  if (menu) menu.hidden = true;
+  if (menu) {
+    menu.hidden = true;
+    menu.style.position = '';
+    menu.style.left = '';
+    menu.style.top = '';
+  }
   if (trigger) trigger.setAttribute('aria-expanded', 'false');
 }
 
