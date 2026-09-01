@@ -24,9 +24,10 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **🔍 Fuzzy search** — typos, partial matches, diacritic folding. "amzon" finds "Amazon", "sorlandet" finds "Sørlandet", "cafe" finds "Café" — composed or decomposed Unicode, either way. Your users can't spell, and that's okay.
 - **⌨️ Typeahead from the first keystroke** — one- and two-character queries match word prefixes instead of returning nothing, so a search box works from the moment someone starts typing.
 - **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
-- **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
+- **📁 CSV & JSONL import** — point at your files (gzipped is fine), define a mapping, done. Multiple files with different schemas? Different column names? Nested JSON addressed by dotted paths? Handled. `ruzz import --check` dry-runs the lot first.
 - **📦 Document store** *(optional)* — keep the full record behind each compact search row in a zstd-compressed on-disk store. Search stays lean and fast; `GET /doc/{ref}` returns everything, including nested JSON your CSV can't hold.
-- **🔁 Incremental updates** — name a `primary_key` and ship deltas: `ruzz update changed.csv` upserts by key, `ruzz delete <key>` removes, and a running server picks both up in moments without a restart or full rebuild.
+- **🔁 Incremental updates** — name a `primary_key` and ship deltas: `ruzz update changed.csv` (or `curl … | ruzz update -`) upserts by key, `ruzz delete <key>` removes, and a running server picks both up in moments without a restart or full rebuild.
+- **📈 Activity monitoring** — every import, update and delete is logged; the dashboard's Activity tab shows a year heatmap of records touched, recent operations with failures front and center, and how much superseded store weight a full import would reclaim (also as `GET /activity`).
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
 - **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any keyword/enum/boolean/number field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🧮 Multi-value fields & OR** — one row can hold `"LEDE,DAGL"` and match either. Pass `role=LEDE,DAGL` to OR across values on any filter. Case-insensitive by default; substring search where you want it.
@@ -154,6 +155,25 @@ Enum and boolean fields are indexed as exact-match filters. Enums keep the casin
 
 `values = "auto"` discovers low-cardinality enum values during import. The initial default cap is `128` distinct values per auto-enum field.
 
+## JSONL sources
+
+Sources can be JSONL/NDJSON — one JSON document per line — instead of CSV. The format follows the file extension (`.jsonl`, `.ndjson`, optionally behind `.gz`), or set `format = "jsonl"` explicitly. The same `mapping` table applies, but values are dotted paths into the document, and a schema field with no mapping entry defaults to its own name:
+
+```toml
+[[sources]]
+path = "data/enheter.jsonl.gz"
+defaults = { country_code = "NO" }
+mapping = { name = "navn", org_number = "organisasjonsnummer", city = "forretningsadresse.poststed" }
+```
+
+JSON types map with less guessing than CSV strings: `null` is a missing value (not `""` or `0`), numbers and booleans canonicalize directly, and an array feeds a `multi` field its elements — no separator splitting needed. With the document store in row mode, the record *itself* is the stored full document (source `defaults` merged at the top level), so nested structures survive without a sidecar file — for nested documents, a JSONL source is the recommended replacement for the CSV + sidecar combination.
+
+Gzipped input works for CSV too: any source or delta ending `.gz` streams through a decoder during import.
+
+## Checking sources before importing
+
+`ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught. Exits non-zero if the real import would fail.
+
 ## Incremental updates
 
 A full import rebuilds everything. When only some rows changed, name a primary key and ship a delta instead:
@@ -173,13 +193,21 @@ ruzz delete 936512054 987654321
 ruzz delete --file data/removed_ids.txt
 ```
 
-Delta files use the same format as a configured source. With one `[[sources]]` entry its mapping and defaults apply automatically; with several, say which one the delta follows: `ruzz update delta.csv --like data/companies_us.csv`. When the store runs in sidecar mode, pass the delta's aligned JSONL with `--sidecar`.
+Delta files are CSV or JSONL (detected per file, gzipped fine) in the same shape as a configured source. With one `[[sources]]` entry its mapping and defaults apply automatically; with several, an unambiguous delta is matched to its source by column set — and when that's ambiguous, say which one it follows: `ruzz update delta.csv --like data/companies_us.csv`. When the store runs in sidecar mode, pass the delta's aligned JSONL with `--sidecar`.
+
+Deltas can also arrive on stdin, which makes a cron pipeline a one-liner:
+
+```bash
+curl -s https://example.com/todays-changes.csv | ruzz update -
+```
+
+Stdin has no extension to sniff, so it follows the matched source's format; `--format csv|jsonl` overrides.
 
 Updates commit into the live index in place — no staging rebuild, no swap. A running server picks the change up by itself within a moment: search results, counts and full-document hydration all reflect the delta with no restart. Keys match the way the field filters (case-insensitively unless the field is `case_sensitive`), and a delta row with an empty key is skipped, not indexed.
 
 Two things to know:
 
-- **The store only grows between full imports.** An upsert appends the new version of the document and abandons the old one's bytes, so a deployment that updates the same rows many times over accumulates dead store space. The next full import rewrites everything compactly. Dead index-side segments are merged and collected automatically as updates commit.
+- **The store only grows between full imports.** An upsert appends the new version of the document and abandons the old one's bytes, so a deployment that updates the same rows many times over accumulates dead store space. The next full import rewrites everything compactly — the dashboard's Activity tab (and `GET /activity`) shows the superseded share, so you'll know when it's worth it. Dead index-side segments are merged and collected automatically as updates commit.
 - **A changed schema needs a full import.** `ruzz update` refuses to run when the config's schema no longer matches the one the index was built with, rather than writing rows the rest of the index disagrees with.
 
 ## Document store (optional)
@@ -201,7 +229,7 @@ The store lives next to the index and is named after it — `data/output/index` 
 Two ways to say what "full" means:
 
 - **`source = "row"`** — the full document is every CSV column (original names, including columns you never mapped into the schema) plus the source's `defaults`, stored as JSON. Zero extra files.
-- **`source = "sidecar"`** — each source brings an aligned JSONL file: line *i* is the full document for CSV row *i*, stored byte-for-byte. This is how you store *nested* documents (arrays, objects, history) that a CSV can't represent:
+- **`source = "sidecar"`** — each source brings an aligned JSONL file: line *i* is the full document for CSV row *i*, stored byte-for-byte. This is the legacy way to store *nested* documents that a CSV can't represent — for new setups, prefer a [JSONL source](#jsonl-sources), where the record is its own full document and there's no alignment to maintain:
 
 ```toml
 [[sources]]
@@ -380,13 +408,17 @@ The two-step flow is the intended default: fast fuzzy `/search` (compact rows), 
 
 Runtime stats: memory, index size, document count, schema, uptime.
 
+### `GET /activity`
+
+Operation history for monitoring: recent import/update/delete/gc events (newest first, successes and failures), per-day aggregates for the trailing year, and — with the store enabled — the superseded share a full import would reclaim. Backed by an append-only log at `<index_path>-activity.jsonl` that survives full-import swaps. This is what answers "did last night's delta actually run?"
+
 ### `GET /health`
 
 Returns `{"status": "ok"}`. For your load balancer.
 
 ### `GET /`
 
-The built-in web dashboard. Try it.
+The built-in web dashboard: a Search tab, an **Activity** tab (freshness banner, a year heatmap of records touched per day, recent operations, store dead-weight), and generated API docs. Try it.
 
 ## Memory Budget
 
@@ -480,7 +512,8 @@ Bulk endpoints (`/match`, `/resolve`) share that same pool, so heavy batches com
 - [x] Atomic re-imports — staged build + swap; a failed import leaves the previous index serving (a running server picks the new index up on restart)
 - [x] Incremental delta imports — `primary_key` + `ruzz update`/`ruzz delete`, picked up by a running server without restart
 - [ ] Cursor-based pagination (`search_after`) beyond the 100k window
-- [ ] JSON import (native nested-document sources)
+- [x] JSONL import — native nested-document sources with dotted-path mapping; row-mode store keeps the whole record
+- [x] Activity log + dashboard Activity tab (`GET /activity`) — import/update/delete history, year heatmap, store dead-weight
 - [ ] Direct Postgres/MySQL import
 - [ ] Disk-optimized tree index for reduced memory footprint
 

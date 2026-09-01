@@ -33,6 +33,8 @@ fields = [
     { name = "dissolving", type = "boolean" },
 ]
 
+# Sources may be CSV or JSONL (.jsonl/.ndjson, optionally .gz) — for JSONL,
+# mapping values are dotted paths into each document.
 [[sources]]
 path = "data/enheter_no.csv"
 defaults = { country_code = "NO" }
