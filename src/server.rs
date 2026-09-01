@@ -924,13 +924,12 @@ async fn handle_match(State(state): State<Arc<AppState>>, body: axum::body::Byte
                         "id": item.id,
                         "status": if found.results.is_empty() { "not_found" } else { "candidates" },
                         "returned": found.results.len(),
-                        // Relative distance between the best candidate and the
-                        // runner-up. BM25 scores are not comparable across
-                        // queries, so an absolute score is not a confidence
-                        // signal and thresholding on one is a classic linkage
-                        // bug; the gap within a single ranking is meaningful.
-                        // 1.0 means the leader stands alone, near 0 means a
-                        // tie the caller should look at.
+                        // Relative distance between the best candidate and
+                        // the runner-up. _score is a 0-1 name similarity
+                        // since the rerank stage, so it carries meaning on
+                        // its own now; margin still says whether the leader
+                        // stands alone (1.0) or sits in a tie the caller
+                        // should look at (~0).
                         "margin": top_margin(&found.results),
                         "candidates": found.results,
                     }));

@@ -47,7 +47,7 @@ fn control(
 /// Control parameters that exist regardless of schema.
 pub fn control_params(store_enabled: bool) -> Vec<ParamSpec> {
     let mut specs = vec![
-        control("q", "string", "Fuzzy full-text query across all fuzzy-search fields. Typo tolerant.", Some("q=amazn")),
+        control("q", "string", "Fuzzy full-text query across all fuzzy-search fields. Typo tolerant and diacritic-folding (\"cafe\" matches \"Café\"); one- and two-character queries match word prefixes for typeahead.", Some("q=amazn")),
         control("limit", "integer", "Rows to return (1-1000, default 20).", Some("limit=50")),
         control("offset", "integer", "Rows to skip for paging. offset + limit must be <= 100000.", Some("offset=100")),
         control("sort_by", "string", "Field to sort by (keyword, enum, boolean or number fields). Omit for relevance order.", Some("sort_by=revenue")),
@@ -309,7 +309,10 @@ within one parameter widen it (OR).\n\n",
         "- `total` — deprecated alias of `returned`; use `count` for the number of matches.\n",
     );
     out.push_str(
-        "- `_score` on each row — relevance, driven by `q` only. Filters never affect ranking.\n\n",
+        "- `_score` on each row — relevance, driven by `q` only; for fuzzy queries it is a 0–1 name similarity between the query and the matched value. Filters never affect ranking.\n",
+    );
+    out.push_str(
+        "- `cached` — present and true when the response was replayed from the server's per-process cache (identical repeated requests).\n\n",
     );
 
     let section = |title: &str, kind: &str, out: &mut String| {
@@ -499,7 +502,7 @@ pub fn openapi(engine: &SearchEngine) -> serde_json::Value {
             "/match": {
                 "post": {
                     "summary": "Bulk fuzzy matching, max 25 items",
-                    "description": "Ranked candidate matching for names. Returns candidates for the caller to choose between and never decides. Reports no match count by design: trigram matching gives nearly every document a weak score, so the number runs to hundreds of thousands and means nothing actionable. Use `margin` — the gap between the best candidate and the runner-up, as a fraction of the top score — rather than thresholding on `_score`, which is not comparable between queries.",
+                    "description": "Ranked candidate matching for names. Returns candidates for the caller to choose between and never decides. Reports no match count by design: trigram matching gives nearly every document a weak score, so the number runs to hundreds of thousands and means nothing actionable. `_score` is a 0–1 name similarity; use it together with `margin` — the gap between the best candidate and the runner-up, as a fraction of the top score — to decide when a leader stands clear.",
                     "requestBody": { "required": true, "content": { "application/json": { "schema": {
                         "type": "object",
                         "required": ["items"],
