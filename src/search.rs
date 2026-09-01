@@ -49,6 +49,12 @@ pub struct SearchEngine {
     /// match only for these, so a new binary on an old index keeps its
     /// original exact-match behaviour.
     case_insensitive_fields: std::collections::HashSet<String>,
+    /// Fuzzy text was folded (not just lowercased) at index time; queries
+    /// must fold the same way. False on indexes built before folding.
+    folded: bool,
+    /// Fuzzy field name → its `_prefix_*` typeahead shadow field, present
+    /// only on indexes that carry them.
+    prefix_field_map: HashMap<String, Field>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +199,24 @@ impl SearchEngine {
             }
         }
 
+        let folded = stored_metadata.folded_fuzzy;
+        let prefix_field_map: HashMap<String, Field> = if stored_metadata.prefix_fields {
+            config
+                .schema
+                .fields
+                .iter()
+                .filter(|fc| fc.search == Some(SearchMode::Fuzzy))
+                .filter_map(|fc| {
+                    schema
+                        .get_field(&crate::schema::prefix_field_name(&fc.name))
+                        .ok()
+                        .map(|field| (fc.name.clone(), field))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         let ref_field = schema.get_field(REF_FIELD).ok();
         let (store, store_status) = if config.store.enabled {
             match open_store(&config, &reader) {
@@ -219,7 +243,20 @@ impl SearchEngine {
             store_status,
             ref_field,
             case_insensitive_fields,
+            folded,
+            prefix_field_map,
         })
+    }
+
+    /// Normalize query text the way this index normalized its fuzzy terms.
+    /// Old indexes lowercased; new ones fold — mixing the two silently
+    /// breaks matching, so the stored metadata decides.
+    fn normalize(&self, text: &str) -> String {
+        if self.folded {
+            crate::analyze::fold(text)
+        } else {
+            text.to_lowercase()
+        }
     }
 
     /// Fold a filter value the same way the index folded its terms.
@@ -318,7 +355,7 @@ impl SearchEngine {
     /// present. Basic record option — the clause is const-scored, so freqs
     /// and positions would be decoded for nothing.
     fn trigram_query(&self, field: Field, text: &str) -> Option<BooleanQuery> {
-        let ngrams = query_trigrams(text);
+        let ngrams = query_trigrams(&self.normalize(text));
         if ngrams.is_empty() {
             return None;
         }
@@ -363,21 +400,37 @@ impl SearchEngine {
     fn fuzzy_clauses(
         &self,
         searcher: &tantivy::Searcher,
-        fields: &[Field],
+        fields: &[(String, Field)],
         text: &str,
     ) -> Vec<(Occur, Box<dyn Query>)> {
         const RARE_DRIVE_TERMS: usize = 4;
-        let lowered = text.to_lowercase();
+        let normalized = self.normalize(text);
         let mut seen: std::collections::HashSet<Term> = std::collections::HashSet::new();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for word in lowered.split_whitespace() {
+        for word in normalized.split_whitespace() {
             let mut ngrams = generate_ngrams(word, 3, 3);
             ngrams.sort_unstable();
             ngrams.dedup();
             if ngrams.is_empty() {
+                // Too short for a trigram — the first keystrokes of a search
+                // box. New indexes carry edge-prefix shadow fields exactly
+                // for this; old ones keep matching nothing here.
+                for (name, _) in fields {
+                    if let Some(&prefix_field) = self.prefix_field_map.get(name) {
+                        let term = Term::from_field_text(prefix_field, word);
+                        if seen.insert(term.clone()) {
+                            clauses.push((
+                                Occur::Should,
+                                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>,
+                            ));
+                        }
+                    }
+                }
                 continue;
             }
-            for &field in fields {
+            for (_, field) in fields {
+                let field = *field;
                 let mut ranked: Vec<(u64, &String)> = ngrams
                     .iter()
                     .map(|ng| {
@@ -422,13 +475,17 @@ impl SearchEngine {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
-        let fuzzy_fields: Vec<Field> = self
+        let fuzzy_fields: Vec<(String, Field)> = self
             .config
             .schema
             .fields
             .iter()
             .filter(|fc| fc.search == Some(SearchMode::Fuzzy))
-            .filter_map(|fc| self.field_map.get(&fc.name).copied())
+            .filter_map(|fc| {
+                self.field_map
+                    .get(&fc.name)
+                    .map(|&field| (fc.name.clone(), field))
+            })
             .collect();
 
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -916,12 +973,10 @@ fn build_pagination_info(
     }
 }
 
-/// Deduplicated, lowercased trigrams of a query — the query-side mirror of
-/// the "trigram" tokenizer registered at import time; the two must stay in
-/// lockstep. Deduped because a repeated trigram ("aaaa") would otherwise add
-/// duplicate clauses that match the same postings twice.
-fn query_trigrams(text: &str) -> Vec<String> {
-    let mut ngrams = generate_ngrams(&text.to_lowercase(), 3, 3);
+/// Deduplicated trigrams of ALREADY-NORMALIZED text — callers must run the
+/// engine's `normalize` first so query and index bytes agree.
+fn query_trigrams(normalized: &str) -> Vec<String> {
+    let mut ngrams = generate_ngrams(normalized, 3, 3);
     ngrams.sort_unstable();
     ngrams.dedup();
     ngrams
@@ -1057,6 +1112,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1132,6 +1189,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1194,6 +1253,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["name".to_string(), "city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1294,6 +1355,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1388,6 +1451,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1462,6 +1527,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["name".to_string(), "city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1560,6 +1627,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1652,6 +1721,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1759,6 +1830,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1859,6 +1932,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: Vec::new(),
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -1973,6 +2048,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();
@@ -2055,6 +2132,8 @@ pub mod tests {
             &crate::field_meta::StoredFieldMetadata {
                 fields: HashMap::new(),
                 case_insensitive_fields: vec!["city".to_string(), "name".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
             },
         )
         .unwrap();

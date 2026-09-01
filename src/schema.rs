@@ -13,6 +13,14 @@ pub const REF_FIELD: &str = "_ref";
 /// case — only the indexed term is folded.
 pub const KEYWORD_CI_TOKENIZER: &str = "keyword_ci";
 
+/// Shadow field carrying 1–2 character word prefixes of a fuzzy field, so
+/// queries too short to form a trigram (the first keystrokes of a search
+/// box) match something instead of nothing. Internal: not stored, never
+/// rendered, not a query parameter.
+pub fn prefix_field_name(fuzzy_field: &str) -> String {
+    format!("_prefix_{}", fuzzy_field)
+}
+
 /// Build a Tantivy schema from config, return (Schema, field_name → Field map)
 pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<String, Field>) {
     let mut builder = Schema::builder();
@@ -31,14 +39,28 @@ pub fn build_schema(config: &SchemaConfig, with_ref: bool) -> (Schema, HashMap<S
                     fc.search,
                     Some(SearchMode::Fuzzy) | Some(SearchMode::Substring)
                 ) {
+                    // WithFreqs, not positions: BM25 needs term frequency and
+                    // nothing reads positions — on a trigram field they are
+                    // an entry per character, a large index for no query.
                     let options = TextOptions::default()
                         .set_indexing_options(
                             TextFieldIndexing::default()
                                 .set_tokenizer("trigram")
-                                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                                .set_index_option(IndexRecordOption::WithFreqs),
                         )
                         .set_stored();
-                    builder.add_text_field(&fc.name, options)
+                    let field = builder.add_text_field(&fc.name, options);
+                    if fc.search == Some(SearchMode::Fuzzy) {
+                        builder.add_text_field(
+                            &prefix_field_name(&fc.name),
+                            TextOptions::default().set_indexing_options(
+                                TextFieldIndexing::default()
+                                    .set_tokenizer("edge_prefix")
+                                    .set_index_option(IndexRecordOption::WithFreqs),
+                            ),
+                        );
+                    }
+                    field
                 } else {
                     builder.add_text_field(&fc.name, TEXT | STORED)
                 }

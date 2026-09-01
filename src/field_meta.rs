@@ -20,6 +20,15 @@ pub struct StoredFieldMetadata {
     /// upgrading the binary alone never breaks queries.
     #[serde(default)]
     pub case_insensitive_fields: Vec<String>,
+    /// Fuzzy/substring text was folded (lowercase + diacritic
+    /// transliteration) at index time; the query side must fold the same
+    /// way. Absent on older indexes, which were only lowercased.
+    #[serde(default)]
+    pub folded_fuzzy: bool,
+    /// The index carries `_prefix_*` shadow fields for typeahead. Absent on
+    /// older indexes, where 1–2 character queries match nothing.
+    #[serde(default)]
+    pub prefix_fields: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -254,6 +263,8 @@ impl ImportFieldMetadataCollector {
         StoredFieldMetadata {
             fields,
             case_insensitive_fields: self.case_insensitive_fields,
+            folded_fuzzy: true,
+            prefix_fields: true,
         }
     }
 }

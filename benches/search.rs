@@ -30,7 +30,7 @@ use ruzz::search::{RangeFilter, SearchEngine, SortOrder};
 
 /// Bump when the corpus generator or schema changes, so stale fixtures
 /// rebuild instead of silently benchmarking the wrong data.
-const FIXTURE_VERSION: u32 = 1;
+const FIXTURE_VERSION: u32 = 2;
 const DEFAULT_DOCS: usize = 200_000;
 
 // ── deterministic corpus ────────────────────────────────────────────────────
@@ -290,6 +290,24 @@ const QUERIES: &[Query] = &[
         ranges: &[],
         sort: relevance,
         count: true,
+    },
+    // Typeahead: too short for a trigram, served by the edge-prefix field.
+    Query {
+        id: "typeahead_2char",
+        q: "be",
+        filters: &[],
+        ranges: &[],
+        sort: relevance,
+        count: false,
+    },
+    // Folded query: diacritic normalization on both sides.
+    Query {
+        id: "fuzzy_folded",
+        q: "sorland",
+        filters: &[],
+        ranges: &[],
+        sort: relevance,
+        count: false,
     },
     // No plausible match: driving terms empty out, should be near-free.
     Query {
