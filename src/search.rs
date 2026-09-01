@@ -122,6 +122,26 @@ pub enum SortOrder {
 /// deep pagination — it does not bound `count`, which is always exact.
 pub const MAX_PAGINATION_WINDOW: usize = 100_000;
 
+/// A boolean clause: how it must occur, and the query itself.
+type Clause = (Occur, Box<dyn Query>);
+/// Hits as (score, address) — score is BM25, a sort value, or a similarity.
+type Hits = Vec<(f64, DocAddress)>;
+/// Rerank candidates as (similarity, bm25, address).
+type RankedHits = Vec<(f64, f64, DocAddress)>;
+
+/// Driving trigrams per query word. One edit destroys at most three of a
+/// word's trigrams, so of any four at least one survives — recall at edit
+/// distance 1. Seven survive two edits; the wide drive is the adaptive
+/// second pass for queries the narrow one fails.
+const RARE_DRIVE_TERMS: usize = 4;
+const WIDE_DRIVE_TERMS: usize = 7;
+
+/// Candidate pool for reranking: enough beyond the page that similarity can
+/// genuinely reorder, small enough that fetching the candidates' stored
+/// values stays cheap.
+const RERANK_POOL_MIN: usize = 50;
+const RERANK_POOL_MAX: usize = 200;
+
 /// Wrap a filter clause so it matches without contributing to relevance.
 fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
     Box::new(ConstScoreQuery::new(query, 1.0))
@@ -397,14 +417,18 @@ impl SearchEngine {
     ///
     /// WithFreqs, not positions: BM25 needs term frequency, and nothing
     /// reads positions.
+    /// Returns the flat fuzzy clauses and whether any word was capped —
+    /// i.e. had more trigrams than `drive`, so widening the drive could
+    /// genuinely admit more candidates.
     fn fuzzy_clauses(
         &self,
         searcher: &tantivy::Searcher,
         fields: &[(String, Field)],
         text: &str,
-    ) -> Vec<(Occur, Box<dyn Query>)> {
-        const RARE_DRIVE_TERMS: usize = 4;
+        drive: usize,
+    ) -> (Vec<Clause>, bool) {
         let normalized = self.normalize(text);
+        let mut capped = false;
         let mut seen: std::collections::HashSet<Term> = std::collections::HashSet::new();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         for word in normalized.split_whitespace() {
@@ -429,13 +453,16 @@ impl SearchEngine {
                 }
                 continue;
             }
+            if ngrams.len() > drive {
+                capped = true;
+            }
             for (_, field) in fields {
                 let field = *field;
                 let mut ranked: Vec<(u64, &String)> = ngrams
                     .iter()
                     .map(|ng| {
                         let term = Term::from_field_text(field, ng);
-                        let df = if ngrams.len() > RARE_DRIVE_TERMS {
+                        let df = if ngrams.len() > drive {
                             searcher.doc_freq(&term).unwrap_or(u64::MAX)
                         } else {
                             0 // short word: everything is kept, skip the lookups
@@ -444,7 +471,7 @@ impl SearchEngine {
                     })
                     .collect();
                 ranked.sort();
-                for (_, ng) in ranked.into_iter().take(RARE_DRIVE_TERMS) {
+                for (_, ng) in ranked.into_iter().take(drive) {
                     let term = Term::from_field_text(field, ng);
                     if seen.insert(term.clone()) {
                         clauses.push((
@@ -456,41 +483,17 @@ impl SearchEngine {
                 }
             }
         }
-        clauses
+        (clauses, capped)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn search(
+    /// The MUST clauses for exact, substring and range filters — rebuildable,
+    /// because the rerank fallback composes the query twice.
+    fn filter_clauses(
         &self,
-        query_text: &str,
         filters: &HashMap<String, String>,
         range_filters: &[RangeFilter],
-        sort: &SortOrder,
-        limit: usize,
-        offset: usize,
-        include_pagination: bool,
-        want_count: bool,
-        include_full: bool,
-    ) -> anyhow::Result<SearchResult> {
-        let start = std::time::Instant::now();
-        let searcher = self.reader.searcher();
-
-        let fuzzy_fields: Vec<(String, Field)> = self
-            .config
-            .schema
-            .fields
-            .iter()
-            .filter(|fc| fc.search == Some(SearchMode::Fuzzy))
-            .filter_map(|fc| {
-                self.field_map
-                    .get(&fc.name)
-                    .map(|&field| (fc.name.clone(), field))
-            })
-            .collect();
-
+    ) -> Vec<(Occur, Box<dyn Query>)> {
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
-        // Exact filters FIRST as MUST clauses
         for (key, value) in filters {
             if let (Some(&field), Some(field_config)) =
                 (self.field_map.get(key), self.field_configs.get(key))
@@ -518,8 +521,6 @@ impl SearchEngine {
                 subqueries.push((Occur::Must, self.exact_clause(field, values, true)));
             }
         }
-
-        // Native range filters on numeric fields
         for rf in range_filters {
             if self.field_map.contains_key(&rf.field) {
                 let min = rf.min.unwrap_or(f64::MIN);
@@ -532,45 +533,292 @@ impl SearchEngine {
                 subqueries.push((Occur::Must, const_score(Box::new(range_query))));
             }
         }
+        subqueries
+    }
 
-        // Fuzzy search with trigrams
-        let mut fuzzy_clauses: Option<Vec<(Occur, Box<dyn Query>)>> = None;
-        if !query_text.is_empty() {
-            let clauses = self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text);
-            if clauses.is_empty() {
-                // No fuzzy field, or a query too short to form a trigram.
-                // Previously this fell through to AllQuery and returned the
-                // entire index for something like q=ab.
-                subqueries.push((Occur::Must, Box::new(EmptyQuery)));
-            } else {
-                fuzzy_clauses = Some(clauses);
+    fn fuzzy_field_handles(&self) -> Vec<(String, Field)> {
+        self.config
+            .schema
+            .fields
+            .iter()
+            .filter(|fc| fc.search == Some(SearchMode::Fuzzy))
+            .filter_map(|fc| {
+                self.field_map
+                    .get(&fc.name)
+                    .map(|&field| (fc.name.clone(), field))
+            })
+            .collect()
+    }
+
+    /// One retrieval + similarity pass for the reranked path. Returns hits
+    /// as (similarity, bm25, address) sorted best-first, the exact count if
+    /// asked for, whether any word's driving was capped (so widening could
+    /// help), and how many candidates the pool actually yielded.
+    #[allow(clippy::too_many_arguments)]
+    fn rerank_attempt(
+        &self,
+        searcher: &tantivy::Searcher,
+        fuzzy_fields: &[(String, Field)],
+        normalized_query: &str,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        drive: usize,
+        pool: usize,
+        need_count: bool,
+    ) -> anyhow::Result<(RankedHits, Option<usize>, bool, usize)> {
+        let (clauses, capped) = self.fuzzy_clauses(searcher, fuzzy_fields, query_text, drive);
+        let subqueries = self.filter_clauses(filters, range_filters);
+        let (query, prunable) = compose_query(Some(clauses), subqueries);
+        let (docs, total) = collect_relevance(searcher, &*query, prunable, pool, 0, need_count)?;
+        let fetched = docs.len();
+
+        let mut scored: RankedHits = Vec::with_capacity(docs.len());
+        for (bm25, addr) in docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(addr)?;
+            let mut best = 0.0f64;
+            for (_, field) in fuzzy_fields {
+                let value: String = doc
+                    .get_all(*field)
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if value.is_empty() {
+                    continue;
+                }
+                let sim =
+                    crate::analyze::name_similarity(normalized_query, &self.normalize(&value));
+                best = best.max(sim);
+            }
+            scored.push((best, bm25, addr));
+        }
+        // Similarity decides, BM25 breaks ties among equally-similar names
+        // (an exact duplicate set, say). NaN cannot occur: both are finite.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        Ok((scored, total, capped, fetched))
+    }
+
+    /// Relevance-sorted fuzzy search with reranking: retrieve a candidate
+    /// pool by trigram BM25 (cheap recall), re-order it by true string
+    /// similarity against the stored values (precision), and page from
+    /// that. `_score` on this path is the similarity, 0..1.
+    ///
+    /// When the best candidate is still weak and the rare-trigram driving
+    /// was capped, retry once with a wider drive: four driving terms
+    /// guarantee recall at one edit (pigeonhole over three destroyed
+    /// trigrams), seven guarantee it at two — the adaptive pass buys
+    /// edit-distance-2 tolerance only on the queries that need it, instead
+    /// of taxing every query with the wider union.
+    #[allow(clippy::too_many_arguments)]
+    fn search_reranked(
+        &self,
+        start: std::time::Instant,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        limit: usize,
+        offset: usize,
+        pool: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        const WEAK_SIM: f64 = 0.55;
+        let need_count = want_count || include_pagination;
+        let fuzzy_fields = self.fuzzy_field_handles();
+        let normalized_query = self.normalize(query_text);
+
+        let (mut scored, mut total, capped, mut fetched) = self.rerank_attempt(
+            searcher,
+            &fuzzy_fields,
+            &normalized_query,
+            query_text,
+            filters,
+            range_filters,
+            RARE_DRIVE_TERMS,
+            pool,
+            need_count,
+        )?;
+
+        let best_sim = |s: &RankedHits| s.first().map_or(0.0, |hit| hit.0);
+        if capped && best_sim(&scored) < WEAK_SIM {
+            let (wide, wide_total, _, wide_fetched) = self.rerank_attempt(
+                searcher,
+                &fuzzy_fields,
+                &normalized_query,
+                query_text,
+                filters,
+                range_filters,
+                WIDE_DRIVE_TERMS,
+                pool,
+                need_count,
+            )?;
+            if best_sim(&wide) > best_sim(&scored) {
+                scored = wide;
+                total = wide_total;
+                fetched = wide_fetched;
             }
         }
 
-        // `prunable`: the whole query is one flat scored term union — the
-        // only shape tantivy's block-WAND pruning accepts — so it is used
-        // bare. Wrapping it in an outer BooleanQuery, even alone under a
-        // single Must, produces a generic scorer, and that is exactly what
-        // the over-threshold arm below does on purpose: WAND pays per-clause
-        // bookkeeping on every block, and past a handful of trigrams that
-        // overhead outgrows the skipping it buys. Measured on a 5M-doc
-        // corpus, pruning is 2-3x faster up to 6 clauses and up to 2x
-        // *slower* from 8; queries above the threshold keep the plain
-        // traversal. With filters present the top level is an intersection
-        // and cannot prune regardless — there the filters do the narrowing.
-        const WAND_MAX_CLAUSES: usize = 6;
-        let (query, prunable): (Box<dyn Query>, bool) = match fuzzy_clauses {
-            Some(clauses) if subqueries.is_empty() && clauses.len() <= WAND_MAX_CLAUSES => {
-                (Box::new(BooleanQuery::new(clauses)), true)
-            }
-            Some(clauses) => {
-                subqueries.push((Occur::Must, Box::new(BooleanQuery::new(clauses))));
-                (Box::new(BooleanQuery::new(subqueries)), false)
-            }
-            // If no subqueries at all (browse mode), use AllQuery
-            None if subqueries.is_empty() => (Box::new(AllQuery), false),
-            None => (Box::new(BooleanQuery::new(subqueries)), false),
+        let page: Vec<(f64, DocAddress)> = scored
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|&(sim, _, addr)| (sim, addr))
+            .collect();
+        let results = self.render_hits(searcher, &page, include_full)?;
+        let returned = results.len();
+        let pagination = if include_pagination {
+            total.map(|total| build_pagination_info(total, limit, offset, returned))
+        } else {
+            None
         };
+        let has_more = match total {
+            Some(count) => offset.saturating_add(returned) < count,
+            // A full pool means the candidate set was truncated there.
+            None => fetched == pool || scored.len() > offset + returned,
+        };
+        let took = start.elapsed().as_secs_f64() * 1000.0;
+        Ok(SearchResult {
+            took_ms: (took * 100.0).round() / 100.0,
+            total: returned,
+            returned,
+            count: if want_count { total } else { None },
+            offset,
+            limit,
+            has_more,
+            pagination,
+            results,
+        })
+    }
+
+    /// Hits → response rows, fetching each document once. The score slot is
+    /// whatever the caller ranked by: BM25, a fast-field sort value, or the
+    /// rerank similarity.
+    fn render_hits(
+        &self,
+        searcher: &tantivy::Searcher,
+        docs: &[(f64, DocAddress)],
+        include_full: bool,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut results: Vec<serde_json::Value> = Vec::with_capacity(docs.len());
+        for (score_or_val, doc_address) in docs {
+            let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
+            let mut obj = serde_json::Map::new();
+
+            for fc in &self.config.schema.fields {
+                if let Ok(field) = self.schema.get_field(&fc.name) {
+                    let val = doc.get_first(field);
+                    match fc.field_type {
+                        FieldType::Text | FieldType::Keyword | FieldType::Enum => {
+                            // A multi field holds several terms; returning
+                            // only the first would hide the rest from callers.
+                            if fc.multi {
+                                let values: Vec<String> = doc
+                                    .get_all(field)
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect();
+                                obj.insert(
+                                    fc.name.clone(),
+                                    serde_json::Value::Array(
+                                        values.into_iter().map(serde_json::Value::String).collect(),
+                                    ),
+                                );
+                                continue;
+                            }
+                            let text = val.and_then(|v| v.as_str()).unwrap_or("");
+                            obj.insert(
+                                fc.name.clone(),
+                                serde_json::Value::String(text.to_string()),
+                            );
+                        }
+                        FieldType::Boolean => {
+                            if let Some(text) = val.and_then(|v| v.as_str()) {
+                                obj.insert(fc.name.clone(), json_boolean_value(text));
+                            } else {
+                                obj.insert(fc.name.clone(), serde_json::Value::Null);
+                            }
+                        }
+                        FieldType::Number => {
+                            // A stored zero is a value; only a field that was
+                            // never filed is null. Zero used to render as
+                            // null, making real zeros unreadable.
+                            match val.and_then(|v| v.as_f64()) {
+                                Some(num) => obj.insert(fc.name.clone(), serde_json::json!(num)),
+                                None => obj.insert(fc.name.clone(), serde_json::Value::Null),
+                            };
+                        }
+                    }
+                }
+            }
+
+            obj.insert("_score".to_string(), serde_json::json!(score_or_val));
+
+            if let Some(doc_ref) = self.doc_ref_of(&doc) {
+                obj.insert("_ref".to_string(), serde_json::json!(doc_ref));
+                if include_full {
+                    obj.insert("_full".to_string(), self.full_as_value(doc_ref));
+                }
+            }
+
+            results.push(serde_json::Value::Object(obj));
+        }
+        Ok(results)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn search(
+        &self,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        sort: &SortOrder,
+        limit: usize,
+        offset: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        let start = std::time::Instant::now();
+        let searcher = self.reader.searcher();
+
+        // Relevance-sorted fuzzy queries go through the rerank path — unless
+        // the caller pages past the pool, where relevance order is the only
+        // one that can be produced incrementally.
+        let pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
+        if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) && offset + limit <= pool
+        {
+            return self.search_reranked(
+                start,
+                &searcher,
+                query_text,
+                filters,
+                range_filters,
+                limit,
+                offset,
+                pool,
+                include_pagination,
+                want_count,
+                include_full,
+            );
+        }
+
+        let fuzzy_fields = self.fuzzy_field_handles();
+        let subqueries = self.filter_clauses(filters, range_filters);
+        let fuzzy = if query_text.is_empty() {
+            None
+        } else {
+            Some(
+                self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text, RARE_DRIVE_TERMS)
+                    .0,
+            )
+        };
+        let (query, prunable) = compose_query(fuzzy, subqueries);
 
         // Determine sort field for fast-field sorting
         let sort_field_name = match sort {
@@ -650,112 +898,10 @@ impl SearchEngine {
                 .collect();
             (docs, total)
         } else {
-            if need_count && prunable {
-                // Two passes beat one here. TopDocs on its own is the only
-                // collector arrangement tantivy prunes with block-WAND, so
-                // the ranked page skips most of the candidate set; Count on
-                // its own disables scoring entirely. A MultiCollector would
-                // instead BM25-score every document sharing a trigram with
-                // the query — millions of docs on a large index.
-                let docs: Vec<(f64, DocAddress)> = searcher
-                    .search(&*query, &TopDocs::with_limit(limit).and_offset(offset))?
-                    .into_iter()
-                    .map(|(score, addr)| (score as f64, addr))
-                    .collect();
-                let total = searcher.search(&*query, &Count)?;
-                (docs, Some(total))
-            } else if need_count {
-                // Count rides along with TopDocs: for filtered or unscored
-                // queries nothing can prune anyway, so one shared traversal
-                // is the cheapest way to get both.
-                let mut collectors = MultiCollector::new();
-                let docs_handle =
-                    collectors.add_collector(TopDocs::with_limit(limit).and_offset(offset));
-                let count_handle = collectors.add_collector(Count);
-                let mut multi_fruit = searcher.search(&*query, &collectors)?;
-                let total = count_handle.extract(&mut multi_fruit);
-                let docs = docs_handle
-                    .extract(&mut multi_fruit)
-                    .into_iter()
-                    .map(|(score, addr)| (score as f64, addr))
-                    .collect();
-                (docs, Some(total))
-            } else {
-                let collector = TopDocs::with_limit(limit).and_offset(offset);
-                let docs = searcher
-                    .search(&*query, &collector)?
-                    .into_iter()
-                    .map(|(score, addr)| (score as f64, addr))
-                    .collect();
-                (docs, None)
-            }
+            collect_relevance(&searcher, &*query, prunable, limit, offset, need_count)?
         };
 
-        // Build results
-        let mut results: Vec<serde_json::Value> = Vec::with_capacity(docs.len());
-
-        for (score_or_val, doc_address) in &docs {
-            let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
-            let mut obj = serde_json::Map::new();
-
-            for fc in &self.config.schema.fields {
-                if let Ok(field) = self.schema.get_field(&fc.name) {
-                    let val = doc.get_first(field);
-                    match fc.field_type {
-                        FieldType::Text | FieldType::Keyword | FieldType::Enum => {
-                            // A multi field holds several terms; returning
-                            // only the first would hide the rest from callers.
-                            if fc.multi {
-                                let values: Vec<String> = doc
-                                    .get_all(field)
-                                    .filter_map(|v| v.as_str().map(str::to_string))
-                                    .collect();
-                                obj.insert(
-                                    fc.name.clone(),
-                                    serde_json::Value::Array(
-                                        values.into_iter().map(serde_json::Value::String).collect(),
-                                    ),
-                                );
-                                continue;
-                            }
-                            let text = val.and_then(|v| v.as_str()).unwrap_or("");
-                            obj.insert(
-                                fc.name.clone(),
-                                serde_json::Value::String(text.to_string()),
-                            );
-                        }
-                        FieldType::Boolean => {
-                            if let Some(text) = val.and_then(|v| v.as_str()) {
-                                obj.insert(fc.name.clone(), json_boolean_value(text));
-                            } else {
-                                obj.insert(fc.name.clone(), serde_json::Value::Null);
-                            }
-                        }
-                        FieldType::Number => {
-                            // A stored zero is a value; only a field that was
-                            // never filed is null. Zero used to render as
-                            // null, making real zeros unreadable.
-                            match val.and_then(|v| v.as_f64()) {
-                                Some(num) => obj.insert(fc.name.clone(), serde_json::json!(num)),
-                                None => obj.insert(fc.name.clone(), serde_json::Value::Null),
-                            };
-                        }
-                    }
-                }
-            }
-
-            obj.insert("_score".to_string(), serde_json::json!(score_or_val));
-
-            if let Some(doc_ref) = self.doc_ref_of(&doc) {
-                obj.insert("_ref".to_string(), serde_json::json!(doc_ref));
-                if include_full {
-                    obj.insert("_full".to_string(), self.full_as_value(doc_ref));
-                }
-            }
-
-            results.push(serde_json::Value::Object(obj));
-        }
-
+        let results = self.render_hits(&searcher, &docs, include_full)?;
         let returned = results.len();
         let pagination = if include_pagination {
             matched_total
@@ -952,6 +1098,92 @@ impl SearchEngine {
             }),
             _ => serde_json::Value::Null,
         }
+    }
+}
+
+/// Compose the top-level query from optional fuzzy clauses and filter MUSTs.
+///
+/// `prunable`: the whole query is one flat scored term union — the only
+/// shape tantivy's block-WAND pruning accepts — so it is used bare.
+/// Wrapping it in an outer BooleanQuery, even alone under a single Must,
+/// produces a generic scorer, and that is exactly what the over-threshold
+/// arm does on purpose: WAND pays per-clause bookkeeping on every block,
+/// and past a handful of trigrams that overhead outgrows the skipping it
+/// buys (measured crossover ~6 clauses on a 5M-doc corpus). With filters
+/// present the top level is an intersection and cannot prune regardless.
+///
+/// `fuzzy: Some(vec![])` means a query was given but nothing can match it
+/// (too short on an index without prefix fields): unsatisfiable, never
+/// unfiltered.
+fn compose_query(
+    fuzzy: Option<Vec<(Occur, Box<dyn Query>)>>,
+    mut subqueries: Vec<(Occur, Box<dyn Query>)>,
+) -> (Box<dyn Query>, bool) {
+    const WAND_MAX_CLAUSES: usize = 6;
+    match fuzzy {
+        Some(clauses) if clauses.is_empty() => {
+            subqueries.push((Occur::Must, Box::new(EmptyQuery)));
+            (Box::new(BooleanQuery::new(subqueries)), false)
+        }
+        Some(clauses) if subqueries.is_empty() && clauses.len() <= WAND_MAX_CLAUSES => {
+            (Box::new(BooleanQuery::new(clauses)), true)
+        }
+        Some(clauses) => {
+            subqueries.push((Occur::Must, Box::new(BooleanQuery::new(clauses))));
+            (Box::new(BooleanQuery::new(subqueries)), false)
+        }
+        // If no subqueries at all (browse mode), use AllQuery
+        None if subqueries.is_empty() => (Box::new(AllQuery), false),
+        None => (Box::new(BooleanQuery::new(subqueries)), false),
+    }
+}
+
+/// Collect a relevance-ordered page, with the count when asked for.
+fn collect_relevance(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    prunable: bool,
+    limit: usize,
+    offset: usize,
+    need_count: bool,
+) -> anyhow::Result<(Hits, Option<usize>)> {
+    if need_count && prunable {
+        // Two passes beat one here. TopDocs on its own is the only
+        // collector arrangement tantivy prunes with block-WAND, so the
+        // ranked page skips most of the candidate set; Count on its own
+        // disables scoring entirely. A MultiCollector would instead
+        // BM25-score every document sharing a trigram with the query —
+        // millions of docs on a large index.
+        let docs: Vec<(f64, DocAddress)> = searcher
+            .search(query, &TopDocs::with_limit(limit).and_offset(offset))?
+            .into_iter()
+            .map(|(score, addr)| (score as f64, addr))
+            .collect();
+        let total = searcher.search(query, &Count)?;
+        Ok((docs, Some(total)))
+    } else if need_count {
+        // Count rides along with TopDocs: for filtered or unscored queries
+        // nothing can prune anyway, so one shared traversal is the cheapest
+        // way to get both.
+        let mut collectors = MultiCollector::new();
+        let docs_handle = collectors.add_collector(TopDocs::with_limit(limit).and_offset(offset));
+        let count_handle = collectors.add_collector(Count);
+        let mut multi_fruit = searcher.search(query, &collectors)?;
+        let total = count_handle.extract(&mut multi_fruit);
+        let docs = docs_handle
+            .extract(&mut multi_fruit)
+            .into_iter()
+            .map(|(score, addr)| (score as f64, addr))
+            .collect();
+        Ok((docs, Some(total)))
+    } else {
+        let collector = TopDocs::with_limit(limit).and_offset(offset);
+        let docs = searcher
+            .search(query, &collector)?
+            .into_iter()
+            .map(|(score, addr)| (score as f64, addr))
+            .collect();
+        Ok((docs, None))
     }
 }
 
@@ -1879,6 +2111,99 @@ pub mod tests {
         let filtered = run("storgruppen", &filters);
         assert_eq!(filtered.count, Some(1), "BERGEN tail match filtered out");
         assert_eq!(filtered.results[0]["name"], "Storgruppen Konsern");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The rerank stage: trigram BM25 recalls candidates, true string
+    /// similarity orders them. Pins the fix for BM25's length-normalization
+    /// quirk (a shorter partial match used to outrank the exact name) and
+    /// the adaptive wide-drive pass that recovers edit-distance-2 typos.
+    #[test]
+    fn rerank_orders_by_similarity_and_recovers_double_typos() {
+        let dir = test_index_dir("rerank");
+        let mut config = test_config(&dir);
+        {
+            let config = Arc::get_mut(&mut config).unwrap();
+            let field = config
+                .schema
+                .fields
+                .iter_mut()
+                .find(|f| f.name == "name")
+                .unwrap();
+            field.field_type = FieldType::Text;
+            field.search = Some(crate::config::SearchMode::Fuzzy);
+        }
+        let (schema, _) = build_schema(&config.schema, false);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = tantivy::Index::create_in_dir(&dir, schema.clone()).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        {
+            let city = schema.get_field("city").unwrap();
+            let revenue = schema.get_field("revenue").unwrap();
+            let name = schema.get_field("name").unwrap();
+            let mut writer = index.writer(20_000_000).unwrap();
+            for n in [
+                "Amazon Web Services",
+                "Amazonia Flowers",
+                "Interconsulting Partners",
+                "Fjordkraft",
+            ] {
+                writer
+                    .add_document(doc!(city => "OSLO", revenue => 1.0, name => n))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        crate::field_meta::write_stored_field_metadata(
+            &dir,
+            &crate::field_meta::StoredFieldMetadata {
+                fields: HashMap::new(),
+                case_insensitive_fields: vec!["city".to_string()],
+                folded_fuzzy: false,
+                prefix_fields: false,
+            },
+        )
+        .unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        let run = |q: &str| {
+            engine
+                .search(
+                    q,
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // BM25's field-length normalization used to rank the shorter
+        // "Amazonia Flowers" above the exact word match. Similarity does
+        // not make that mistake, and reports itself as a 0..1 score.
+        let exact = run("amazon");
+        assert_eq!(exact.results[0]["name"], "Amazon Web Services");
+        let top_score = exact.results[0]["_score"].as_f64().unwrap();
+        assert!(
+            top_score > 0.99 && top_score <= 1.0,
+            "exact word match scores ~1, got {top_score}"
+        );
+
+        // Two typos destroy up to six trigrams; the four driving terms of
+        // the first pass all miss, and the adaptive wide pass recovers it.
+        let double_typo = run("interkonsalting");
+        assert_eq!(
+            double_typo.results[0]["name"], "Interconsulting Partners",
+            "wide drive recovers an edit-distance-2 query"
+        );
+
+        // Garbage still returns nothing — both passes come up empty.
+        assert_eq!(run("xqzwvbjk").count, Some(0));
 
         let _ = std::fs::remove_dir_all(dir);
     }
