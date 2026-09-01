@@ -12,6 +12,8 @@ memory_budget = "50MB"
 # cache = "64MB"
 
 [schema]
+# Uncomment to enable incremental updates (ruzz update / ruzz delete):
+# primary_key = "org_number"
 fields = [
     { name = "name", type = "text", search = "fuzzy" },
     { name = "country_code", type = "keyword" },

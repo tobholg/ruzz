@@ -26,6 +26,7 @@ ruzz is a fast, embeddable fuzzy search engine built in Rust. It eats CSV files 
 - **⚡ Fast** — sub-millisecond to low-millisecond on millions of documents. No pathological cases. Every query is fast, not just the easy ones.
 - **📁 CSV import** — point at your files, define a column mapping, done. Multiple files with different schemas? Different column names? Handled.
 - **📦 Document store** *(optional)* — keep the full record behind each compact search row in a zstd-compressed on-disk store. Search stays lean and fast; `GET /doc/{ref}` returns everything, including nested JSON your CSV can't hold.
+- **🔁 Incremental updates** — name a `primary_key` and ship deltas: `ruzz update changed.csv` upserts by key, `ruzz delete <key>` removes, and a running server picks both up in moments without a restart or full rebuild.
 - **🎛 Memory budget** — tell ruzz how much RAM it can use. `50MB`, `2GB`, `50%`, `unlimited`. Run on a $5 VPS or a beefy server, same binary.
 - **🔎 Filters** — exact match on keywords, enums, booleans, numeric range filtering, sort by any keyword/enum/boolean/number field. Fuzzy search + filter by country + sort by revenue desc? One query.
 - **🧮 Multi-value fields & OR** — one row can hold `"LEDE,DAGL"` and match either. Pass `role=LEDE,DAGL` to OR across values on any filter. Case-insensitive by default; substring search where you want it.
@@ -153,6 +154,34 @@ Enum and boolean fields are indexed as exact-match filters. Enums keep the casin
 
 `values = "auto"` discovers low-cardinality enum values during import. The initial default cap is `128` distinct values per auto-enum field.
 
+## Incremental updates
+
+A full import rebuilds everything. When only some rows changed, name a primary key and ship a delta instead:
+
+```toml
+[schema]
+primary_key = "id"    # a keyword field that uniquely identifies a document
+fields = [ ... ]
+```
+
+```bash
+# Upsert: each row replaces any document with the same key, or adds a new one
+ruzz update data/changed_rows.csv
+
+# Delete by key
+ruzz delete 936512054 987654321
+ruzz delete --file data/removed_ids.txt
+```
+
+Delta files use the same format as a configured source. With one `[[sources]]` entry its mapping and defaults apply automatically; with several, say which one the delta follows: `ruzz update delta.csv --like data/companies_us.csv`. When the store runs in sidecar mode, pass the delta's aligned JSONL with `--sidecar`.
+
+Updates commit into the live index in place — no staging rebuild, no swap. A running server picks the change up by itself within a moment: search results, counts and full-document hydration all reflect the delta with no restart. Keys match the way the field filters (case-insensitively unless the field is `case_sensitive`), and a delta row with an empty key is skipped, not indexed.
+
+Two things to know:
+
+- **The store only grows between full imports.** An upsert appends the new version of the document and abandons the old one's bytes, so a deployment that updates the same rows many times over accumulates dead store space. The next full import rewrites everything compactly. Dead index-side segments are merged and collected automatically as updates commit.
+- **A changed schema needs a full import.** `ruzz update` refuses to run when the config's schema no longer matches the one the index was built with, rather than writing rows the rest of the index disagrees with.
+
 ## Document store (optional)
 
 Your schema keeps the search index lean — but sometimes you want the *whole* record back, not just the indexed fields. Enable the document store and every imported row also lands in a compressed on-disk store, referenced from search results by `_ref`:
@@ -184,7 +213,7 @@ mapping = { name = "organisasjonsnavn", org_number = "organisasjonsnummer" }
 
 The store lives next to the index (`docs.dat` + a tiny block table), is written in one sequential pass during import, and costs nothing on the search hot path. Lookups decompress one block (~100–200μs cold, microseconds cached). Typical compression on record data: 5–10x.
 
-**Ref semantics:** `_ref` is the row's import ordinal. It is stable for the lifetime of an index, but a re-import reshuffles refs — persist your own keys (like `org_number`) externally and resolve them via `/doc?field=value`, not refs.
+**Ref semantics:** `_ref` is the row's import ordinal. A re-import reshuffles refs, and an incremental update gives the new version of a document a fresh ref — persist your own keys (like `org_number`) externally and resolve them via `/doc?field=value`, not refs.
 
 ## API
 
@@ -449,7 +478,7 @@ Bulk endpoints (`/match`, `/resolve`) share that same pool, so heavy batches com
 - [x] Document store — full records behind compact search rows
 - [x] Bulk endpoints off the async workers (`spawn_blocking` + a concurrency bound)
 - [x] Atomic re-imports — staged build + swap; a failed import leaves the previous index serving (a running server picks the new index up on restart)
-- [ ] Incremental delta imports (append/update without full rebuild)
+- [x] Incremental delta imports — `primary_key` + `ruzz update`/`ruzz delete`, picked up by a running server without restart
 - [ ] Cursor-based pagination (`search_after`) beyond the 100k window
 - [ ] JSON import (native nested-document sources)
 - [ ] Direct Postgres/MySQL import

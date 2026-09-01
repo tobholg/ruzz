@@ -300,7 +300,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         store::write_meta(&store_path, &meta)?;
-        store::write_index_pairing(&index_path, &generation)?;
+        store::write_index_pairing(&index_path, &generation, outcome.doc_count)?;
         println!(
             "✓ document store: {} docs, {} raw → {} on disk ({:.1}x) → {}",
             outcome.doc_count,
@@ -382,6 +382,475 @@ fn swap_into_place(build: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct UpdateStats {
+    pub rows: u64,
+    pub skipped_no_key: u64,
+    pub duration_secs: f64,
+}
+
+/// Everything an incremental operation needs from the existing index, checked
+/// for compatibility with the current config before anything is written.
+struct OpenedIndex {
+    index: tantivy::Index,
+    schema: Schema,
+    field_map: HashMap<String, tantivy::schema::Field>,
+    pk_field: tantivy::schema::Field,
+    /// The primary key's indexed terms are lowercase; fold lookup values the
+    /// same way (mirrors how search folds filters for this field).
+    fold_pk: bool,
+}
+
+/// Open the live index for an incremental update/delete and verify the parts
+/// delete-by-term depends on: a configured primary key, an index built with
+/// exactly this schema, and agreement on how the key's terms were folded.
+fn open_for_incremental(config: &Config) -> anyhow::Result<(OpenedIndex, String)> {
+    let pk_name = config.schema.primary_key.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "incremental updates need a primary key — set primary_key = \"<field>\" under [schema]"
+        )
+    })?;
+    let pk_config = config
+        .schema
+        .fields
+        .iter()
+        .find(|fc| fc.name == pk_name)
+        .expect("validated by config");
+
+    let index_path = &config.server.index_path;
+    if !index_path.join("meta.json").exists() {
+        bail!(
+            "no index at {} — run a full import first",
+            index_path.display()
+        );
+    }
+    let index = tantivy::Index::open_in_dir(index_path)
+        .with_context(|| format!("opening index at {}", index_path.display()))?;
+    register_trigram_tokenizer_pub(&index);
+
+    let (schema, field_map) = build_schema(&config.schema, config.store.enabled);
+    if index.schema() != schema {
+        bail!(
+            "the index at {} was built with a different schema — run a full import",
+            index_path.display()
+        );
+    }
+
+    // The schema check above guarantees an index-v2 layout (prefix fields and
+    // all), but term folding for the key is recorded per index, not per
+    // schema — disagreement would make deletes silently miss.
+    let stored = crate::field_meta::load_stored_field_metadata(index_path)?;
+    let index_folds_pk = stored.case_insensitive_fields.contains(&pk_name);
+    if index_folds_pk == pk_config.case_sensitive {
+        bail!(
+            "the index disagrees with the config on case-sensitivity of primary key '{}' — run a full import",
+            pk_name
+        );
+    }
+
+    let pk_field = *field_map.get(&pk_name).expect("pk is a schema field");
+    Ok((
+        OpenedIndex {
+            index,
+            schema,
+            field_map,
+            pk_field,
+            fold_pk: index_folds_pk,
+        },
+        pk_name,
+    ))
+}
+
+/// The indexed term for a primary key value, folded the way this index
+/// indexed it.
+fn pk_term(opened: &OpenedIndex, value: &str) -> tantivy::Term {
+    let trimmed = value.trim();
+    let folded = if opened.fold_pk {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    };
+    tantivy::Term::from_field_text(opened.pk_field, &folded)
+}
+
+/// Upsert rows from delta CSV files into the live index: for each row, any
+/// existing document with the same primary key is deleted and the row is
+/// added, in one commit. The document store (when enabled) is append-only —
+/// superseded versions stay on disk as unreachable refs until the next full
+/// import rewrites the store.
+///
+/// Unlike a full import there is no staging swap: tantivy segments are
+/// immutable and the store only grows, so a running server keeps serving a
+/// consistent view throughout and picks the commit up through its own reader.
+pub fn run_update(
+    config: &Config,
+    files: &[std::path::PathBuf],
+    like: Option<&Path>,
+    sidecar: Option<&Path>,
+) -> anyhow::Result<UpdateStats> {
+    if files.is_empty() {
+        bail!("no delta files given");
+    }
+    let (opened, pk_name) = open_for_incremental(config)?;
+
+    // Which configured source's mapping and defaults the delta rows follow.
+    let template = match like {
+        Some(like) => config
+            .sources
+            .iter()
+            .find(|s| s.path == like)
+            .or_else(|| {
+                config
+                    .sources
+                    .iter()
+                    .find(|s| s.path.file_name() == like.file_name())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("--like {} matches no [[sources]] entry", like.display())
+            })?,
+        None => match config.sources.as_slice() {
+            [only] => only,
+            _ => bail!(
+                "config has {} sources — pass --like <source path> to say which mapping the delta uses",
+                config.sources.len()
+            ),
+        },
+    };
+    let mapping = template.resolved_mapping(&config.mappings);
+
+    let mut store_import = if config.store.enabled {
+        if config.store.source == StoreSource::Sidecar {
+            if sidecar.is_none() {
+                bail!("[store] source = \"sidecar\" — pass --sidecar <file.jsonl> for the delta");
+            }
+            if files.len() != 1 {
+                bail!("--sidecar pairs with exactly one delta file");
+            }
+        }
+        let store_path = config.resolve_store_path();
+        let store_meta = store::read_meta(&store_path)
+            .with_context(|| "no document store to append to — run a full import")?;
+        let pairing = store::read_index_pairing(&config.server.index_path).ok_or_else(|| {
+            anyhow::anyhow!("index has no store pairing file — re-run import with [store] enabled")
+        })?;
+        if pairing.generation != store_meta.generation {
+            bail!(
+                "store generation {} does not match index generation {} — re-run import",
+                store_meta.generation,
+                pairing.generation
+            );
+        }
+        let block_size = store::parse_size(&config.store.block_size)
+            .with_context(|| format!("invalid store block_size '{}'", config.store.block_size))?;
+        let writer =
+            store::StoreWriter::append_to(&store_path, block_size, config.store.compression_level)?;
+        let next_ref = writer.next_ref_start();
+        Some(StoreImport {
+            writer,
+            mode: config.store.source,
+            next_ref,
+        })
+    } else {
+        None
+    };
+
+    let mut writer: IndexWriter = opened.index.writer(256_000_000)?;
+    let existing_metadata =
+        crate::field_meta::load_stored_field_metadata(&config.server.index_path)?;
+    let mut metadata_collector =
+        ImportFieldMetadataCollector::seeded(&config.schema.fields, &existing_metadata);
+
+    let start = Instant::now();
+    let mut stats = UpdateStats {
+        rows: 0,
+        skipped_no_key: 0,
+        duration_secs: 0.0,
+    };
+
+    for path in files {
+        let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
+        let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        let mut indexer = RowIndexer::new(
+            headers,
+            &mapping,
+            &template.defaults,
+            &opened.schema,
+            &opened.field_map,
+            &config.schema.fields,
+        );
+        let mut sidecar_reader = match (&store_import, sidecar) {
+            (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => {
+                Some(SidecarReader::open(sp)?)
+            }
+            _ => None,
+        };
+
+        let mut count = 0u64;
+        let mut record = csv::StringRecord::new();
+        while rdr.read_record(&mut record)? {
+            let key = indexer.raw_value(&record, &pk_name).unwrap_or_default();
+            if key.trim().is_empty() {
+                stats.skipped_no_key += 1;
+                continue;
+            }
+            writer.delete_term(pk_term(&opened, &key));
+            let doc = indexer.build_doc(
+                &record,
+                &mut metadata_collector,
+                store_import.as_mut(),
+                sidecar_reader.as_mut(),
+            )?;
+            writer.add_document(doc)?;
+            count += 1;
+        }
+        if let Some(sidecar_reader) = sidecar_reader.as_mut() {
+            sidecar_reader.expect_exhausted(count)?;
+        }
+        indexer.report_bad_number_cells(path);
+        stats.rows += count;
+    }
+
+    // Store first, index commit last: a crash in between leaves appended
+    // store docs nothing references — wasted bytes, never a dangling ref.
+    if let Some(store_import) = store_import.take() {
+        let outcome = store_import.writer.finish()?;
+        let store_path = config.resolve_store_path();
+        let mut meta = store::read_meta(&store_path)?;
+        meta.doc_count = outcome.doc_count;
+        meta.block_count = outcome.block_count;
+        meta.raw_bytes = outcome.raw_bytes;
+        meta.compressed_bytes = outcome.compressed_bytes;
+        store::write_meta(&store_path, &meta)?;
+        store::write_index_pairing(&config.server.index_path, &meta.generation, meta.doc_count)?;
+    }
+    writer.commit()?;
+    write_stored_field_metadata(&config.server.index_path, &metadata_collector.into_stored())?;
+
+    // Let the merge policy fold small delta segments in, then drop whatever
+    // files that superseded. Skipping the forced full merge keeps small
+    // updates cheap on a large index.
+    writer.wait_merging_threads()?;
+    let collector: IndexWriter = opened.index.writer(15_000_000)?;
+    if let Err(e) = collector.garbage_collect_files().wait() {
+        eprintln!("  note: could not collect superseded segments: {}", e);
+    }
+
+    stats.duration_secs = start.elapsed().as_secs_f64();
+    if stats.skipped_no_key > 0 {
+        eprintln!(
+            "  note: skipped {} row(s) with an empty '{}' — a delta row needs a key to upsert by",
+            stats.skipped_no_key, pk_name
+        );
+    }
+    println!(
+        "✓ {} row(s) upserted in {:.1}s → {}",
+        stats.rows,
+        stats.duration_secs,
+        config.server.index_path.display()
+    );
+    println!("  a running server picks the change up within a moment — no restart needed");
+    Ok(stats)
+}
+
+/// Delete documents by primary key. Store entries (when enabled) become
+/// unreachable rather than being rewritten; the next full import reclaims
+/// them.
+pub fn run_delete(config: &Config, keys: &[String]) -> anyhow::Result<u64> {
+    if keys.is_empty() {
+        bail!("no keys given");
+    }
+    let (opened, pk_name) = open_for_incremental(config)?;
+
+    // Count what the keys match first, so the outcome is reportable —
+    // tantivy's delete_term does not say how many documents it removed.
+    let reader = opened.index.reader()?;
+    let searcher = reader.searcher();
+    let mut matched = 0u64;
+    for key in keys {
+        let query = tantivy::query::TermQuery::new(
+            pk_term(&opened, key),
+            tantivy::schema::IndexRecordOption::Basic,
+        );
+        matched += searcher.search(&query, &tantivy::collector::Count)? as u64;
+    }
+
+    let mut writer: IndexWriter = opened.index.writer(50_000_000)?;
+    for key in keys {
+        writer.delete_term(pk_term(&opened, key));
+    }
+    writer.commit()?;
+
+    // Older pairing files carry no doc_count and require store == index doc
+    // counts, which a delete breaks. Re-stamp the pairing with the store's
+    // ref total so the engine keeps accepting the pair.
+    if config.store.enabled {
+        let store_path = config.resolve_store_path();
+        if let Ok(meta) = store::read_meta(&store_path) {
+            let pairing = store::read_index_pairing(&config.server.index_path);
+            if pairing.is_some_and(|p| p.generation == meta.generation) {
+                store::write_index_pairing(
+                    &config.server.index_path,
+                    &meta.generation,
+                    meta.doc_count,
+                )?;
+            }
+        }
+    }
+
+    println!(
+        "✓ deleted {} document(s) for {} key(s) on '{}'",
+        matched,
+        keys.len(),
+        pk_name
+    );
+    Ok(matched)
+}
+
+/// Per-source machinery shared by full imports and delta updates: turns one
+/// CSV record into an index document (and, with the store enabled, the full
+/// document behind it).
+struct RowIndexer<'a> {
+    headers: Vec<String>,
+    /// schema_field_name → csv_column_index
+    col_indices: HashMap<String, usize>,
+    defaults: &'a HashMap<String, String>,
+    field_configs: &'a [crate::config::FieldConfig],
+    field_map: &'a HashMap<String, tantivy::schema::Field>,
+    ref_field: Option<tantivy::schema::Field>,
+    prefix_fields: HashMap<String, tantivy::schema::Field>,
+    bad_number_cells: u64,
+}
+
+impl<'a> RowIndexer<'a> {
+    fn new(
+        headers: Vec<String>,
+        mapping: &HashMap<String, String>,
+        defaults: &'a HashMap<String, String>,
+        schema: &Schema,
+        field_map: &'a HashMap<String, tantivy::schema::Field>,
+        field_configs: &'a [crate::config::FieldConfig],
+    ) -> Self {
+        let mut col_indices: HashMap<String, usize> = HashMap::new();
+        for (schema_name, csv_col_name) in mapping {
+            if let Some(idx) = headers.iter().position(|h| h == csv_col_name) {
+                col_indices.insert(schema_name.clone(), idx);
+            }
+        }
+
+        let ref_field = schema.get_field(REF_FIELD).ok();
+        let prefix_fields: HashMap<String, tantivy::schema::Field> = field_configs
+            .iter()
+            .filter(|fc| fc.search == Some(crate::config::SearchMode::Fuzzy))
+            .filter_map(|fc| {
+                schema
+                    .get_field(&crate::schema::prefix_field_name(&fc.name))
+                    .ok()
+                    .map(|field| (fc.name.clone(), field))
+            })
+            .collect();
+
+        Self {
+            headers,
+            col_indices,
+            defaults,
+            field_configs,
+            field_map,
+            ref_field,
+            prefix_fields,
+            bad_number_cells: 0,
+        }
+    }
+
+    /// The raw cell for a schema field: CSV column first, then source default.
+    fn raw_value(&self, record: &csv::StringRecord, name: &str) -> Option<String> {
+        self.col_indices
+            .get(name)
+            .and_then(|&idx| record.get(idx))
+            .map(|s| s.to_string())
+            .or_else(|| self.defaults.get(name).cloned())
+    }
+
+    fn build_doc(
+        &mut self,
+        record: &csv::StringRecord,
+        metadata_collector: &mut ImportFieldMetadataCollector,
+        store_import: Option<&mut StoreImport>,
+        sidecar: Option<&mut SidecarReader>,
+    ) -> anyhow::Result<TantivyDocument> {
+        let mut doc = TantivyDocument::new();
+
+        for fc in self.field_configs {
+            let field = match self.field_map.get(&fc.name) {
+                Some(f) => *f,
+                None => continue,
+            };
+
+            let value = self.raw_value(record, &fc.name).unwrap_or_default();
+
+            match fc.field_type {
+                FieldType::Text | FieldType::Keyword | FieldType::Enum | FieldType::Boolean => {
+                    // A multi field contributes one term per element, so a
+                    // document can match a filter for any of them.
+                    for part in fc.split_values(&value) {
+                        if let Some(normalized) = canonicalize_stored_value(fc, part)? {
+                            if fc.field_type == FieldType::Enum {
+                                metadata_collector.observe(fc, &normalized);
+                            }
+                            doc.add_text(field, &normalized);
+                            // Fuzzy fields feed their typeahead shadow field
+                            // the same value; the edge_prefix tokenizer does
+                            // the rest.
+                            if let Some(&prefix_field) = self.prefix_fields.get(&fc.name) {
+                                doc.add_text(prefix_field, &normalized);
+                            }
+                        }
+                    }
+                }
+                FieldType::Number => {
+                    // An empty or unparseable cell is a missing value, not a
+                    // zero. Storing 0.0 for it (as this used to) made every
+                    // missing revenue match revenue_max=10, sort as the
+                    // smallest value, and equal a genuine zero.
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        match trimmed.parse::<f64>() {
+                            Ok(num) if num.is_finite() => doc.add_f64(field, num),
+                            _ => self.bad_number_cells += 1,
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(store_import) = store_import {
+            let doc_ref = store_import.next_ref;
+            if let Some(rf) = self.ref_field {
+                doc.add_u64(rf, doc_ref);
+            }
+            let full = match store_import.mode {
+                StoreSource::Row => build_row_doc(&self.headers, record, self.defaults),
+                StoreSource::Sidecar => sidecar
+                    .expect("sidecar reader opened for sidecar mode")
+                    .next_line()?,
+            };
+            store_import.writer.add(full)?;
+            store_import.next_ref += 1;
+        }
+
+        Ok(doc)
+    }
+
+    fn report_bad_number_cells(&self, path: &Path) {
+        if self.bad_number_cells > 0 {
+            eprintln!(
+                "  note: {} skipped {} non-numeric cell(s) in numeric fields — those values are null, not 0",
+                path.display(),
+                self.bad_number_cells
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn import_csv(
     path: &Path,
@@ -399,103 +868,23 @@ fn import_csv(
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
 
     let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+    let mut indexer = RowIndexer::new(headers, mapping, defaults, schema, field_map, field_configs);
 
-    // Build reverse mapping: schema_field_name → csv_column_index
-    let mut col_indices: HashMap<String, usize> = HashMap::new();
-    for (schema_name, csv_col_name) in mapping {
-        if let Some(idx) = headers.iter().position(|h| h == csv_col_name) {
-            col_indices.insert(schema_name.clone(), idx);
-        }
-    }
-
-    let ref_field = schema.get_field(REF_FIELD).ok();
-    let prefix_fields: HashMap<String, tantivy::schema::Field> = field_configs
-        .iter()
-        .filter(|fc| fc.search == Some(crate::config::SearchMode::Fuzzy))
-        .filter_map(|fc| {
-            schema
-                .get_field(&crate::schema::prefix_field_name(&fc.name))
-                .ok()
-                .map(|field| (fc.name.clone(), field))
-        })
-        .collect();
     let mut sidecar = match (&store_import, sidecar_path) {
         (Some(si), Some(sp)) if si.mode == StoreSource::Sidecar => Some(SidecarReader::open(sp)?),
         _ => None,
     };
 
     let mut count = 0u64;
-    let mut bad_number_cells = 0u64;
     let mut record = csv::StringRecord::new();
 
     while rdr.read_record(&mut record)? {
-        let mut doc = TantivyDocument::new();
-
-        for fc in field_configs {
-            let field = match field_map.get(&fc.name) {
-                Some(f) => *f,
-                None => continue,
-            };
-
-            // Try CSV column first, then defaults
-            let value = col_indices
-                .get(&fc.name)
-                .and_then(|&idx| record.get(idx))
-                .map(|s| s.to_string())
-                .or_else(|| defaults.get(&fc.name).cloned())
-                .unwrap_or_default();
-
-            match fc.field_type {
-                FieldType::Text | FieldType::Keyword | FieldType::Enum | FieldType::Boolean => {
-                    // A multi field contributes one term per element, so a
-                    // document can match a filter for any of them.
-                    for part in fc.split_values(&value) {
-                        if let Some(normalized) = canonicalize_stored_value(fc, part)? {
-                            if fc.field_type == FieldType::Enum {
-                                metadata_collector.observe(fc, &normalized);
-                            }
-                            doc.add_text(field, &normalized);
-                            // Fuzzy fields feed their typeahead shadow field
-                            // the same value; the edge_prefix tokenizer does
-                            // the rest.
-                            if let Some(&prefix_field) = prefix_fields.get(&fc.name) {
-                                doc.add_text(prefix_field, &normalized);
-                            }
-                        }
-                    }
-                }
-                FieldType::Number => {
-                    // An empty or unparseable cell is a missing value, not a
-                    // zero. Storing 0.0 for it (as this used to) made every
-                    // missing revenue match revenue_max=10, sort as the
-                    // smallest value, and equal a genuine zero.
-                    let trimmed = value.trim();
-                    if !trimmed.is_empty() {
-                        match trimmed.parse::<f64>() {
-                            Ok(num) if num.is_finite() => doc.add_f64(field, num),
-                            _ => bad_number_cells += 1,
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(store_import) = store_import.as_deref_mut() {
-            let doc_ref = store_import.next_ref;
-            if let Some(rf) = ref_field {
-                doc.add_u64(rf, doc_ref);
-            }
-            let full = match store_import.mode {
-                StoreSource::Row => build_row_doc(&headers, &record, defaults),
-                StoreSource::Sidecar => sidecar
-                    .as_mut()
-                    .expect("sidecar reader opened for sidecar mode")
-                    .next_line()?,
-            };
-            store_import.writer.add(full)?;
-            store_import.next_ref += 1;
-        }
-
+        let doc = indexer.build_doc(
+            &record,
+            metadata_collector,
+            store_import.as_deref_mut(),
+            sidecar.as_mut(),
+        )?;
         writer.add_document(doc)?;
         count += 1;
 
@@ -508,13 +897,7 @@ fn import_csv(
         sidecar.expect_exhausted(count)?;
     }
 
-    if bad_number_cells > 0 {
-        eprintln!(
-            "  note: {} skipped {} non-numeric cell(s) in numeric fields — those values are null, not 0",
-            path.display(),
-            bad_number_cells
-        );
-    }
+    indexer.report_bad_number_cells(path);
 
     pb.set_position(rdr.position().byte());
     Ok(count)
@@ -700,6 +1083,15 @@ mod tests {
     }
 
     fn test_config(dir: &Path, sources: Vec<SourceConfig>, store: StoreConfig) -> Arc<Config> {
+        test_config_pk(dir, sources, store, None)
+    }
+
+    fn test_config_pk(
+        dir: &Path,
+        sources: Vec<SourceConfig>,
+        store: StoreConfig,
+        primary_key: Option<&str>,
+    ) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
                 port: 0,
@@ -710,6 +1102,7 @@ mod tests {
                 strict_params: false,
             },
             schema: SchemaConfig {
+                primary_key: primary_key.map(String::from),
                 fields: vec![
                     text_field("name", true),
                     keyword_field("org_number"),
@@ -900,6 +1293,7 @@ org_number,company_name,city,secret_extra
                 strict_params: false,
             },
             schema: SchemaConfig {
+                primary_key: None,
                 fields: vec![
                     keyword_field("org_number"),
                     FieldConfig {
@@ -1161,7 +1555,8 @@ org_number,company_name,city,secret_extra
         run_import(&config).unwrap();
 
         // Tamper with the pairing marker
-        crate::store::write_index_pairing(&config.server.index_path, "bogus-generation").unwrap();
+        crate::store::write_index_pairing(&config.server.index_path, "bogus-generation", 3)
+            .unwrap();
 
         let engine = SearchEngine::open(config).unwrap();
         assert!(matches!(engine.store_status, StoreStatus::Error(_)));
@@ -1185,6 +1580,252 @@ org_number,company_name,city,secret_extra
 
         // But full access errors
         assert!(engine.get_full(0).is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn count_of(engine: &SearchEngine, q: &str) -> usize {
+        engine
+            .search(
+                q,
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap()
+            .count
+            .unwrap()
+    }
+
+    /// The incremental path end to end: a delta CSV replaces documents by
+    /// primary key and adds new ones in place — no staging swap — with the
+    /// store appending fresh refs for the new versions, and `ruzz delete`
+    /// removing by key afterwards.
+    #[test]
+    fn incremental_upsert_and_delete_with_store() {
+        let dir = temp_dir("upsert");
+        write_csv(&dir.join("data.csv"), CSV); // orgs 100, 200, 300
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig {
+                enabled: true,
+                ..StoreConfig::default()
+            },
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+
+        // Delta: new version of org 100, brand-new org 400, and a keyless
+        // row that must be skipped rather than indexed unreachable.
+        write_csv(
+            &dir.join("delta.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             100,Acme Rockets International,Oslo,alpha2\n\
+             400,Delta Diner,Trondheim,delta\n\
+             ,Keyless Corp,Nowhere,x\n",
+        );
+        let stats = run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+        assert_eq!(stats.rows, 2);
+        assert_eq!(stats.skipped_no_key, 1);
+
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+        assert_eq!(count_of(&engine, ""), 4, "3 originals - 1 replaced + 2");
+        assert_eq!(count_of(&engine, "keyless"), 0);
+
+        // The upserted doc: one match, the new version, hydrating to the
+        // new full record through a ref at the store's appended tail.
+        let result = engine
+            .search(
+                "acme",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(result.count, Some(1));
+        assert_eq!(result.results[0]["name"], "Acme Rockets International");
+        let new_ref = result.results[0]["_ref"].as_u64().unwrap();
+        assert!(new_ref >= 3, "fresh ref, not the superseded 0");
+        let full: serde_json::Value =
+            serde_json::from_str(&engine.get_full(new_ref).unwrap().unwrap()).unwrap();
+        assert_eq!(full["secret_extra"], "alpha2");
+
+        // The added doc hydrates too; untouched docs keep their old refs.
+        assert_eq!(count_of(&engine, "delta diner"), 1);
+        let bakery = engine
+            .search(
+                "bakery",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                10,
+                0,
+                false,
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(bakery.results[0]["_ref"], 1);
+        assert_eq!(bakery.results[0]["_full"]["secret_extra"], "bravo");
+
+        // Delete by key: gone from search, everything else intact.
+        drop(engine);
+        assert_eq!(run_delete(&config, &["200".to_string()]).unwrap(), 1);
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+        assert_eq!(count_of(&engine, "bakery"), 0);
+        assert_eq!(count_of(&engine, ""), 3);
+
+        // A second update on the already-updated index keeps working.
+        drop(engine);
+        write_csv(
+            &dir.join("delta2.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             400,Delta Diner Deluxe,Trondheim,delta2\n",
+        );
+        run_update(&config, &[dir.join("delta2.csv")], None, None).unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(engine.store_status, StoreStatus::Ok);
+        assert_eq!(count_of(&engine, "deluxe"), 1);
+        assert_eq!(count_of(&engine, ""), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn incremental_update_without_store() {
+        let dir = temp_dir("upsert-nostore");
+        write_csv(&dir.join("data.csv"), CSV);
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+
+        write_csv(
+            &dir.join("delta.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             300,Gamma Group Global,Oslo,c2\n",
+        );
+        run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(count_of(&engine, ""), 3);
+        assert_eq!(count_of(&engine, "gruppen"), 0, "old version replaced");
+        assert_eq!(count_of(&engine, "global"), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Updates refuse to run against the wrong foundation: no primary key,
+    /// no index yet, or an index built with a different schema.
+    #[test]
+    fn incremental_update_guardrails() {
+        let dir = temp_dir("guard");
+        write_csv(&dir.join("data.csv"), CSV);
+
+        // No primary key configured.
+        let no_pk = test_config(&dir, vec![source(&dir, None)], StoreConfig::default());
+        let err = run_update(&no_pk, &[dir.join("data.csv")], None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("primary key"), "got: {err}");
+
+        // No index built yet.
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        let err = run_update(&config, &[dir.join("data.csv")], None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("full import"), "got: {err}");
+
+        // Schema drift since the index was built.
+        run_import(&config).unwrap();
+        let mut drifted_fields = vec![
+            text_field("name", true),
+            keyword_field("org_number"),
+            keyword_field("country_code"),
+        ];
+        drifted_fields.push(keyword_field("city"));
+        let drifted = Arc::new(Config {
+            server: ServerConfig {
+                port: 0,
+                index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: drifted_fields,
+            },
+            sources: vec![source(&dir, None)],
+            mappings: HashMap::new(),
+            store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
+        });
+        let err = run_update(&drifted, &[dir.join("data.csv")], None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("different schema"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Primary keys go through the same folding as the index terms, so a
+    /// differently-cased key still hits its document.
+    #[test]
+    fn incremental_keys_fold_like_the_index() {
+        let dir = temp_dir("foldkey");
+        write_csv(
+            &dir.join("data.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             A100,Acme Rockets,Oslo,alpha\n\
+             B200,Beta Bakery,Bergen,bravo\n",
+        );
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+
+        // Upsert with a lowercased key replaces, not duplicates.
+        write_csv(
+            &dir.join("delta.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             a100,Acme Rebuilt,Oslo,alpha2\n",
+        );
+        run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(count_of(&engine, ""), 2);
+        assert_eq!(count_of(&engine, "rebuilt"), 1);
+        drop(engine);
+
+        // Delete with the other casing.
+        assert_eq!(run_delete(&config, &["b200".to_string()]).unwrap(), 1);
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(count_of(&engine, ""), 1);
 
         let _ = std::fs::remove_dir_all(dir);
     }

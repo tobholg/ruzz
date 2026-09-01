@@ -167,20 +167,38 @@ fn open_store(config: &Config, reader: &IndexReader) -> anyhow::Result<StoreRead
     let pairing = store::read_index_pairing(&config.server.index_path).ok_or_else(|| {
         anyhow::anyhow!("index has no store pairing file — re-run import with [store] enabled")
     })?;
-    if pairing.generation != store.meta.generation {
+    if pairing.generation != store.generation() {
         anyhow::bail!(
             "store generation {} does not match index generation {} — re-run import",
-            store.meta.generation,
+            store.generation(),
             pairing.generation
         );
     }
     let num_docs = reader.searcher().num_docs();
-    if store.doc_count() != num_docs {
-        anyhow::bail!(
-            "store holds {} docs but index holds {} — re-run import",
-            store.doc_count(),
-            num_docs
-        );
+    match pairing.doc_count {
+        // Incremental updates leave superseded versions in the store, so the
+        // live index holds fewer docs than the store holds refs. The pairing
+        // records how many refs the index may hand out; the store must reach
+        // at least that far (more is a harmless in-flight append).
+        Some(refs_issued) => {
+            if store.doc_count() < refs_issued {
+                anyhow::bail!(
+                    "store holds {} docs but the index references up to {} — re-run import",
+                    store.doc_count(),
+                    refs_issued
+                );
+            }
+        }
+        // Pre-incremental pairing: refs were exactly the doc count.
+        None => {
+            if store.doc_count() != num_docs {
+                anyhow::bail!(
+                    "store holds {} docs but index holds {} — re-run import",
+                    store.doc_count(),
+                    num_docs
+                );
+            }
+        }
     }
     Ok(store)
 }
@@ -1270,6 +1288,7 @@ pub mod tests {
                 strict_params: false,
             },
             schema: SchemaConfig {
+                primary_key: None,
                 fields: vec![
                     FieldConfig {
                         name: "city".to_string(),
@@ -2299,6 +2318,7 @@ pub mod tests {
                 strict_params: false,
             },
             schema: SchemaConfig {
+                primary_key: None,
                 fields: vec![
                     FieldConfig {
                         name: "city".to_string(),
@@ -2518,6 +2538,7 @@ pub mod tests {
                 strict_params: false,
             },
             schema: SchemaConfig {
+                primary_key: None,
                 fields: vec![field],
             },
             sources: Vec::new(),
