@@ -134,6 +134,172 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
     })
 }
 
+#[derive(Debug, Default)]
+pub struct CheckReport {
+    pub rows: u64,
+    /// Rows the import would reject outright (e.g. an invalid boolean).
+    pub bad_rows: u64,
+    pub bad_number_cells: u64,
+    pub empty_keys: u64,
+    pub duplicate_keys: u64,
+    /// Human-readable findings, worst first-ish.
+    pub problems: Vec<String>,
+}
+
+/// Dry-run every configured source: parse all rows, exercise the same
+/// canonicalization the import would, and report what it finds — without
+/// writing a byte. This is also where duplicate primary keys get caught:
+/// a full import deliberately does not pay a per-row dedup at 20M docs,
+/// so the check is the tool that answers "is my source unique by key?".
+pub fn run_check(config: &Config) -> anyhow::Result<CheckReport> {
+    const MAX_ROW_PROBLEMS: usize = 5;
+
+    let (schema, field_map) = build_schema(&config.schema, config.store.enabled);
+    let pk = config.schema.primary_key.as_ref().map(|name| {
+        let fc = config
+            .schema
+            .fields
+            .iter()
+            .find(|f| &f.name == name)
+            .expect("validated by config");
+        (name.clone(), !fc.case_sensitive)
+    });
+
+    let mut report = CheckReport::default();
+    // Key hashes, not keys: bounds memory at 8 bytes per row. A hash
+    // collision would report one duplicate too many — irrelevant at the
+    // rates this reports on.
+    let mut seen_keys: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut metadata_collector = ImportFieldMetadataCollector::new(&config.schema.fields);
+
+    for source in &config.sources {
+        let label = source.path.display();
+        let mapping = source.resolved_mapping(&config.mappings);
+        let format = source.resolved_format();
+        let (mut reader, headers, _bytes) = RecordReader::open(&source.path, format)?;
+
+        if format == SourceFormat::Csv {
+            for (field, column) in &mapping {
+                if !headers.iter().any(|h| h == column) {
+                    report.problems.push(format!(
+                        "{}: mapping {} = \"{}\" names a column the file does not have — the field will be empty",
+                        label, field, column
+                    ));
+                }
+            }
+        }
+
+        let mut sidecar = match &source.sidecar {
+            Some(path) if config.store.enabled && config.store.source == StoreSource::Sidecar => {
+                Some(SidecarReader::open(path)?)
+            }
+            _ => None,
+        };
+
+        let mut indexer = RowIndexer::new(
+            format,
+            headers,
+            &mapping,
+            &source.defaults,
+            &schema,
+            &field_map,
+            &config.schema.fields,
+        );
+        let mut rows = 0u64;
+        let mut row_problems = 0usize;
+        loop {
+            let record = match reader.next() {
+                Ok(Some(record)) => record,
+                Ok(None) => break,
+                Err(e) => {
+                    // A stream-level parse error (bad JSON line, broken CSV)
+                    // is where the import would die too.
+                    report.bad_rows += 1;
+                    report.problems.push(format!("{}: {:#}", label, e));
+                    break;
+                }
+            };
+            rows += 1;
+
+            if let Some((pk_name, fold)) = &pk {
+                let key = indexer.raw_value(record, pk_name).unwrap_or_default();
+                let key = key.trim();
+                if key.is_empty() {
+                    report.empty_keys += 1;
+                } else {
+                    let folded = if *fold {
+                        key.to_lowercase()
+                    } else {
+                        key.to_string()
+                    };
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&folded, &mut hasher);
+                    if !seen_keys.insert(std::hash::Hasher::finish(&hasher)) {
+                        report.duplicate_keys += 1;
+                    }
+                }
+            }
+
+            match indexer.build_doc(record, &mut metadata_collector, None, None) {
+                Ok(_) => {}
+                Err(e) => {
+                    report.bad_rows += 1;
+                    row_problems += 1;
+                    if row_problems <= MAX_ROW_PROBLEMS {
+                        report
+                            .problems
+                            .push(format!("{}: row {}: {:#}", label, rows, e));
+                    }
+                }
+            }
+            let mut sidecar_dead = false;
+            if let Some(sidecar) = sidecar.as_mut() {
+                if let Err(e) = sidecar.next_line() {
+                    report.problems.push(format!("{:#}", e));
+                    sidecar_dead = true;
+                }
+            }
+            if sidecar_dead {
+                sidecar = None; // one alignment finding per sidecar is enough
+            }
+        }
+        if row_problems > MAX_ROW_PROBLEMS {
+            report.problems.push(format!(
+                "{}: …and {} more rejected row(s)",
+                label,
+                row_problems - MAX_ROW_PROBLEMS
+            ));
+        }
+        if let Some(sidecar) = sidecar.as_mut() {
+            if let Err(e) = sidecar.expect_exhausted(rows) {
+                report.problems.push(format!("{:#}", e));
+            }
+        }
+        report.rows += rows;
+        report.bad_number_cells += indexer.bad_number_cells;
+        indexer.report_bad_number_cells(&source.path);
+    }
+
+    println!(
+        "✓ checked {} row(s) across {} source(s)",
+        report.rows,
+        config.sources.len()
+    );
+    if let Some((pk_name, _)) = &pk {
+        println!(
+            "  primary key '{}': {} empty, {} duplicate",
+            pk_name, report.empty_keys, report.duplicate_keys
+        );
+    }
+    if report.problems.is_empty() && report.bad_rows == 0 {
+        println!("  no problems found");
+    }
+    for problem in &report.problems {
+        println!("  ⚠ {}", problem);
+    }
+    Ok(report)
+}
+
 fn run_import_inner(config: &Config) -> anyhow::Result<ImportStats> {
     let store_enabled = config.store.enabled;
     let (schema, field_map) = build_schema(&config.schema, store_enabled);
@@ -530,14 +696,81 @@ pub fn run_update(
     files: &[std::path::PathBuf],
     like: Option<&Path>,
     sidecar: Option<&Path>,
+    format: Option<SourceFormat>,
 ) -> anyhow::Result<UpdateStats> {
     let sources: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
     logged(config, "update", &sources, |event| {
-        let stats = run_update_inner(config, files, like, sidecar)?;
+        let stats = run_update_inner(config, files, like, sidecar, format)?;
         event.rows = stats.rows;
         event.skipped = stats.skipped_no_key;
         Ok(stats)
     })
+}
+
+/// With several sources configured and no --like, a delta usually matches
+/// exactly one source's mapping — every mapped column (or top-level JSON
+/// key) present in the delta. Anything ambiguous keeps requiring the flag:
+/// guessing between mappings is how rows land in the wrong fields.
+fn infer_template<'a>(
+    config: &'a Config,
+    first: &Path,
+) -> anyhow::Result<&'a crate::config::SourceConfig> {
+    let ask = || {
+        anyhow::anyhow!(
+            "config has {} sources — pass --like <source path> to say which mapping the delta uses",
+            config.sources.len()
+        )
+    };
+    if first == Path::new("-") {
+        return Err(ask()); // stdin cannot be peeked and then re-read
+    }
+    let format = crate::config::detect_format(first);
+    let (mut reader, headers, _bytes) = RecordReader::open(first, format)?;
+    let observed: std::collections::HashSet<String> = match format {
+        SourceFormat::Csv => headers.into_iter().collect(),
+        SourceFormat::Jsonl => match reader.next()? {
+            Some(RecordRef::Json(serde_json::Value::Object(obj))) => obj.keys().cloned().collect(),
+            _ => Default::default(),
+        },
+    };
+
+    let candidates: Vec<&crate::config::SourceConfig> = config
+        .sources
+        .iter()
+        .filter(|source| {
+            let mapping = source.resolved_mapping(&config.mappings);
+            !mapping.is_empty()
+                && mapping.values().all(|col| {
+                    // For a JSONL delta only the top-level key is observable.
+                    let key = col.split('.').next().unwrap_or(col);
+                    observed.contains(key)
+                })
+        })
+        .collect();
+
+    match candidates.as_slice() {
+        [] => Err(ask()),
+        [one] => {
+            println!(
+                "  delta matches the mapping of {} — using its mapping and defaults (pass --like to override)",
+                one.path.display()
+            );
+            Ok(one)
+        }
+        [head, rest @ ..] => {
+            // Several matches are still unambiguous when they would behave
+            // identically.
+            let same = rest.iter().all(|c| {
+                c.resolved_mapping(&config.mappings) == head.resolved_mapping(&config.mappings)
+                    && c.defaults == head.defaults
+            });
+            if same {
+                Ok(head)
+            } else {
+                Err(ask())
+            }
+        }
+    }
 }
 
 fn run_update_inner(
@@ -545,6 +778,7 @@ fn run_update_inner(
     files: &[std::path::PathBuf],
     like: Option<&Path>,
     sidecar: Option<&Path>,
+    format_override: Option<SourceFormat>,
 ) -> anyhow::Result<UpdateStats> {
     if files.is_empty() {
         bail!("no delta files given");
@@ -568,10 +802,7 @@ fn run_update_inner(
             })?,
         None => match config.sources.as_slice() {
             [only] => only,
-            _ => bail!(
-                "config has {} sources — pass --like <source path> to say which mapping the delta uses",
-                config.sources.len()
-            ),
+            _ => infer_template(config, &files[0])?,
         },
     };
     let mapping = template.resolved_mapping(&config.mappings);
@@ -628,8 +859,15 @@ fn run_update_inner(
     for path in files {
         // The delta's own extension decides its encoding; the template only
         // lends its mapping and defaults. A JSONL delta against a CSV source
-        // works when its keys match the mapping's column names.
-        let format = crate::config::detect_format(path);
+        // works when its keys match the mapping's column names. Stdin has no
+        // extension, so it follows the template unless --format says.
+        let format = format_override.unwrap_or_else(|| {
+            if path == Path::new("-") {
+                template.resolved_format()
+            } else {
+                crate::config::detect_format(path)
+            }
+        });
         let (mut reader, headers, _bytes) = RecordReader::open(path, format)?;
         let mut indexer = RowIndexer::new(
             format,
@@ -818,6 +1056,10 @@ impl RecordReader {
     /// Open a source. Returns the reader, the CSV header row (empty for
     /// JSONL, which addresses values by path instead), and the byte counter
     /// driving the progress bar.
+    ///
+    /// The path `-` reads standard input, and a `.gz` suffix streams through
+    /// a gzip decoder. The counter always tracks raw input bytes — before
+    /// decompression — so progress and ETA follow the on-disk file.
     fn open(
         path: &Path,
         format: SourceFormat,
@@ -826,14 +1068,27 @@ impl RecordReader {
         Vec<String>,
         std::sync::Arc<std::sync::atomic::AtomicU64>,
     )> {
-        let file =
-            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let raw: Box<dyn std::io::Read> = Box::new(ByteCounter {
-            inner: file,
+        let (input, label): (Box<dyn std::io::Read>, String) = if path == Path::new("-") {
+            (Box::new(std::io::stdin()), "stdin".to_string())
+        } else {
+            let file =
+                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            (Box::new(file), path.display().to_string())
+        };
+        let counted: Box<dyn std::io::Read> = Box::new(ByteCounter {
+            inner: input,
             count: std::sync::Arc::clone(&count),
         });
-        Self::from_reader(raw, format, &path.display().to_string(), count)
+        let decoded: Box<dyn std::io::Read> = if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+        {
+            Box::new(flate2::read::MultiGzDecoder::new(counted))
+        } else {
+            counted
+        };
+        Self::from_reader(decoded, format, &label, count)
     }
 
     fn from_reader(
@@ -1930,7 +2185,7 @@ org_number,company_name,city,secret_extra
              400,Delta Diner,Trondheim,delta\n\
              ,Keyless Corp,Nowhere,x\n",
         );
-        let stats = run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+        let stats = run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
         assert_eq!(stats.rows, 2);
         assert_eq!(stats.skipped_no_key, 1);
 
@@ -1995,7 +2250,7 @@ org_number,company_name,city,secret_extra
             "org_number,company_name,city,secret_extra\n\
              400,Delta Diner Deluxe,Trondheim,delta2\n",
         );
-        run_update(&config, &[dir.join("delta2.csv")], None, None).unwrap();
+        run_update(&config, &[dir.join("delta2.csv")], None, None, None).unwrap();
         let engine = SearchEngine::open(config).unwrap();
         assert_eq!(engine.store_status, StoreStatus::Ok);
         assert_eq!(count_of(&engine, "deluxe"), 1);
@@ -2124,10 +2379,120 @@ org_number,company_name,city,secret_extra
             "{\"navn\":\"Acme Rockets International\",\"org\":\"100\",\"address\":{\"city\":\"Oslo\"}}\n",
         )
         .unwrap();
-        run_update(&config, &[dir.join("delta.jsonl")], None, None).unwrap();
+        run_update(&config, &[dir.join("delta.jsonl")], None, None, None).unwrap();
         let engine = SearchEngine::open(config).unwrap();
         assert_eq!(count_of(&engine, "international"), 1);
         assert_eq!(count_of(&engine, ""), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Gzipped sources stream through a decoder — no manual gunzip step.
+    #[test]
+    fn gzipped_sources_import_transparently() {
+        let dir = temp_dir("gz");
+        let gz_path = dir.join("data.csv.gz");
+        let mut encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&gz_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        std::io::Write::write_all(&mut encoder, CSV.as_bytes()).unwrap();
+        encoder.finish().unwrap();
+
+        let mut gz_source = source(&dir, None);
+        gz_source.path = gz_path;
+        let config = test_config(&dir, vec![gz_source], StoreConfig::default());
+
+        let stats = run_import(&config).unwrap();
+        assert_eq!(stats.total_rows, 3);
+        let engine = SearchEngine::open(config).unwrap();
+        assert_eq!(count_of(&engine, "acme"), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The dry run reports what an import would find — duplicate and empty
+    /// primary keys, bad numeric cells, mapping entries naming no column —
+    /// without writing anything.
+    #[test]
+    fn check_reports_without_writing() {
+        let dir = temp_dir("check");
+        write_csv(
+            &dir.join("data.csv"),
+            "org_number,company_name,city,secret_extra\n\
+             100,Acme Rockets,Oslo,a\n\
+             100,Acme Duplicate,Oslo,b\n\
+             ,Keyless Corp,Bergen,c\n\
+             300,Gamma Gruppen,Oslo,d\n",
+        );
+        let mut bad_mapping_source = source(&dir, None);
+        bad_mapping_source
+            .mapping
+            .insert("country_code".to_string(), "no_such_column".to_string());
+        let config = test_config_pk(
+            &dir,
+            vec![bad_mapping_source],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+
+        let report = run_check(&config).unwrap();
+        assert_eq!(report.rows, 4);
+        assert_eq!(report.bad_rows, 0);
+        assert_eq!(report.duplicate_keys, 1);
+        assert_eq!(report.empty_keys, 1);
+        assert!(
+            report.problems.iter().any(|p| p.contains("no_such_column")),
+            "unmapped column reported: {:?}",
+            report.problems
+        );
+        assert!(!config.server.index_path.exists(), "check writes nothing");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With several sources configured, an unambiguous delta is matched to
+    /// its source by column set; a delta matching nothing still asks for
+    /// --like.
+    #[test]
+    fn delta_source_is_inferred_from_its_columns() {
+        let dir = temp_dir("infer");
+        write_csv(&dir.join("data.csv"), CSV);
+        write_csv(
+            &dir.join("other.csv"),
+            "orgnr,navn\n900,Norsk Bedrift\n", // different column names
+        );
+        let mut other = source(&dir, None);
+        other.path = dir.join("other.csv");
+        other.mapping = HashMap::from([
+            ("name".to_string(), "navn".to_string()),
+            ("org_number".to_string(), "orgnr".to_string()),
+        ]);
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None), other],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+
+        // Columns match the second source only — inferred, no --like needed.
+        write_csv(
+            &dir.join("delta.csv"),
+            "orgnr,navn\n900,Norsk Bedrift ASA\n",
+        );
+        run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(count_of(&engine, "asa"), 1);
+        assert_eq!(count_of(&engine, ""), 4, "upsert into the right mapping");
+        drop(engine);
+
+        // A delta matching neither source still requires the flag.
+        write_csv(&dir.join("mystery.csv"), "id,label\n1,x\n");
+        let err = run_update(&config, &[dir.join("mystery.csv")], None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--like"), "got: {err}");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2151,7 +2516,7 @@ org_number,company_name,city,secret_extra
             "{\"company_name\":\"Acme via JSON\",\"org_number\":\"100\"}\n",
         )
         .unwrap();
-        run_update(&config, &[dir.join("delta.jsonl")], None, None).unwrap();
+        run_update(&config, &[dir.join("delta.jsonl")], None, None, None).unwrap();
 
         let engine = SearchEngine::open(config).unwrap();
         assert_eq!(count_of(&engine, "via json"), 1);
@@ -2177,7 +2542,7 @@ org_number,company_name,city,secret_extra
             "org_number,company_name,city,secret_extra\n\
              300,Gamma Group Global,Oslo,c2\n",
         );
-        run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+        run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
 
         let engine = SearchEngine::open(config).unwrap();
         assert_eq!(count_of(&engine, ""), 3);
@@ -2196,7 +2561,7 @@ org_number,company_name,city,secret_extra
 
         // No primary key configured.
         let no_pk = test_config(&dir, vec![source(&dir, None)], StoreConfig::default());
-        let err = run_update(&no_pk, &[dir.join("data.csv")], None, None)
+        let err = run_update(&no_pk, &[dir.join("data.csv")], None, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("primary key"), "got: {err}");
@@ -2208,7 +2573,7 @@ org_number,company_name,city,secret_extra
             StoreConfig::default(),
             Some("org_number"),
         );
-        let err = run_update(&config, &[dir.join("data.csv")], None, None)
+        let err = run_update(&config, &[dir.join("data.csv")], None, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("full import"), "got: {err}");
@@ -2239,7 +2604,7 @@ org_number,company_name,city,secret_extra
             store: StoreConfig::default(),
             dashboard: DashboardConfig::default(),
         });
-        let err = run_update(&drifted, &[dir.join("data.csv")], None, None)
+        let err = run_update(&drifted, &[dir.join("data.csv")], None, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("different schema"), "got: {err}");
@@ -2272,7 +2637,7 @@ org_number,company_name,city,secret_extra
             "org_number,company_name,city,secret_extra\n\
              a100,Acme Rebuilt,Oslo,alpha2\n",
         );
-        run_update(&config, &[dir.join("delta.csv")], None, None).unwrap();
+        run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
         let engine = SearchEngine::open(config.clone()).unwrap();
         assert_eq!(count_of(&engine, ""), 2);
         assert_eq!(count_of(&engine, "rebuilt"), 1);

@@ -241,7 +241,7 @@ pub enum SearchMode {
 }
 
 /// How a source file's records are encoded.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceFormat {
     Csv,

@@ -17,24 +17,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Import CSV sources into the index
-    Import,
+    /// Import the configured sources (CSV or JSONL) into the index
+    Import {
+        /// Dry run: parse every source and report row counts, rejected
+        /// rows, unmapped columns, and empty/duplicate primary keys —
+        /// without touching the index
+        #[arg(long)]
+        check: bool,
+    },
     /// Upsert rows from delta CSV files into the existing index
     ///
     /// Needs primary_key under [schema]. Each row replaces any document
     /// carrying the same key, in one commit — no full re-import, and a
     /// running server picks the change up on its own.
     Update {
-        /// Delta CSV files, in the same format as a configured source
+        /// Delta files (CSV or JSONL, optionally .gz), in the same shape as
+        /// a configured source. Pass "-" to read a delta from stdin.
         files: Vec<std::path::PathBuf>,
         /// The [[sources]] entry (by path) whose mapping and defaults the
-        /// delta files follow. Optional when only one source is configured.
+        /// delta files follow. With several sources configured, an
+        /// unambiguous delta is matched by its columns automatically.
         #[arg(long)]
         like: Option<std::path::PathBuf>,
         /// Aligned JSONL sidecar for the delta file (required when
         /// [store] source = "sidecar"; pairs with exactly one delta file)
         #[arg(long)]
         sidecar: Option<std::path::PathBuf>,
+        /// Delta encoding. Defaults to the file extension — or, for stdin,
+        /// to the matched source's format.
+        #[arg(long, value_enum)]
+        format: Option<ruzz::config::SourceFormat>,
     },
     /// Delete documents by primary key
     ///
@@ -66,15 +78,26 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(config);
 
     match cli.command {
-        Command::Import => {
-            import::run_import(&config)?;
+        Command::Import { check } => {
+            if check {
+                let report = import::run_check(&config)?;
+                if report.bad_rows > 0 {
+                    anyhow::bail!(
+                        "--check found {} row(s) the import would reject",
+                        report.bad_rows
+                    );
+                }
+            } else {
+                import::run_import(&config)?;
+            }
         }
         Command::Update {
             files,
             like,
             sidecar,
+            format,
         } => {
-            import::run_update(&config, &files, like.as_deref(), sidecar.as_deref())?;
+            import::run_update(&config, &files, like.as_deref(), sidecar.as_deref(), format)?;
         }
         Command::Delete { keys, file } => {
             let mut keys = keys;
