@@ -397,6 +397,27 @@ Tested at scale on 54.6M records across 13 datasets:
 
 For comparison, Postgres `pg_trgm` on the 1.15M dataset: 2ms - 3000ms depending on query. The variance is the problem ruzz solves.
 
+### Benchmarks
+
+The query paths above are guarded by a criterion suite over a deterministic
+synthetic corpus (200k docs by default, built once and cached under
+`target/`):
+
+```bash
+cargo bench
+```
+
+To compare a change against the current state, save a baseline first:
+
+```bash
+cargo bench -- --save-baseline before
+# ...make the change...
+cargo bench -- --baseline before
+```
+
+`RUZZ_BENCH_DOCS=2000000 cargo bench` benches at a different corpus size;
+delete `target/tmp/ruzz-bench-*` to force a fixture rebuild.
+
 ## Why not just use...
 
 **Postgres pg_trgm?** — Works until you hit a short or common query and wait 3 seconds. ruzz has no pathological cases — every query is bounded.
