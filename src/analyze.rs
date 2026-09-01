@@ -157,6 +157,85 @@ impl Tokenizer for EdgePrefixTokenizer {
     }
 }
 
+// ── string similarity (the rerank stage) ───────────────────────────────────
+
+/// Jaro-Winkler over chars: 1.0 for identical strings, 0.0 for disjoint,
+/// with the Winkler prefix bonus that suits names (typos cluster at the
+/// end, prefixes carry identity).
+pub fn jaro_winkler(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let window = (a.len().max(b.len()) / 2).saturating_sub(1);
+    let mut b_taken = vec![false; b.len()];
+    let mut matches = 0usize;
+    let mut a_matched = Vec::with_capacity(a.len());
+    for (i, &ca) in a.iter().enumerate() {
+        let lo = i.saturating_sub(window);
+        let hi = (i + window + 1).min(b.len());
+        for j in lo..hi {
+            if !b_taken[j] && b[j] == ca {
+                b_taken[j] = true;
+                matches += 1;
+                a_matched.push(ca);
+                break;
+            }
+        }
+    }
+    if matches == 0 {
+        return 0.0;
+    }
+    let b_matched: Vec<char> = b
+        .iter()
+        .zip(&b_taken)
+        .filter(|(_, taken)| **taken)
+        .map(|(c, _)| *c)
+        .collect();
+    let transpositions = a_matched
+        .iter()
+        .zip(&b_matched)
+        .filter(|(x, y)| x != y)
+        .count()
+        / 2;
+    let m = matches as f64;
+    let jaro = (m / a.len() as f64 + m / b.len() as f64 + (m - transpositions as f64) / m) / 3.0;
+    let prefix = a.iter().zip(&b).take(4).take_while(|(x, y)| x == y).count() as f64;
+    jaro + prefix * 0.1 * (1.0 - jaro)
+}
+
+/// Similarity between a folded query and a folded field value, word-aware:
+/// each query word takes its best match among the value's words, weighted
+/// by word length. Order-invariant ("kraft berg" ≈ "berg kraft as") and
+/// indifferent to extra value words (legal-form suffixes, middle names) —
+/// what the query asked for has to be present; what it didn't is free.
+pub fn name_similarity(query_folded: &str, value_folded: &str) -> f64 {
+    let value_words: Vec<&str> = value_folded.split_whitespace().collect();
+    if value_words.is_empty() {
+        return 0.0;
+    }
+    let mut weighted = 0.0;
+    let mut weight = 0.0;
+    for query_word in query_folded.split_whitespace() {
+        let best = value_words
+            .iter()
+            .map(|value_word| jaro_winkler(query_word, value_word))
+            .fold(0.0, f64::max);
+        let w = query_word.chars().count() as f64;
+        weighted += best * w;
+        weight += w;
+    }
+    if weight == 0.0 {
+        0.0
+    } else {
+        weighted / weight
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +269,30 @@ mod tests {
         }
         // Folded to "saet" first, then trigrammed — never a 4-char token.
         assert_eq!(texts, vec!["sae", "aet"]);
+    }
+
+    #[test]
+    fn jaro_winkler_behaves_at_the_edges() {
+        assert_eq!(jaro_winkler("bergsen", "bergsen"), 1.0);
+        assert_eq!(jaro_winkler("abc", "xyz"), 0.0);
+        assert_eq!(jaro_winkler("", ""), 1.0);
+        assert_eq!(jaro_winkler("abc", ""), 0.0);
+        // One late typo stays close; prefix bonus keeps it above a reshuffle.
+        let typo = jaro_winkler("bergsen", "bergson");
+        assert!(typo > 0.9, "late typo scores high, got {typo}");
+        let scramble = jaro_winkler("bergsen", "nesgreb");
+        assert!(typo > scramble);
+    }
+
+    #[test]
+    fn name_similarity_ignores_word_order_and_suffixes() {
+        let straight = name_similarity("berg kraft", "berg kraft as");
+        let reordered = name_similarity("kraft berg", "berg kraft as");
+        assert!((straight - reordered).abs() < 1e-9, "order must not matter");
+        assert!(straight > 0.99, "extra suffix words are free");
+        // A query word with no counterpart drags the score down.
+        let missing = name_similarity("berg kraft nordvik", "berg kraft as");
+        assert!(missing < straight - 0.1);
     }
 
     #[test]

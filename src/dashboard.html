@@ -2488,7 +2488,7 @@ Content-Type: application/json
 
     <h2>Example response</h2>
     <pre>${esc(sampleResponse)}</pre>
-    <p>Number fields return as JSON numbers, or <code>null</code> when the source had no value. Boolean fields return as JSON booleans or <code>null</code>. Enum/keyword/text fields return as strings. <code>_score</code> is the relevance score (higher = better match).</p>
+    <p>Number fields return as JSON numbers, or <code>null</code> when the source had no value. Boolean fields return as JSON booleans or <code>null</code>. Enum/keyword/text fields return as strings. <code>_score</code> is the relevance score (higher = better match); for fuzzy queries it is a 0–1 name similarity between the query and the matched value.</p>
   `;
 
   const md = `# ruzz API Documentation
@@ -2580,7 +2580,7 @@ Returns \`{"status": "ok"}\`.
 ${sampleResponse}
 \`\`\`
 
-Number fields return as JSON numbers, or \`null\` when the source had no value. Boolean fields return as JSON booleans or \`null\`. Enum/keyword/text fields return as strings. \`_score\` is the relevance score (higher = better match).
+Number fields return as JSON numbers, or \`null\` when the source had no value. Boolean fields return as JSON booleans or \`null\`. Enum/keyword/text fields return as strings. \`_score\` is the relevance score (higher = better match); for fuzzy queries it is a 0–1 name similarity between the query and the matched value.
 `;
 
   document.getElementById('copy-llm-btn').addEventListener('click', async () => {
