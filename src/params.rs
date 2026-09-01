@@ -249,6 +249,10 @@ pub fn endpoints(engine: &SearchEngine) -> Vec<(&'static str, &'static str)> {
             "GET /stats",
             "Runtime stats: documents, index size, memory, schema.",
         ),
+        (
+            "GET /activity",
+            "Import/update/delete history: recent events, per-day aggregates, store dead-weight.",
+        ),
         ("GET /health", "Liveness probe."),
     ];
     if engine.store.is_some() {
@@ -553,6 +557,7 @@ pub fn openapi(engine: &SearchEngine) -> serde_json::Value {
             "/fields": { "get": { "summary": "List every accepted query parameter" } },
             "/docs": { "get": { "summary": "Markdown documentation for this API" } },
             "/stats": { "get": { "summary": "Runtime stats and schema" } },
+            "/activity": { "get": { "summary": "Import/update/delete history and per-day aggregates" } },
             "/health": { "get": { "summary": "Liveness probe" } }
         }
     })

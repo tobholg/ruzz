@@ -2,6 +2,7 @@
 //! split exists so benchmarks (and, one day, embedders) can drive the
 //! engine directly instead of going through a spawned process.
 
+pub mod activity;
 pub mod analyze;
 pub mod config;
 pub mod dashboard;

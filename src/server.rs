@@ -104,6 +104,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/openapi.json", get(handle_openapi))
         .route("/api", get(handle_api_index))
         .route("/stats", get(handle_stats))
+        .route("/activity", get(handle_activity))
         .route("/health", get(handle_health))
         .with_state(state);
 
@@ -1196,6 +1197,52 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                         })
                     }).collect::<Vec<_>>(),
                 },
+        })
+    })
+    .await;
+
+    Json(outcome.unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })))
+}
+
+/// Operation history for the Activity tab and external monitoring: recent
+/// events (newest first), per-day aggregates for the heatmap, and the
+/// store's accumulated dead weight (refs issued vs live docs — superseded
+/// versions an incremental update left behind, reclaimed by a full import).
+async fn handle_activity(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let outcome = run_blocking(&state, move |state| {
+        let config = &state.engine.config;
+        let log = crate::activity::read_log(&crate::activity::activity_path(config));
+        let live_docs = state.engine.reader.searcher().num_docs();
+
+        let index_size = dir_size(&config.server.index_path).unwrap_or(0);
+        let store_size = if config.store.enabled {
+            dir_size(&config.resolve_store_path()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let store = state.engine.store.as_ref().map(|store| {
+            let refs_issued = store.doc_count();
+            let superseded = refs_issued.saturating_sub(live_docs);
+            serde_json::json!({
+                "refs_issued": refs_issued,
+                "superseded": superseded,
+                "superseded_pct": if refs_issued > 0 {
+                    superseded as f64 * 100.0 / refs_issued as f64
+                } else {
+                    0.0
+                },
+            })
+        });
+
+        serde_json::json!({
+            "events": log.events,
+            "days": log.days,
+            "total_events": log.total_events,
+            "documents": live_docs,
+            "disk_bytes": index_size + store_size,
+            "disk_human": format_bytes(index_size + store_size),
+            "store": store,
         })
     })
     .await;

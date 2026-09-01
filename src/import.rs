@@ -36,6 +36,10 @@ pub struct SourceStats {
 /// directory entry, so a serving process keeps reading the files it has
 /// already mapped. The space it holds is returned when it next restarts.
 pub fn collect_garbage(config: &Config) -> anyhow::Result<()> {
+    logged(config, "gc", &[], |_event| collect_garbage_inner(config))
+}
+
+fn collect_garbage_inner(config: &Config) -> anyhow::Result<()> {
     let index_path = &config.server.index_path;
     let before = dir_bytes(index_path);
     let index = tantivy::Index::open_in_dir(index_path)
@@ -92,7 +96,45 @@ struct StoreImport {
     next_ref: u64,
 }
 
+/// Run `op`, then append an activity event describing what happened —
+/// success or failure — before returning the result. The closure fills the
+/// event's counters on success; timing and error capture live here so every
+/// operation reports the same way.
+fn logged<T>(
+    config: &Config,
+    op: &str,
+    sources: &[&Path],
+    body: impl FnOnce(&mut crate::activity::ActivityEvent) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let start = Instant::now();
+    let mut event = crate::activity::ActivityEvent::new(op);
+    event.sources = sources
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        })
+        .collect();
+    let result = body(&mut event);
+    event.duration_ms = start.elapsed().as_millis() as u64;
+    if let Err(e) = &result {
+        event = event.failed(e);
+    }
+    crate::activity::log(config, &event);
+    result
+}
+
 pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
+    let sources: Vec<&Path> = config.sources.iter().map(|s| s.path.as_path()).collect();
+    logged(config, "import", &sources, |event| {
+        let stats = run_import_inner(config)?;
+        event.rows = stats.total_rows;
+        Ok(stats)
+    })
+}
+
+fn run_import_inner(config: &Config) -> anyhow::Result<ImportStats> {
     let store_enabled = config.store.enabled;
     let (schema, field_map) = build_schema(&config.schema, store_enabled);
     // Imports always write to the current default (or an explicit [store]
@@ -488,6 +530,21 @@ pub fn run_update(
     like: Option<&Path>,
     sidecar: Option<&Path>,
 ) -> anyhow::Result<UpdateStats> {
+    let sources: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
+    logged(config, "update", &sources, |event| {
+        let stats = run_update_inner(config, files, like, sidecar)?;
+        event.rows = stats.rows;
+        event.skipped = stats.skipped_no_key;
+        Ok(stats)
+    })
+}
+
+fn run_update_inner(
+    config: &Config,
+    files: &[std::path::PathBuf],
+    like: Option<&Path>,
+    sidecar: Option<&Path>,
+) -> anyhow::Result<UpdateStats> {
     if files.is_empty() {
         bail!("no delta files given");
     }
@@ -656,6 +713,14 @@ pub fn run_update(
 /// unreachable rather than being rewritten; the next full import reclaims
 /// them.
 pub fn run_delete(config: &Config, keys: &[String]) -> anyhow::Result<u64> {
+    logged(config, "delete", &[], |event| {
+        let deleted = run_delete_inner(config, keys)?;
+        event.deleted = deleted;
+        Ok(deleted)
+    })
+}
+
+fn run_delete_inner(config: &Config, keys: &[String]) -> anyhow::Result<u64> {
     if keys.is_empty() {
         bail!("no keys given");
     }
