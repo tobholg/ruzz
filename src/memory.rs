@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Parse a memory budget string like "512MB", "2GB", "100%", "unlimited"
 /// Returns the budget in bytes, or None for unlimited/100%
@@ -60,155 +60,97 @@ pub fn dir_size(path: &Path) -> u64 {
     total
 }
 
-/// Apply memory budget by pre-warming index pages up to the budget.
+/// Which file to warm first when the budget cannot hold everything. Term
+/// dictionaries and fast fields are touched by every query; posting lists
+/// next; stored documents only when a hit is rendered.
+fn warm_priority(path: &Path) -> u8 {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("term") => 0,
+        Some("fast") => 1,
+        Some("fieldnorm") => 2,
+        Some("idx") => 3,
+        Some("store") => 5,
+        _ => 4,
+    }
+}
+
+/// Pre-read index files into the OS page cache, hottest structures first,
+/// until the budget is spent.
 ///
-/// Strategy:
-/// - Scan all files in the index directory
-/// - Calculate what fraction of the index fits in the budget
-/// - For each file, read (warm) that fraction from the start
-///   (term dictionaries and posting list heads live at the front)
-/// - Use madvise to hint the OS about the rest
-///
-/// If budget is None (unlimited), warm everything.
+/// This is a warm-up, not a limit: residency is the operating system's call,
+/// and nothing here can cap the process. To actually bound memory, use the
+/// platform's mechanism (cgroups, a VM size). What the budget buys is a
+/// cold-start without page-fault latency on the structures every query
+/// touches, in a controlled amount of I/O.
 pub fn apply_memory_budget(index_path: &Path, budget_str: &str) {
     let index_size = dir_size(index_path);
     let budget = parse_memory_budget(budget_str, index_size);
 
+    let mut files: Vec<(u8, u64, PathBuf)> = Vec::new();
+    collect_files(index_path, &mut files);
+    files.sort_by_key(|(priority, size, _)| (*priority, *size));
+
+    let mut remaining = budget.unwrap_or(u64::MAX);
+    let mut warmed_bytes = 0u64;
+    for (_, size, path) in &files {
+        if remaining == 0 {
+            break;
+        }
+        let take = (*size).min(remaining);
+        warm_file(path, take);
+        warmed_bytes += take;
+        remaining = remaining.saturating_sub(take);
+    }
+
     match budget {
-        None => {
-            // Unlimited: warm everything
-            println!(
-                "  memory: unlimited (warming full index: {})",
-                format_bytes(index_size)
-            );
-            warm_files(index_path, 1.0);
-        }
-        Some(budget_bytes) => {
-            let ratio = if index_size > 0 {
-                (budget_bytes as f64 / index_size as f64).min(1.0)
-            } else {
-                1.0
-            };
-            println!(
-                "  memory: {} budget / {} index ({:.0}% warm)",
-                format_bytes(budget_bytes),
-                format_bytes(index_size),
-                ratio * 100.0
-            );
-            warm_files(index_path, ratio);
-
-            // Advise OS on cold pages
-            #[cfg(unix)]
-            advise_cold(index_path, ratio);
-        }
+        None => println!(
+            "  memory: unlimited (warmed full index: {})",
+            format_bytes(index_size)
+        ),
+        Some(budget_bytes) => println!(
+            "  memory: warmed {} of {} index (budget {}); this is a warm-up, \
+             not a cap — cap the process with cgroups or similar",
+            format_bytes(warmed_bytes),
+            format_bytes(index_size),
+            format_bytes(budget_bytes),
+        ),
     }
 }
 
-/// Pre-read the first `ratio` of each file to pull pages into OS cache
-fn warm_files(dir: &Path, ratio: f64) {
+fn collect_files(dir: &Path, out: &mut Vec<(u8, u64, PathBuf)>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
-
     for entry in entries.flatten() {
         let path = entry.path();
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
-
         if meta.is_dir() {
-            warm_files(&path, ratio);
-            continue;
-        }
-
-        if !meta.is_file() {
-            continue;
-        }
-
-        let file_size = meta.len();
-        let warm_bytes = (file_size as f64 * ratio) as usize;
-
-        if warm_bytes == 0 {
-            continue;
-        }
-
-        // Read the file in chunks to pull pages into cache
-        if let Ok(file) = fs::File::open(&path) {
-            use std::io::Read;
-            let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
-            let mut warmed = 0usize;
-            let mut buf = [0u8; 256 * 1024];
-            while warmed < warm_bytes {
-                let to_read = (warm_bytes - warmed).min(buf.len());
-                match reader.read(&mut buf[..to_read]) {
-                    Ok(0) => break,
-                    Ok(n) => warmed += n,
-                    Err(_) => break,
-                }
-            }
+            collect_files(&path, out);
+        } else if meta.is_file() && meta.len() > 0 {
+            out.push((warm_priority(&path), meta.len(), path));
         }
     }
 }
 
-/// On Unix, use madvise to tell the OS the cold portion is low-priority
-#[cfg(unix)]
-fn advise_cold(dir: &Path, warm_ratio: f64) {
-    use std::os::unix::io::AsRawFd;
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+/// Read the first `bytes` of a file to pull its pages into the OS cache.
+fn warm_file(path: &Path, bytes: u64) {
+    use std::io::Read;
+    let Ok(file) = fs::File::open(path) else {
+        return;
     };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        if meta.is_dir() {
-            advise_cold(&path, warm_ratio);
-            continue;
-        }
-
-        if !meta.is_file() || meta.len() == 0 {
-            continue;
-        }
-
-        let file_size = meta.len() as usize;
-        let warm_bytes = (file_size as f64 * warm_ratio) as usize;
-        let cold_offset = warm_bytes;
-        let cold_len = file_size.saturating_sub(cold_offset);
-
-        if cold_len == 0 {
-            continue;
-        }
-
-        // mmap the file just to call madvise, then unmap
-        if let Ok(file) = fs::File::open(&path) {
-            let fd = file.as_raw_fd();
-            unsafe {
-                let ptr = libc::mmap(
-                    std::ptr::null_mut(),
-                    file_size,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    fd,
-                    0,
-                );
-                if ptr != libc::MAP_FAILED {
-                    // Tell OS: cold pages are low priority
-                    libc::madvise(
-                        (ptr as *mut u8).add(cold_offset) as *mut libc::c_void,
-                        cold_len,
-                        libc::MADV_DONTNEED,
-                    );
-                    libc::munmap(ptr, file_size);
-                }
-            }
+    let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
+    let mut warmed = 0u64;
+    let mut buf = [0u8; 256 * 1024];
+    while warmed < bytes {
+        let to_read = ((bytes - warmed) as usize).min(buf.len());
+        match reader.read(&mut buf[..to_read]) {
+            Ok(0) => break,
+            Ok(n) => warmed += n as u64,
+            Err(_) => break,
         }
     }
 }
@@ -243,5 +185,13 @@ mod tests {
             parse_memory_budget("10%", 545 * 1024 * 1024),
             Some(54 * 1024 * 1024 + 524288)
         );
+    }
+
+    #[test]
+    fn hot_structures_warm_first() {
+        assert!(warm_priority(Path::new("x.term")) < warm_priority(Path::new("x.idx")));
+        assert!(warm_priority(Path::new("x.fast")) < warm_priority(Path::new("x.idx")));
+        assert!(warm_priority(Path::new("x.idx")) < warm_priority(Path::new("x.store")));
+        assert!(warm_priority(Path::new("meta.json")) < warm_priority(Path::new("x.store")));
     }
 }

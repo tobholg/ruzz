@@ -85,22 +85,6 @@ fn human_bytes(bytes: u64) -> String {
     format!("{:.2} {}", value, UNITS[unit])
 }
 
-/// Count lines in a file quickly (for progress bar total)
-fn count_lines(path: &Path) -> u64 {
-    use std::io::{BufRead, BufReader};
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    let reader = BufReader::with_capacity(256 * 1024, file);
-    let mut count = 0u64;
-    for _ in reader.lines() {
-        count += 1;
-    }
-    // Subtract header row
-    count.saturating_sub(1)
-}
-
 /// Everything the per-source import loop needs to feed the document store.
 struct StoreImport {
     writer: store::StoreWriter,
@@ -186,7 +170,7 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
 
     let multi = MultiProgress::new();
     let style = ProgressStyle::with_template(
-        "{prefix:<30} {bar:30.cyan/dim} {pos:>10}/{len:10} {per_sec:>12} ETA {eta}",
+        "{prefix:<30} {bar:30.cyan/dim} {bytes:>10}/{total_bytes:10} {bytes_per_sec:>12} ETA {eta}",
     )
     .unwrap()
     .progress_chars("██░");
@@ -207,9 +191,12 @@ pub fn run_import(config: &Config) -> anyhow::Result<ImportStats> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.path.display().to_string());
 
-        // Count lines for progress bar
-        let line_count = count_lines(&source.path);
-        let pb = multi.add(ProgressBar::new(line_count));
+        // Progress by bytes: the file size is free, where counting lines
+        // meant reading every CSV twice.
+        let total_bytes = std::fs::metadata(&source.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let pb = multi.add(ProgressBar::new(total_bytes));
         pb.set_style(style.clone());
         pb.set_prefix(file_name.clone());
 
@@ -513,7 +500,7 @@ fn import_csv(
         count += 1;
 
         if count.is_multiple_of(10_000) {
-            pb.set_position(count);
+            pb.set_position(rdr.position().byte());
         }
     }
 
@@ -529,7 +516,7 @@ fn import_csv(
         );
     }
 
-    pb.set_position(count);
+    pb.set_position(rdr.position().byte());
     Ok(count)
 }
 

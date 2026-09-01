@@ -360,17 +360,19 @@ The built-in web dashboard. Try it.
 
 ## Memory Budget
 
-ruzz lets you control exactly how much RAM to dedicate to the search index:
+ruzz controls how much of the index it pre-warms into the OS page cache at startup:
 
 ```toml
-memory_budget = "100%"     # Keep everything in memory (fastest, default)
+memory_budget = "100%"     # Warm everything (fastest, default)
 memory_budget = "unlimited" # Same as 100%
-memory_budget = "2GB"       # Absolute limit
-memory_budget = "50%"       # Half the index stays warm
-memory_budget = "50MB"      # Minimal footprint, queries still work
+memory_budget = "2GB"       # Warm the hottest 2GB
+memory_budget = "50%"       # Warm half the index
+memory_budget = "50MB"      # Minimal warm-up, queries still work
 ```
 
-When budget < index size, ruzz pre-warms the most important index pages (term dictionaries, posting list heads) and lets the OS handle the rest via mmap. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
+When budget < index size, ruzz warms the structures every query touches first — term dictionaries and fast fields, then posting lists — and lets the OS page the rest in via mmap on demand. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
+
+To be clear about what this is: a warm-up, not a cap. Residency is always the OS's call — to actually bound the process's memory, use your platform's mechanism (cgroups, container limits).
 
 ## Performance
 

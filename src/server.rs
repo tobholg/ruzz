@@ -34,9 +34,17 @@ const MAX_MATCH_QUERY_LEN: usize = 200;
 const DEFAULT_CANDIDATES: usize = 5;
 const MAX_CANDIDATES: usize = 25;
 
+/// Cached /search responses before the cache resets. Entries are result
+/// pages (full=true is never cached), so worst case is modest.
+const SEARCH_CACHE_CAP: usize = 512;
+
 pub struct AppState {
     pub engine: SearchEngine,
     pub started_at: Instant,
+    /// Replayed /search responses — valid for the process lifetime because
+    /// the index is: imports swap directories, and a running server only
+    /// sees the new one on restart.
+    search_cache: std::sync::Mutex<HashMap<String, serde_json::Value>>,
     /// Caps concurrent query threads at the core count. Excess requests
     /// queue on the semaphore instead of spawning ever more blocking
     /// threads that fight over the same CPUs.
@@ -51,6 +59,7 @@ impl AppState {
         Self {
             engine,
             started_at: Instant::now(),
+            search_cache: std::sync::Mutex::new(HashMap::new()),
             query_permits: tokio::sync::Semaphore::new(permits),
         }
     }
@@ -108,6 +117,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     app.layer(CorsLayer::permissive())
 }
 
+/// Constant-time byte equality: the comparison must not leak how much of
+/// the token matched. A length mismatch returns early — length is not the
+/// secret.
+fn token_matches(provided: &str, expected: &str) -> bool {
+    let a = provided.as_bytes();
+    let b = expected.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn auth_middleware(token: String, req: Request, next: Next) -> Response {
     // Skip auth for /health and / (dashboard handles auth via JS)
     let path = req.uri().path();
@@ -118,8 +139,10 @@ async fn auth_middleware(token: String, req: Request, next: Next) -> Response {
     // Check Authorization: Bearer <token> header
     if let Some(auth_header) = req.headers().get("authorization") {
         if let Ok(val) = auth_header.to_str() {
-            if val.strip_prefix("Bearer ").map(|t| t.trim()) == Some(token.as_str()) {
-                return next.run(req).await;
+            if let Some(provided) = val.strip_prefix("Bearer ") {
+                if token_matches(provided.trim(), &token) {
+                    return next.run(req).await;
+                }
             }
         }
     }
@@ -128,7 +151,7 @@ async fn auth_middleware(token: String, req: Request, next: Next) -> Response {
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some(val) = pair.strip_prefix("token=") {
-                if val == token {
+                if token_matches(val, &token) {
                     return next.run(req).await;
                 }
             }
@@ -166,7 +189,8 @@ struct SearchParams {
 async fn handle_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    let started = Instant::now();
     let query_text = params.q.unwrap_or_default();
     let limit = params
         .limit
@@ -178,24 +202,59 @@ async fn handle_search(
     let include_full = params.full.unwrap_or(false);
 
     if offset.saturating_add(limit) > crate::search::MAX_PAGINATION_WINDOW {
-        return Json(serde_json::json!({
-            "error": "pagination_window_too_large",
-            "message": format!(
+        return bad_request(
+            "pagination_window_too_large",
+            format!(
                 "offset + limit must be <= {}",
                 crate::search::MAX_PAGINATION_WINDOW
             ),
-        }));
+        );
     }
 
     if include_full {
         if state.engine.store.is_none() {
-            return Json(store_unavailable_body(&state.engine));
+            return store_unavailable(&state.engine);
         }
         if limit > MAX_FULL_LIMIT {
-            return Json(serde_json::json!({
-                "error": "full_limit_too_large",
-                "message": format!("full=true requires limit <= {}", MAX_FULL_LIMIT),
-            }));
+            return bad_request(
+                "full_limit_too_large",
+                format!("full=true requires limit <= {}", MAX_FULL_LIMIT),
+            );
+        }
+    }
+
+    // Repeated identical requests are the norm for a dashboard (every
+    // keystroke re-fires, tabs re-open, several people watch one deploy).
+    // The index is immutable for the life of the process — imports build
+    // into a staging directory and swap, which a running server only picks
+    // up on restart — so a response can be replayed verbatim. Keyed on the
+    // raw request inputs, before any parsing, so every derived behavior
+    // (ignored parameters included) is covered by the key.
+    let cache_key = if include_full || limit > 100 {
+        None // bound entry size: no full documents, no thousand-row pages
+    } else {
+        let mut extra: Vec<(&String, &String)> = params.extra.iter().collect();
+        extra.sort();
+        Some(format!(
+            "{}\x01{:?}\x01{:?}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
+            query_text,
+            params.sort_by,
+            params.sort_order,
+            limit,
+            offset,
+            include_pagination,
+            want_count,
+            extra
+        ))
+    };
+    if let Some(key) = &cache_key {
+        if let Some(mut value) = state.search_cache.lock().unwrap().get(key).cloned() {
+            if let Some(obj) = value.as_object_mut() {
+                let took = (started.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+                obj.insert("took_ms".to_string(), serde_json::json!(took));
+                obj.insert("cached".to_string(), serde_json::json!(true));
+            }
+            return Json(value).into_response();
         }
     }
 
@@ -288,13 +347,17 @@ async fn handle_search(
             ));
         }
         message.push_str("See /fields for the full list.");
-        return Json(serde_json::json!({
-            "error": "invalid_parameters",
-            "message": message,
-            "unknown_parameters": unknown_params,
-            "invalid_parameters": invalid_params,
-            "did_you_mean": suggestions,
-        }));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_parameters",
+                "message": message,
+                "unknown_parameters": unknown_params,
+                "invalid_parameters": invalid_params,
+                "did_you_mean": suggestions,
+            })),
+        )
+            .into_response();
     }
 
     // Sort
@@ -333,9 +396,18 @@ async fn handle_search(
                     obj.insert("ignored_parameters".to_string(), serde_json::json!(ignored));
                 }
             }
-            Json(value)
+            if let Some(key) = cache_key {
+                let mut cache = state.search_cache.lock().unwrap();
+                // Crude but sufficient eviction: reset when full. Entries
+                // are pages of at most 1000 rows without full documents.
+                if cache.len() >= SEARCH_CACHE_CAP {
+                    cache.clear();
+                }
+                cache.insert(key, value.clone());
+            }
+            Json(value).into_response()
         }
-        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        Err(e) => engine_error(e),
     }
 }
 
@@ -349,19 +421,19 @@ struct LookupParams {
 async fn handle_lookup(
     State(state): State<Arc<AppState>>,
     Query(mut params): Query<LookupParams>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let include_full = params.full.unwrap_or(false);
     params.filters.remove("full");
     if include_full && state.engine.store.is_none() {
-        return Json(store_unavailable_body(&state.engine));
+        return store_unavailable(&state.engine);
     }
     let filters = params.filters;
     let outcome = run_blocking(&state, move |app| app.engine.lookup(&filters, include_full))
         .await
         .and_then(|result| result);
     match outcome {
-        Ok(result) => Json(serde_json::to_value(result).unwrap()),
-        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        Ok(result) => Json(serde_json::to_value(result).unwrap()).into_response(),
+        Err(e) => engine_error(e),
     }
 }
 
@@ -583,6 +655,18 @@ fn top_margin(results: &[serde_json::Value]) -> Option<f64> {
         None => Some(1.0),
         Some(second) => Some(((first - second) / first).clamp(0.0, 1.0)),
     }
+}
+
+/// An engine error is almost always the caller's (an unsortable field, an
+/// impossible parameter) — 400. Anything else is genuinely internal.
+fn engine_error(e: anyhow::Error) -> Response {
+    let message = e.to_string();
+    let status = if message.starts_with("cannot sort by") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 fn bad_request(error: &str, message: String) -> Response {
@@ -1011,10 +1095,14 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     // The sysinfo refresh and the index-directory walk are blocking work
     // too — a stats poller must not be able to stall queries, or vice versa.
     let outcome = run_blocking(&state, move |state| {
-        let mut sys = System::new_all();
-        sys.refresh_all();
-
+        // Refresh only what the response reports. new_all()+refresh_all()
+        // walked every process on the machine on every poll.
         let pid = sysinfo::get_current_pid().ok();
+        let mut sys = System::new();
+        sys.refresh_memory();
+        if let Some(pid) = pid {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        }
         let process_info = pid.and_then(|p| sys.process(p));
 
         let process_memory = process_info.map(|p| p.memory()).unwrap_or(0);
@@ -1089,7 +1177,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 "total_memory_human": format_bytes(sys.total_memory()),
                 "available_memory_bytes": sys.available_memory(),
                 "available_memory_human": format_bytes(sys.available_memory()),
-                "cpu_count": sys.cpus().len(),
+                "cpu_count": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
             },
                 "dashboard": {
                     "name": state.engine.config.dashboard.name,
