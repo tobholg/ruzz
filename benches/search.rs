@@ -230,7 +230,15 @@ fn fixture() -> SearchEngine {
         run_import(&config).expect("bench corpus import");
         std::fs::write(&marker, b"ok").unwrap();
     }
-    SearchEngine::open(config).expect("open bench index")
+    let engine = SearchEngine::open(config).expect("open bench index");
+    // RUZZ_BENCH_FILTER_STRATEGY=intersect|postfilter forces how filters
+    // run under a text query, to measure the two paths against each other.
+    match std::env::var("RUZZ_BENCH_FILTER_STRATEGY").as_deref() {
+        Ok("intersect") => engine.set_filter_strategy(ruzz::search::FilterStrategy::Intersect),
+        Ok("postfilter") => engine.set_filter_strategy(ruzz::search::FilterStrategy::PostFilter),
+        _ => {}
+    }
+    engine
 }
 
 // ── benches ─────────────────────────────────────────────────────────────────
@@ -284,11 +292,21 @@ const QUERIES: &[Query] = &[
         sort: relevance,
         count: true,
     },
-    // Fuzzy under a filter — intersection-driven, no pruning available.
+    // Fuzzy under a moderately selective filter (one city of several).
     Query {
         id: "fuzzy_filtered",
         q: "bergsen",
         filters: &[("city", "BERGEN")],
+        ranges: &[],
+        sort: relevance,
+        count: true,
+    },
+    // Fuzzy under a broad filter (~90% of documents) — the shape where an
+    // intersection buys nothing and post-filtering under WAND pays.
+    Query {
+        id: "fuzzy_filtered_broad",
+        q: "bergsen",
+        filters: &[("bankrupt", "false")],
         ranges: &[],
         sort: relevance,
         count: true,

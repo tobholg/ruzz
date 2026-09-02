@@ -80,10 +80,9 @@ pub fn all_params(engine: &SearchEngine) -> Vec<ParamSpec> {
             FieldType::Boolean => "boolean",
         };
         let values = engine
-            .field_metadata
-            .get(&fc.name)
+            .field_values(&fc.name)
             .filter(|m| !m.values.is_empty())
-            .map(|m| m.values.clone());
+            .map(|m| m.values);
 
         let description = match fc.field_type {
             FieldType::Number => "Numeric field. Exact match, or use the _min / _max range parameters.".to_string(),

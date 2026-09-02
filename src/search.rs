@@ -20,10 +20,43 @@ use crate::store::{self, StoreReader};
 /// string term; numeric fields index an f64, and the two are not
 /// interchangeable — building a text term for a numeric field yields a term
 /// that exists nowhere in the index.
+#[derive(Clone)]
 enum FilterValue {
     Text(String),
     Number(f64),
 }
+
+/// How a text query's exact filters are applied. `Auto` post-filters when
+/// the filters are broad (see `plan_filters`); the other two force a path,
+/// for tests and benchmarks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterStrategy {
+    Auto,
+    Intersect,
+    PostFilter,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum FilterPlan {
+    /// Filters as MUST clauses beside the fuzzy union — no pruning.
+    Intersect,
+    /// The bare fuzzy union, pruned, with filters checked per candidate
+    /// against fast fields.
+    PostFilter(Vec<crate::prune::FastFilter>),
+}
+
+/// Fraction of the index a filter set must match before post-filtering is
+/// chosen. A selective filter makes the intersection cheap (few seeks into
+/// the union) while post-filtering would still traverse the union; a broad
+/// one is the reverse, and `country_code=NO` on a one-country dataset is
+/// the extreme — 100% of documents, for a full unpruned scoring pass.
+const POST_FILTER_MIN_SELECTIVITY: f64 = 0.1;
+
+/// Clauses past which a bare fuzzy union is no longer pruned: WAND pays
+/// per-clause bookkeeping on every block, and past a handful of trigrams
+/// that overhead outgrows the skipping it buys (measured crossover ~6 on a
+/// 5M-doc corpus).
+const WAND_MAX_CLAUSES: usize = 6;
 
 impl FilterValue {
     fn into_term(self, field: Field) -> Term {
@@ -40,7 +73,11 @@ pub struct SearchEngine {
     pub schema: Schema,
     pub field_map: HashMap<String, Field>,
     pub field_configs: HashMap<String, crate::config::FieldConfig>,
-    pub field_metadata: HashMap<String, RuntimeFieldMetadata>,
+    /// Enum value lists and the like, read from the index's metadata file.
+    /// An incremental update rewrites that file, so this is reloaded when
+    /// the searcher generation moves — see `field_values`.
+    field_metadata: std::sync::RwLock<HashMap<String, RuntimeFieldMetadata>>,
+    metadata_generation: std::sync::atomic::AtomicU64,
     pub config: Arc<Config>,
     pub store: Option<StoreReader>,
     pub store_status: StoreStatus,
@@ -55,6 +92,10 @@ pub struct SearchEngine {
     /// Fuzzy field name → its `_prefix_*` typeahead shadow field, present
     /// only on indexes that carry them.
     prefix_field_map: HashMap<String, Field>,
+    /// `FilterStrategy` as a u8 (0 Auto, 1 Intersect, 2 PostFilter).
+    filter_strategy: std::sync::atomic::AtomicU8,
+    /// Term ordinals resolved for post-filtering, per segment and value.
+    ord_cache: Arc<crate::prune::OrdCache>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +182,23 @@ const WIDE_DRIVE_TERMS: usize = 7;
 /// values stays cheap.
 const RERANK_POOL_MIN: usize = 50;
 const RERANK_POOL_MAX: usize = 200;
+/// Deepest window relevance paging reaches. The pool grows to cover the
+/// requested window so every page is ranked by the same similarity model;
+/// past this the request is refused rather than quietly handed to BM25
+/// ordering, which used to happen at the pool size and reordered the whole
+/// list under a different score scale.
+pub const RERANK_POOL_HARD_CAP: usize = 1000;
+
+/// Best similarity below which a reranked result set counts as weak, so
+/// the adaptive wide pass is worth trying.
+const WEAK_SIM: f64 = 0.55;
+/// Membership floor for a text search that is then sorted by a field: a
+/// candidate must look like the query to be listed at all. Higher than
+/// WEAK_SIM on purpose — that is the point where the *best* hit is
+/// doubtful, which is far too lenient as a test of every hit. Jaro-Winkler
+/// puts "liberty" against "bergsen" (one shared trigram) at 0.62 and a
+/// one-letter typo at 0.94; 0.7 separates them.
+const SORT_SIMILARITY_FLOOR: f64 = 0.7;
 
 /// Wrap a filter clause so it matches without contributing to relevance.
 fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
@@ -229,13 +287,8 @@ impl SearchEngine {
             .iter()
             .cloned()
             .collect();
-        let mut field_metadata = HashMap::new();
-        for fc in &config.schema.fields {
-            let meta = runtime_metadata_for_field(fc, stored_metadata.fields.get(&fc.name));
-            if !meta.values.is_empty() || meta.truncated {
-                field_metadata.insert(fc.name.clone(), meta);
-            }
-        }
+        let field_metadata = runtime_field_metadata(&config, &stored_metadata);
+        let metadata_generation = reader.searcher().generation().generation_id();
 
         let folded = stored_metadata.folded_fuzzy;
         let prefix_field_map: HashMap<String, Field> = if stored_metadata.prefix_fields {
@@ -275,7 +328,8 @@ impl SearchEngine {
             schema,
             field_map,
             field_configs,
-            field_metadata,
+            field_metadata: std::sync::RwLock::new(field_metadata),
+            metadata_generation: std::sync::atomic::AtomicU64::new(metadata_generation),
             config,
             store,
             store_status,
@@ -283,7 +337,150 @@ impl SearchEngine {
             case_insensitive_fields,
             folded,
             prefix_field_map,
+            filter_strategy: std::sync::atomic::AtomicU8::new(0),
+            ord_cache: Arc::new(crate::prune::OrdCache::default()),
         })
+    }
+
+    pub fn set_filter_strategy(&self, strategy: FilterStrategy) {
+        let code = match strategy {
+            FilterStrategy::Auto => 0,
+            FilterStrategy::Intersect => 1,
+            FilterStrategy::PostFilter => 2,
+        };
+        self.filter_strategy
+            .store(code, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn filter_strategy(&self) -> FilterStrategy {
+        match self
+            .filter_strategy
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            1 => FilterStrategy::Intersect,
+            2 => FilterStrategy::PostFilter,
+            _ => FilterStrategy::Auto,
+        }
+    }
+
+    /// Decide how this query's filters run. Post-filtering needs a shape
+    /// tantivy prunes (a bare union of at most WAND_MAX_CLAUSES terms), only
+    /// exact and range filters (a substring filter is itself a trigram
+    /// query), string columns small enough to resolve case-insensitively,
+    /// and — unless forced — filters broad enough that the intersection
+    /// would be the expensive choice.
+    pub(crate) fn plan_filters(
+        &self,
+        searcher: &tantivy::Searcher,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        fuzzy_clauses: usize,
+    ) -> FilterPlan {
+        let strategy = self.filter_strategy();
+        if strategy == FilterStrategy::Intersect
+            || fuzzy_clauses == 0
+            || fuzzy_clauses > WAND_MAX_CLAUSES
+            || (filters.is_empty() && range_filters.is_empty())
+        {
+            return FilterPlan::Intersect;
+        }
+
+        let num_docs = searcher.num_docs().max(1) as f64;
+        let mut fast: Vec<crate::prune::FastFilter> = Vec::new();
+        let mut min_fraction = 1.0f64;
+        for (key, value) in filters {
+            let (Some(&field), Some(field_config)) =
+                (self.field_map.get(key), self.field_configs.get(key))
+            else {
+                continue;
+            };
+            if field_config.search == Some(SearchMode::Substring) {
+                return FilterPlan::Intersect;
+            }
+            let Some(values) = self.resolve_filter_values(key, field_config, value) else {
+                continue;
+            };
+            let mut doc_freq = 0u64;
+            for v in &values {
+                doc_freq += searcher.doc_freq(&v.clone().into_term(field)).unwrap_or(0);
+            }
+            min_fraction = min_fraction.min(doc_freq as f64 / num_docs);
+
+            if field_config.field_type == FieldType::Number {
+                let numbers = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        FilterValue::Number(n) => Some(*n),
+                        FilterValue::Text(_) => None,
+                    })
+                    .collect();
+                fast.push(crate::prune::FastFilter::Num {
+                    field: key.clone(),
+                    values: numbers,
+                });
+            } else {
+                // Case-insensitive terms are found by scanning the column
+                // dictionary; refuse fields too large for that to be cheap.
+                for reader in searcher.segment_readers() {
+                    if let Ok(Some(column)) = reader.fast_fields().str(key) {
+                        if column.num_terms() > crate::prune::MAX_SCAN_TERMS {
+                            return FilterPlan::Intersect;
+                        }
+                    }
+                }
+                let texts = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        FilterValue::Text(t) => Some(t.clone()),
+                        FilterValue::Number(_) => None,
+                    })
+                    .collect();
+                fast.push(crate::prune::FastFilter::Str {
+                    field: key.clone(),
+                    values: texts,
+                    fold: self.case_insensitive_fields.contains(key),
+                });
+            }
+        }
+        for rf in range_filters {
+            if self.field_map.contains_key(&rf.field) {
+                fast.push(crate::prune::FastFilter::Range {
+                    field: rf.field.clone(),
+                    min: rf.min.unwrap_or(f64::MIN),
+                    max: rf.max.unwrap_or(f64::MAX),
+                });
+            }
+        }
+        if fast.is_empty()
+            || (strategy == FilterStrategy::Auto && min_fraction < POST_FILTER_MIN_SELECTIVITY)
+        {
+            return FilterPlan::Intersect;
+        }
+        FilterPlan::PostFilter(fast)
+    }
+
+    /// Runtime metadata for one field (enum values, truncation), current as
+    /// of the latest index generation. Values discovered by an incremental
+    /// update used to stay invisible until restart: the metadata was read
+    /// once at open, while the update had rewritten the file underneath.
+    pub fn field_values(&self, name: &str) -> Option<RuntimeFieldMetadata> {
+        self.refresh_field_metadata();
+        self.field_metadata.read().unwrap().get(name).cloned()
+    }
+
+    fn refresh_field_metadata(&self) {
+        use std::sync::atomic::Ordering;
+        let generation = self.reader.searcher().generation().generation_id();
+        if self.metadata_generation.load(Ordering::Relaxed) == generation {
+            return;
+        }
+        // Two threads may both reload after the same commit; the second
+        // just writes the same map again.
+        if let Ok(stored) = load_stored_field_metadata(&self.config.server.index_path) {
+            *self.field_metadata.write().unwrap() = runtime_field_metadata(&self.config, &stored);
+        }
+        self.metadata_generation
+            .store(generation, Ordering::Relaxed);
     }
 
     /// Normalize query text the way this index normalized its fuzzy terms.
@@ -586,9 +783,38 @@ impl SearchEngine {
         need_count: bool,
     ) -> anyhow::Result<(RankedHits, Option<usize>, bool, usize)> {
         let (clauses, capped) = self.fuzzy_clauses(searcher, fuzzy_fields, query_text, drive);
-        let subqueries = self.filter_clauses(filters, range_filters);
-        let (query, prunable) = compose_query(Some(clauses), subqueries);
-        let (docs, total) = collect_relevance(searcher, &*query, prunable, pool, 0, need_count)?;
+        let (docs, total) = match self.plan_filters(searcher, filters, range_filters, clauses.len())
+        {
+            FilterPlan::PostFilter(fast_filters) => {
+                // The bare union is the only shape tantivy prunes; the
+                // filters ride along as per-candidate fast-field checks.
+                let union: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                let top = crate::prune::FilteredTopDocs::new(
+                    pool,
+                    0,
+                    fast_filters.clone(),
+                    Arc::clone(&self.ord_cache),
+                );
+                let docs: Hits = searcher
+                    .search(&*union, &top)?
+                    .into_iter()
+                    .map(|(score, addr)| (score as f64, addr))
+                    .collect();
+                let total = if need_count {
+                    let count =
+                        crate::prune::FilteredCount::new(fast_filters, Arc::clone(&self.ord_cache));
+                    Some(searcher.search(&*union, &count)?)
+                } else {
+                    None
+                };
+                (docs, total)
+            }
+            FilterPlan::Intersect => {
+                let subqueries = self.filter_clauses(filters, range_filters);
+                let (query, prunable) = compose_query(Some(clauses), subqueries);
+                collect_relevance(searcher, &*query, prunable, pool, 0, need_count)?
+            }
+        };
         let fetched = docs.len();
 
         let mut scored: RankedHits = Vec::with_capacity(docs.len());
@@ -620,10 +846,10 @@ impl SearchEngine {
         Ok((scored, total, capped, fetched))
     }
 
-    /// Relevance-sorted fuzzy search with reranking: retrieve a candidate
-    /// pool by trigram BM25 (cheap recall), re-order it by true string
-    /// similarity against the stored values (precision), and page from
-    /// that. `_score` on this path is the similarity, 0..1.
+    /// The reranked candidate set for a text query: a pool retrieved by
+    /// trigram BM25 (cheap recall), re-ordered by true string similarity
+    /// against the stored values (precision). Returns the ranked hits, the
+    /// exact count when asked for, and how many candidates the pool yielded.
     ///
     /// When the best candidate is still weak and the rare-trigram driving
     /// was capped, retry once with a wider drive: four driving terms
@@ -631,23 +857,15 @@ impl SearchEngine {
     /// trigrams), seven guarantee it at two — the adaptive pass buys
     /// edit-distance-2 tolerance only on the queries that need it, instead
     /// of taxing every query with the wider union.
-    #[allow(clippy::too_many_arguments)]
-    fn search_reranked(
+    fn reranked_candidates(
         &self,
-        start: std::time::Instant,
         searcher: &tantivy::Searcher,
         query_text: &str,
         filters: &HashMap<String, String>,
         range_filters: &[RangeFilter],
-        limit: usize,
-        offset: usize,
         pool: usize,
-        include_pagination: bool,
-        want_count: bool,
-        include_full: bool,
-    ) -> anyhow::Result<SearchResult> {
-        const WEAK_SIM: f64 = 0.55;
-        let need_count = want_count || include_pagination;
+        need_count: bool,
+    ) -> anyhow::Result<(RankedHits, Option<usize>, usize)> {
         let fuzzy_fields = self.fuzzy_field_handles();
         let normalized_query = self.normalize(query_text);
 
@@ -682,6 +900,35 @@ impl SearchEngine {
                 fetched = wide_fetched;
             }
         }
+        Ok((scored, total, fetched))
+    }
+
+    /// Relevance-sorted fuzzy search: page through the reranked candidates.
+    /// `_score` on this path is the similarity, 0..1.
+    #[allow(clippy::too_many_arguments)]
+    fn search_reranked(
+        &self,
+        start: std::time::Instant,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        limit: usize,
+        offset: usize,
+        pool: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        let need_count = want_count || include_pagination;
+        let (scored, total, fetched) = self.reranked_candidates(
+            searcher,
+            query_text,
+            filters,
+            range_filters,
+            pool,
+            need_count,
+        )?;
 
         let page: Vec<(f64, DocAddress)> = scored
             .iter()
@@ -711,6 +958,66 @@ impl SearchEngine {
             limit,
             has_more,
             pagination,
+            results,
+        })
+    }
+
+    /// A text search sorted by a field. This used to run the fuzzy union as
+    /// a bare filter — a document qualified by sharing one driving trigram
+    /// with one query word — so `q=berg&sort_by=revenue` listed every name
+    /// containing "ber" or "erg", richest first, and the dashboard's column
+    /// headers took exactly that path. Now: the reranked candidate pool,
+    /// gated on similarity, sorted by the field's fast value. "The best
+    /// matches, sorted" — which is what clicking a column header means.
+    /// `count` is the number of gated matches; `_score` the similarity.
+    #[allow(clippy::too_many_arguments)]
+    fn search_sorted_fuzzy(
+        &self,
+        start: std::time::Instant,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        sort_field: &str,
+        numeric: bool,
+        ascending: bool,
+        limit: usize,
+        offset: usize,
+        pool: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        let (scored, _, _) =
+            self.reranked_candidates(searcher, query_text, filters, range_filters, pool, false)?;
+        let mut gated: Vec<(f64, Option<SortKey>, DocAddress)> = scored
+            .into_iter()
+            .filter(|&(sim, _, _)| sim >= SORT_SIMILARITY_FLOOR)
+            .map(|(sim, _, addr)| Ok((sim, sort_key(searcher, addr, sort_field, numeric)?, addr)))
+            .collect::<anyhow::Result<_>>()?;
+        // Deterministic page boundaries under ties, as in the collectors.
+        gated.sort_by(|a, b| compare_sort_keys(&a.1, &b.1, ascending).then_with(|| a.2.cmp(&b.2)));
+        let matched = gated.len();
+
+        let page: Vec<(f64, DocAddress)> = gated
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|&(sim, _, addr)| (sim, addr))
+            .collect();
+        let results = self.render_hits(searcher, &page, include_full)?;
+        let returned = results.len();
+        let took = start.elapsed().as_secs_f64() * 1000.0;
+        Ok(SearchResult {
+            took_ms: (took * 100.0).round() / 100.0,
+            total: returned,
+            returned,
+            count: want_count.then_some(matched),
+            offset,
+            limit,
+            has_more: offset.saturating_add(returned) < matched,
+            pagination: include_pagination
+                .then(|| build_pagination_info(matched, limit, offset, returned)),
             results,
         })
     }
@@ -805,12 +1112,20 @@ impl SearchEngine {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
-        // Relevance-sorted fuzzy queries go through the rerank path — unless
-        // the caller pages past the pool, where relevance order is the only
-        // one that can be produced incrementally.
-        let pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
-        if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) && offset + limit <= pool
-        {
+        // Relevance-sorted fuzzy queries go through the rerank path. The
+        // pool is a few pages deep by default and stretches to cover a
+        // deeper window, so paging never changes ranking model mid-list.
+        let default_pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
+        let pool = default_pool.max(offset.saturating_add(limit));
+        if !query_text.is_empty() && pool > RERANK_POOL_HARD_CAP {
+            anyhow::bail!(
+                "cannot page text-search results past {}: offset + limit must be <= {} \
+                 — add filters to narrow the search instead",
+                RERANK_POOL_HARD_CAP,
+                RERANK_POOL_HARD_CAP
+            );
+        }
+        if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) {
             return self.search_reranked(
                 start,
                 &searcher,
@@ -825,18 +1140,6 @@ impl SearchEngine {
                 include_full,
             );
         }
-
-        let fuzzy_fields = self.fuzzy_field_handles();
-        let subqueries = self.filter_clauses(filters, range_filters);
-        let fuzzy = if query_text.is_empty() {
-            None
-        } else {
-            Some(
-                self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text, RARE_DRIVE_TERMS)
-                    .0,
-            )
-        };
-        let (query, prunable) = compose_query(fuzzy, subqueries);
 
         // Determine sort field for fast-field sorting
         let sort_field_name = match sort {
@@ -865,6 +1168,30 @@ impl SearchEngine {
                 );
             }
         }
+
+        // A text query with a field sort: the best matches, sorted.
+        if let (false, Some(name)) = (query_text.is_empty(), sort_field_name) {
+            return self.search_sorted_fuzzy(
+                start,
+                &searcher,
+                query_text,
+                filters,
+                range_filters,
+                name,
+                is_numeric_sort,
+                matches!(sort, SortOrder::FieldAsc(_)),
+                limit,
+                offset,
+                pool,
+                include_pagination,
+                want_count,
+                include_full,
+            );
+        }
+
+        // From here on the query text is empty: a browse over filters.
+        let subqueries = self.filter_clauses(filters, range_filters);
+        let (query, prunable) = compose_query(None, subqueries);
 
         let need_count = want_count || include_pagination;
 
@@ -1119,6 +1446,81 @@ impl SearchEngine {
     }
 }
 
+/// A fast-field value used to order gated text-search candidates.
+enum SortKey {
+    Num(f64),
+    Str(String),
+}
+
+fn sort_key(
+    searcher: &tantivy::Searcher,
+    addr: DocAddress,
+    field: &str,
+    numeric: bool,
+) -> anyhow::Result<Option<SortKey>> {
+    let reader = searcher.segment_reader(addr.segment_ord);
+    if numeric {
+        let column = reader.fast_fields().f64(field)?;
+        return Ok(column.first(addr.doc_id).map(SortKey::Num));
+    }
+    let Some(column) = reader.fast_fields().str(field)? else {
+        return Ok(None);
+    };
+    let Some(ord) = column.term_ords(addr.doc_id).next() else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    Ok(if column.ord_to_bytes(ord, &mut bytes)? {
+        Some(SortKey::Str(String::from_utf8_lossy(&bytes).into_owned()))
+    } else {
+        None
+    })
+}
+
+/// Missing values last in both directions — the same contract as the
+/// global sort collectors, so a sorted text search and a sorted browse
+/// agree on where a document without a value goes.
+fn compare_sort_keys(
+    a: &Option<SortKey>,
+    b: &Option<SortKey>,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => {
+            let ord = match (a, b) {
+                (SortKey::Num(x), SortKey::Num(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+                (SortKey::Str(x), SortKey::Str(y)) => x.cmp(y),
+                _ => Ordering::Equal,
+            };
+            if ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
+        }
+    }
+}
+
+/// Per-field runtime metadata worth carrying: only fields that have values
+/// (or a truncation flag) get an entry.
+fn runtime_field_metadata(
+    config: &Config,
+    stored: &crate::field_meta::StoredFieldMetadata,
+) -> HashMap<String, RuntimeFieldMetadata> {
+    let mut field_metadata = HashMap::new();
+    for fc in &config.schema.fields {
+        let meta = runtime_metadata_for_field(fc, stored.fields.get(&fc.name));
+        if !meta.values.is_empty() || meta.truncated {
+            field_metadata.insert(fc.name.clone(), meta);
+        }
+    }
+    field_metadata
+}
+
 /// Compose the top-level query from optional fuzzy clauses and filter MUSTs.
 ///
 /// `prunable`: the whole query is one flat scored term union — the only
@@ -1137,7 +1539,6 @@ fn compose_query(
     fuzzy: Option<Vec<(Occur, Box<dyn Query>)>>,
     mut subqueries: Vec<(Occur, Box<dyn Query>)>,
 ) -> (Box<dyn Query>, bool) {
-    const WAND_MAX_CLAUSES: usize = 6;
     match fuzzy {
         Some(clauses) if clauses.is_empty() => {
             subqueries.push((Occur::Must, Box::new(EmptyQuery)));
@@ -1249,7 +1650,10 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 
 #[cfg(test)]
 pub mod tests {
-    use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder};
+    use super::{
+        build_pagination_info, FilterPlan, FilterStrategy, RangeFilter, SearchEngine, SortOrder,
+        RERANK_POOL_HARD_CAP,
+    };
     use crate::config::{
         Config, DashboardConfig, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig,
         StoreConfig,
@@ -2554,6 +2958,624 @@ pub mod tests {
             .commit()
             .unwrap();
         SearchEngine::open(config).unwrap()
+    }
+
+    pub fn fuzzy_field(name: &str) -> FieldConfig {
+        FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Text,
+            search: Some(crate::config::SearchMode::Fuzzy),
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        }
+    }
+
+    /// An engine over an index holding one value of `field` per document.
+    pub fn engine_with_docs(
+        dir: &std::path::Path,
+        field: FieldConfig,
+        values: &[String],
+    ) -> SearchEngine {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.to_path_buf(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![field.clone()],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, field_map) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let tantivy_field = field_map[&field.name];
+        for value in values {
+            writer
+                .add_document(doc!(tantivy_field => value.as_str()))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        SearchEngine::open(config).unwrap()
+    }
+
+    /// Relevance paging used to switch ranking model at the rerank pool
+    /// (200): a window past it fell through to BM25 order with BM25 numbers
+    /// in _score, so the dashboard's "load more" reordered the list at 240
+    /// rows. The pool now stretches with the window up to a hard cap, and
+    /// past the cap the request is refused instead of silently degraded.
+    #[test]
+    fn relevance_paging_stays_on_one_ranking_model() {
+        let dir = test_index_dir("deep-paging");
+        let names: Vec<String> = (0..300).map(|i| format!("Bergsen Handel {i:03}")).collect();
+        let engine = engine_with_docs(&dir, fuzzy_field("name"), &names);
+        let page = |limit: usize, offset: usize| {
+            engine
+                .search(
+                    "bergsen",
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::Relevance,
+                    limit,
+                    offset,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // A page past the old pool size is still similarity-scored (0..1).
+        let deep = page(30, 270);
+        assert_eq!(deep.results.len(), 30);
+        assert!(deep.results.iter().all(|r| {
+            let score = r["_score"].as_f64().unwrap();
+            (0.0..=1.0).contains(&score)
+        }));
+
+        // Pages stitch together into the single wide window, same order.
+        let wide: Vec<serde_json::Value> = page(300, 0)
+            .results
+            .iter()
+            .map(|r| r["name"].clone())
+            .collect();
+        let mut stitched = Vec::new();
+        for offset in (0..300).step_by(50) {
+            stitched.extend(page(50, offset).results.iter().map(|r| r["name"].clone()));
+        }
+        assert_eq!(stitched, wide);
+
+        // Past the cap: an explicit refusal, not a quiet fallback.
+        let err = engine
+            .search(
+                "bergsen",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                30,
+                RERANK_POOL_HARD_CAP,
+                false,
+                false,
+                false,
+            )
+            .err()
+            .expect("a window past the cap must be refused")
+            .to_string();
+        assert!(err.starts_with("cannot page"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `q=berg&sort_by=revenue` used to list every document sharing one
+    /// driving trigram with the query, richest first — the fuzzy union ran
+    /// as a bare filter. A sorted text search must be the best matches,
+    /// sorted, with missing sort values last as everywhere else.
+    #[test]
+    fn sorted_text_search_is_gated_by_similarity() {
+        let dir = test_index_dir("sorted-fuzzy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let revenue = FieldConfig {
+            name: "revenue".to_string(),
+            field_type: FieldType::Number,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.clone(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![fuzzy_field("name"), revenue],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, fields) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(&dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let (name, revenue) = (fields["name"], fields["revenue"]);
+        // "Liberty" shares the trigram "ber" with the query and has the top
+        // revenue: under the old semantics it led the list.
+        for (n, r) in [
+            ("Bergsen Handel", Some(100.0)),
+            ("Bergsen Bygg", Some(900.0)),
+            ("Bergson Kraft", Some(500.0)),
+            ("Liberty Oil", Some(999.0)),
+            ("Bergsen Nord", None),
+        ] {
+            let mut d = doc!(name => n);
+            if let Some(r) = r {
+                d.add_f64(revenue, r);
+            }
+            writer.add_document(d).unwrap();
+        }
+        writer.commit().unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+
+        let sorted = |order: SortOrder, limit: usize, offset: usize| {
+            engine
+                .search(
+                    "bergsen",
+                    &HashMap::new(),
+                    &[],
+                    &order,
+                    limit,
+                    offset,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+        let names = |r: &super::SearchResult| -> Vec<String> {
+            r.results
+                .iter()
+                .map(|row| row["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let desc = sorted(SortOrder::FieldDesc("revenue".to_string()), 10, 0);
+        assert_eq!(
+            names(&desc),
+            vec![
+                "Bergsen Bygg",
+                "Bergson Kraft",
+                "Bergsen Handel",
+                "Bergsen Nord"
+            ],
+            "best matches by revenue, missing last, no trigram hitchhikers"
+        );
+        assert_eq!(desc.count, Some(4), "count is the gated match count");
+        assert!(desc
+            .results
+            .iter()
+            .all(|row| (0.0..=1.0).contains(&row["_score"].as_f64().unwrap())));
+
+        let asc = sorted(SortOrder::FieldAsc("revenue".to_string()), 10, 0);
+        assert_eq!(
+            names(&asc),
+            vec![
+                "Bergsen Handel",
+                "Bergson Kraft",
+                "Bergsen Bygg",
+                "Bergsen Nord"
+            ]
+        );
+
+        // Paging inside the gated set.
+        let page = sorted(SortOrder::FieldDesc("revenue".to_string()), 2, 2);
+        assert_eq!(names(&page), vec!["Bergsen Handel", "Bergsen Nord"]);
+        assert!(!page.has_more);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sorted browse pages must stitch together even when the sort value
+    /// ties across page boundaries: the segment heaps and the cross-segment
+    /// merge have to agree on which tied documents come first (lowest
+    /// address), whatever page size is asked for.
+    #[test]
+    fn sorted_browse_pages_stitch_under_ties() {
+        let dir = test_index_dir("sort-ties");
+        std::fs::create_dir_all(&dir).unwrap();
+        let keyword = |name: &str| FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Keyword,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.clone(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![keyword("city"), keyword("id")],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, fields) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(&dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        // Three sort values over 120 docs — ties everywhere — spread over
+        // several segments so the cross-segment merge is exercised too.
+        for i in 0..120u32 {
+            let city = ["Alta", "Bodø", "Cato"][(i % 3) as usize];
+            writer
+                .add_document(doc!(fields["city"] => city, fields["id"] => format!("{i:03}")))
+                .unwrap();
+            if i % 40 == 39 {
+                writer.commit().unwrap();
+            }
+        }
+        writer.commit().unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+
+        // Identity, not the (tied) sort value, is what must line up.
+        let page = |limit: usize, offset: usize| -> Vec<serde_json::Value> {
+            engine
+                .search(
+                    "",
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::FieldAsc("city".to_string()),
+                    limit,
+                    offset,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap()
+                .results
+                .iter()
+                .map(|r| r["id"].clone())
+                .collect()
+        };
+        let wide = page(120, 0);
+        assert_eq!(wide.len(), 120);
+        let mut unique = wide.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), 120, "every doc exactly once");
+        for size in [7usize, 40, 55] {
+            let mut stitched = Vec::new();
+            let mut offset = 0;
+            while offset < 120 {
+                stitched.extend(page(size, offset));
+                offset += size;
+            }
+            assert_eq!(stitched, wide, "page size {size}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A mixed index for the filter-path tests: fuzzy name, case-insensitive
+    /// keyword city (stored in several casings), multi-valued roles, a
+    /// number with gaps, a boolean, an id — over several segments, with a
+    /// few documents deleted.
+    fn mixed_engine(dir: &std::path::Path) -> SearchEngine {
+        std::fs::create_dir_all(dir).unwrap();
+        let field = |name: &str, field_type: FieldType, multi: bool| FieldConfig {
+            name: name.to_string(),
+            field_type,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.to_path_buf(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![
+                    fuzzy_field("name"),
+                    field("city", FieldType::Keyword, false),
+                    field("roles", FieldType::Keyword, true),
+                    field("revenue", FieldType::Number, false),
+                    field("bankrupt", FieldType::Boolean, false),
+                    field("id", FieldType::Keyword, false),
+                ],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, f) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let names = [
+            "Bergsen Handel",
+            "Bergson Bygg",
+            "Bergen Kraft",
+            "Liberty Oil",
+            "Bergsen Nord",
+            "Aberdeen Fish",
+        ];
+        let cities = ["Oslo", "BERGEN", "Bergen", "Tromsø"];
+        let roles = ["LEDE,DAGL", "DAGL", "", "NEST"];
+        for i in 0..72u32 {
+            let mut d = tantivy::TantivyDocument::new();
+            d.add_text(f["name"], names[(i % 6) as usize]);
+            d.add_text(f["city"], cities[(i % 4) as usize]);
+            for role in roles[(i % 4) as usize].split(',').filter(|r| !r.is_empty()) {
+                d.add_text(f["roles"], role);
+            }
+            if i % 5 != 0 {
+                d.add_f64(f["revenue"], (i * 10) as f64);
+            }
+            d.add_text(f["bankrupt"], if i % 7 == 0 { "TRUE" } else { "FALSE" });
+            d.add_text(f["id"], format!("{i:03}"));
+            writer.add_document(d).unwrap();
+            if i % 24 == 23 {
+                writer.commit().unwrap();
+            }
+        }
+        for gone in ["005", "017", "033", "070"] {
+            writer.delete_term(tantivy::Term::from_field_text(f["id"], gone));
+        }
+        writer.commit().unwrap();
+        // What a real import records: keyword terms were lowercased on the
+        // way in, so filters (and fast-field predicates) must fold to match.
+        crate::field_meta::write_stored_field_metadata(
+            dir,
+            &crate::field_meta::StoredFieldMetadata {
+                case_insensitive_fields: vec![
+                    "city".to_string(),
+                    "roles".to_string(),
+                    "id".to_string(),
+                ],
+                folded_fuzzy: true,
+                prefix_fields: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        SearchEngine::open(config).unwrap()
+    }
+
+    /// The post-filtered WAND path must return exactly what the intersection
+    /// returns — same documents in the same order, same count — across
+    /// case-insensitive terms, multi-valued fields, numbers, ranges,
+    /// booleans, OR'ed values, deleted documents and several segments.
+    #[test]
+    fn post_filtered_search_matches_the_intersection() {
+        let dir = test_index_dir("post-filter");
+        let engine = mixed_engine(&dir);
+        let f = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let range = |min: Option<f64>, max: Option<f64>| RangeFilter {
+            field: "revenue".to_string(),
+            min,
+            max,
+        };
+        let cases: Vec<(&str, HashMap<String, String>, Vec<RangeFilter>)> = vec![
+            ("bergsen", f(&[("city", "bergen")]), vec![]),
+            ("bergsen", f(&[("city", "OSLO,bergen")]), vec![]),
+            ("bergsen", f(&[("roles", "DAGL")]), vec![]),
+            ("bergsen", f(&[("roles", "lede")]), vec![]),
+            ("bergsen", f(&[("bankrupt", "true")]), vec![]),
+            ("bergsen", f(&[("revenue", "100")]), vec![]),
+            ("bergsen", f(&[]), vec![range(Some(100.0), Some(300.0))]),
+            ("bergsen", f(&[]), vec![range(None, Some(50.0))]),
+            (
+                "bergsen",
+                f(&[("city", "bergen"), ("roles", "DAGL")]),
+                vec![range(Some(50.0), None)],
+            ),
+            ("bergsen", f(&[("city", "nowhere")]), vec![]),
+            ("liberty", f(&[("bankrupt", "false")]), vec![]),
+            ("aberdeen", f(&[("city", "tromsø")]), vec![]),
+        ];
+        // A window wide enough that nothing is truncated: the full match
+        // set must be identical. Order among exactly-tied BM25 scores is
+        // not compared — see post_filtered_pool_admits_the_same_top_scores.
+        for (q, filters, ranges) in &cases {
+            let run = |strategy: FilterStrategy| {
+                engine.set_filter_strategy(strategy);
+                let result = engine
+                    .search(
+                        q,
+                        filters,
+                        ranges,
+                        &SortOrder::Relevance,
+                        100,
+                        0,
+                        false,
+                        true,
+                        false,
+                    )
+                    .unwrap();
+                let mut ids: Vec<String> = result
+                    .results
+                    .iter()
+                    .map(|r| r["id"].as_str().unwrap().to_string())
+                    .collect();
+                assert!(
+                    result.results.windows(2).all(|w| {
+                        w[0]["_score"].as_f64().unwrap() >= w[1]["_score"].as_f64().unwrap()
+                    }),
+                    "similarity order"
+                );
+                ids.sort();
+                (ids, result.count)
+            };
+            let via_intersection = run(FilterStrategy::Intersect);
+            let via_post_filter = run(FilterStrategy::PostFilter);
+            assert_eq!(
+                via_post_filter,
+                via_intersection,
+                "q={q} filters={filters:?} ranges={}",
+                ranges.len()
+            );
+        }
+        engine.set_filter_strategy(FilterStrategy::Auto);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Auto picks post-filtering only where it pays: broad filters over a
+    /// prunable union. Selective filters, substring filters, long unions
+    /// and filter-less queries keep the intersection.
+    #[test]
+    fn filter_planner_chooses_by_selectivity_and_shape() {
+        let dir = test_index_dir("planner");
+        let engine = mixed_engine(&dir);
+        let searcher = engine.reader.searcher();
+        let one = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+
+        // city=bergen matches half the index: broad, post-filtered.
+        assert!(matches!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 5),
+            FilterPlan::PostFilter(_)
+        ));
+        // id=010 matches one document: selective, intersection.
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("id", "010"), &[], 5),
+            FilterPlan::Intersect
+        );
+        // No fuzzy clauses or too many for WAND: nothing to prune.
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 0),
+            FilterPlan::Intersect
+        );
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 7),
+            FilterPlan::Intersect
+        );
+        // No filters at all: the plain pruned path already applies.
+        assert_eq!(
+            engine.plan_filters(&searcher, &HashMap::new(), &[], 5),
+            FilterPlan::Intersect
+        );
+        // Forcing overrides selectivity.
+        engine.set_filter_strategy(FilterStrategy::PostFilter);
+        assert!(matches!(
+            engine.plan_filters(&searcher, &one("id", "010"), &[], 5),
+            FilterPlan::PostFilter(_)
+        ));
+        engine.set_filter_strategy(FilterStrategy::Auto);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// When the pool is smaller than the match set, the pruned path must
+    /// admit the same top-k *scores* as the intersection. Which of several
+    /// exactly-tied documents fills the last slots is not a contract — the
+    /// two union scorers sum term scores in different orders and can differ
+    /// in the last f32 bit — so scores are compared, rounded, as a multiset.
+    #[test]
+    fn post_filtered_pool_admits_the_same_top_scores() {
+        let dir = test_index_dir("post-filter-pool");
+        let engine = mixed_engine(&dir);
+        let searcher = engine.reader.searcher();
+        let fields = engine.fuzzy_field_handles();
+        let ranges = [RangeFilter {
+            field: "revenue".to_string(),
+            min: Some(0.0),
+            max: None,
+        }];
+        let scores = |strategy: FilterStrategy| {
+            engine.set_filter_strategy(strategy);
+            let (scored, total, _, fetched) = engine
+                .rerank_attempt(
+                    &searcher,
+                    &fields,
+                    "bergsen",
+                    "bergsen",
+                    &HashMap::new(),
+                    &ranges,
+                    4,
+                    20,
+                    true,
+                )
+                .unwrap();
+            // Relative to the best score: the intersection path carries a
+            // uniform +1.0 per const-scored filter clause, the bare union
+            // does not, and only the shape of the top-k matters here.
+            let best = scored
+                .iter()
+                .map(|(_, bm25, _)| *bm25)
+                .fold(f64::MIN, f64::max);
+            let mut bm25: Vec<i64> = scored
+                .iter()
+                .map(|(_, bm25, _)| ((bm25 - best) * 1000.0).round() as i64)
+                .collect();
+            bm25.sort_unstable();
+            (bm25, total, fetched)
+        };
+        let intersection = scores(FilterStrategy::Intersect);
+        let post_filter = scores(FilterStrategy::PostFilter);
+        assert!(
+            intersection.1.unwrap() > 20,
+            "the case must truncate: {} matches",
+            intersection.1.unwrap()
+        );
+        assert_eq!(post_filter, intersection);
+        engine.set_filter_strategy(FilterStrategy::Auto);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn test_index_dir(prefix: &str) -> PathBuf {

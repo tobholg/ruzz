@@ -3,6 +3,13 @@ name = "ruzz"
 version = "0.1.0"
 edition = "2021"
 
+# Whole-program optimization: the hot path is tantivy code called through
+# trait objects (scorers, collectors), which cross-crate inlining helps.
+# Measured on the search bench before enabling — see the commit adding it.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [dev-dependencies]
 criterion = "0.5"
 
@@ -20,7 +27,7 @@ serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 zstd = "0.13"
 toml = "0.8"
 indicatif = "0.17"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
 clap = { version = "4", features = ["derive"] }
 sysinfo = "0.33"
 chrono = "0.4"

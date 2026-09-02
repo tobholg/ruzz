@@ -11,6 +11,7 @@ pub mod import;
 pub mod memory;
 pub mod metrics;
 pub mod params;
+pub mod prune;
 pub mod schema;
 pub mod search;
 pub mod server;

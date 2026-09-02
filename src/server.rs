@@ -44,10 +44,15 @@ pub struct AppState {
     /// Query counters and the resource-sample ring behind /activity's
     /// search-load and resources views. Filled by `resource_sampler`.
     pub metrics: crate::metrics::Metrics,
-    /// Replayed /search responses — valid for the process lifetime because
-    /// the index is: imports swap directories, and a running server only
-    /// sees the new one on restart.
-    search_cache: std::sync::Mutex<HashMap<String, serde_json::Value>>,
+    /// Replayed /search responses, valid for one searcher generation. Full
+    /// imports swap directories and are only seen on restart, but
+    /// incremental updates commit into the live index and the reader picks
+    /// them up — a response cached before a delta is wrong after it, so
+    /// the cache empties itself whenever the generation moves.
+    search_cache: std::sync::Mutex<SearchCache>,
+    /// Exact match counts per (query, filters, sort), so paging through a
+    /// browse does not repeat the full-traversal count on every page.
+    count_cache: std::sync::Mutex<CountCache>,
     /// Caps concurrent query threads at the core count. Excess requests
     /// queue on the semaphore instead of spawning ever more blocking
     /// threads that fight over the same CPUs.
@@ -63,9 +68,70 @@ impl AppState {
             engine,
             started_at: Instant::now(),
             metrics: crate::metrics::Metrics::default(),
-            search_cache: std::sync::Mutex::new(HashMap::new()),
+            search_cache: std::sync::Mutex::new(SearchCache::default()),
+            count_cache: std::sync::Mutex::new(CountCache::default()),
             query_permits: tokio::sync::Semaphore::new(permits),
         }
+    }
+}
+
+/// A cache valid for one searcher generation.
+struct GenerationCache<V> {
+    generation: u64,
+    entries: HashMap<String, V>,
+}
+
+impl<V> Default for GenerationCache<V> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<V> GenerationCache<V> {
+    /// Drop every entry when the index has moved on since they were made.
+    fn ensure_generation(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.entries.clear();
+            self.generation = generation;
+        }
+    }
+}
+
+type SearchCache = GenerationCache<serde_json::Value>;
+type CountCache = GenerationCache<usize>;
+
+/// Cached counts before the count cache resets. Entries are a usize each.
+const COUNT_CACHE_CAP: usize = 4096;
+
+/// Fill the count-derived response fields from a cached count, after the
+/// engine ran without its counting pass.
+fn splice_count(value: &mut serde_json::Value, count: usize, want_count: bool, pagination: bool) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let offset = obj.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = obj.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let returned = obj.get("returned").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let has_more = offset.saturating_add(returned) < count;
+    obj.insert("has_more".to_string(), serde_json::json!(has_more));
+    if want_count {
+        obj.insert("count".to_string(), serde_json::json!(count));
+    }
+    if pagination {
+        obj.insert(
+            "pagination".to_string(),
+            serde_json::json!({
+                "offset": offset,
+                "limit": limit,
+                "returned": returned,
+                "total": count,
+                "total_relation": "eq",
+                "has_more": has_more,
+            }),
+        );
     }
 }
 
@@ -119,7 +185,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         }));
     }
 
+    // Outermost: JSON pages of a thousand rows and the /activity sample
+    // series compress several-fold, and only clients that ask
+    // (Accept-Encoding) pay the CPU for it.
     app.layer(CorsLayer::permissive())
+        .layer(tower_http::compression::CompressionLayer::new())
 }
 
 /// Constant-time byte equality: the comparison must not leak how much of
@@ -229,17 +299,16 @@ async fn handle_search(
     }
 
     // Repeated identical requests are the norm for a dashboard (every
-    // keystroke re-fires, tabs re-open, several people watch one deploy).
-    // The index is immutable for the life of the process — imports build
-    // into a staging directory and swap, which a running server only picks
-    // up on restart — so a response can be replayed verbatim. Keyed on the
-    // raw request inputs, before any parsing, so every derived behavior
-    // (ignored parameters included) is covered by the key.
+    // keystroke re-fires, tabs re-open, several people watch one deploy),
+    // and within one searcher generation the index does not change, so a
+    // response can be replayed verbatim. Keyed on the raw request inputs,
+    // before any parsing, so every derived behavior (ignored parameters
+    // included) is covered by the key.
+    let mut extra: Vec<(&String, &String)> = params.extra.iter().collect();
+    extra.sort();
     let cache_key = if include_full || limit > 100 {
         None // bound entry size: no full documents, no thousand-row pages
     } else {
-        let mut extra: Vec<(&String, &String)> = params.extra.iter().collect();
-        extra.sort();
         Some(format!(
             "{}\x01{:?}\x01{:?}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
             query_text,
@@ -252,8 +321,31 @@ async fn handle_search(
             extra
         ))
     };
+    // Read the generation before the search runs: the searcher the engine
+    // acquires afterwards can only be this generation or newer, so tagging
+    // the result with this value never marks a stale response as fresh.
+    let generation = state.engine.reader.searcher().generation().generation_id();
+    // The exact count is the same on every page of a browse or a
+    // relevance search, and on a browse it is the expensive part — a full
+    // traversal of the matching set. Paging used to recompute it every
+    // time because the response key includes offset and limit. A sorted
+    // text search is left out: its count is the gated share of a candidate
+    // pool that grows with the window, so it is not page-invariant.
+    let count_key = if query_text.is_empty() || params.sort_by.is_none() {
+        Some(format!(
+            "{}\x01{:?}\x01{:?}\x01{:?}",
+            query_text, params.sort_by, params.sort_order, extra
+        ))
+    } else {
+        None
+    };
     if let Some(key) = &cache_key {
-        if let Some(mut value) = state.search_cache.lock().unwrap().get(key).cloned() {
+        let hit = {
+            let mut cache = state.search_cache.lock().unwrap();
+            cache.ensure_generation(generation);
+            cache.entries.get(key).cloned()
+        };
+        if let Some(mut value) = hit {
             if let Some(obj) = value.as_object_mut() {
                 let took = (started.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
                 obj.insert("took_ms".to_string(), serde_json::json!(took));
@@ -375,6 +467,15 @@ async fn handle_search(
         _ => crate::search::SortOrder::Relevance,
     };
 
+    let cached_count = count_key.as_ref().and_then(|key| {
+        let mut cache = state.count_cache.lock().unwrap();
+        cache.ensure_generation(generation);
+        cache.entries.get(key).copied()
+    });
+    // With the count in hand, the engine can skip its counting pass; the
+    // count-derived fields are filled in below from the cached value.
+    let need_engine_count = cached_count.is_none() && (want_count || include_pagination);
+
     let outcome = run_blocking(&state, move |app| {
         app.engine.search(
             &query_text,
@@ -383,8 +484,8 @@ async fn handle_search(
             &sort,
             limit,
             offset,
-            include_pagination,
-            want_count,
+            need_engine_count && include_pagination,
+            need_engine_count && want_count,
             include_full,
         )
     })
@@ -394,6 +495,20 @@ async fn handle_search(
     match outcome {
         Ok(result) => {
             let mut value = serde_json::to_value(result).unwrap();
+            match (cached_count, count_key) {
+                (Some(count), _) => splice_count(&mut value, count, want_count, include_pagination),
+                (None, Some(key)) => {
+                    if let Some(count) = value.get("count").and_then(|c| c.as_u64()) {
+                        let mut cache = state.count_cache.lock().unwrap();
+                        cache.ensure_generation(generation);
+                        if cache.entries.len() >= COUNT_CACHE_CAP {
+                            cache.entries.clear();
+                        }
+                        cache.entries.insert(key, count as usize);
+                    }
+                }
+                (None, None) => {}
+            }
             let ignored: Vec<String> = unknown_params
                 .iter()
                 .chain(invalid_params.iter())
@@ -406,12 +521,13 @@ async fn handle_search(
             }
             if let Some(key) = cache_key {
                 let mut cache = state.search_cache.lock().unwrap();
+                cache.ensure_generation(generation);
                 // Crude but sufficient eviction: reset when full. Entries
                 // are pages of at most 1000 rows without full documents.
-                if cache.len() >= SEARCH_CACHE_CAP {
-                    cache.clear();
+                if cache.entries.len() >= SEARCH_CACHE_CAP {
+                    cache.entries.clear();
                 }
-                cache.insert(key, value.clone());
+                cache.entries.insert(key, value.clone());
             }
             state
                 .metrics
@@ -669,10 +785,11 @@ fn top_margin(results: &[serde_json::Value]) -> Option<f64> {
 }
 
 /// An engine error is almost always the caller's (an unsortable field, an
-/// impossible parameter) — 400. Anything else is genuinely internal.
+/// impossible parameter) — 400. Anything else is genuinely internal. The
+/// engine phrases every caller-side refusal as "cannot …".
 fn engine_error(e: anyhow::Error) -> Response {
     let message = e.to_string();
-    let status = if message.starts_with("cannot sort by") {
+    let status = if message.starts_with("cannot ") {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1196,14 +1313,14 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 },
                 "schema": {
                     "fields": state.engine.config.schema.fields.iter().map(|f| {
-                        let metadata = state.engine.field_metadata.get(&f.name);
+                        let metadata = state.engine.field_values(&f.name);
                         serde_json::json!({
                             "name": f.name,
                             "type": format!("{:?}", f.field_type).to_lowercase(),
                             "search": f.search.as_ref().map(|s| s.as_str()),
                             "description": f.description,
-                            "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
-                            "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
+                            "values": metadata.as_ref().map(|m| m.values.clone()).unwrap_or_default(),
+                            "values_truncated": metadata.as_ref().map(|m| m.truncated).unwrap_or(false),
                         })
                     }).collect::<Vec<_>>(),
                 },
@@ -1447,6 +1564,228 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// A real imported index with a primary key, so an incremental update
+    /// can be run against it mid-test.
+    fn imported_config(dir: &std::path::Path, csv: &str) -> Arc<crate::config::Config> {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("data.csv"), csv).unwrap();
+        let keyword = |name: &str| FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Keyword,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(crate::config::Config {
+            server: crate::config::ServerConfig {
+                port: 0,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.join("index"),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: crate::config::SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: vec![
+                    FieldConfig {
+                        name: "name".to_string(),
+                        field_type: FieldType::Text,
+                        search: Some(crate::config::SearchMode::Fuzzy),
+                        values: None,
+                        max_values: None,
+                        case_sensitive: false,
+                        multi: false,
+                        separator: None,
+                        description: None,
+                    },
+                    keyword("org_number"),
+                ],
+            },
+            sources: vec![crate::config::SourceConfig {
+                path: dir.join("data.csv"),
+                defaults: HashMap::new(),
+                mapping: HashMap::from([
+                    ("name".to_string(), "company_name".to_string()),
+                    ("org_number".to_string(), "org_number".to_string()),
+                ]),
+                use_mapping: None,
+                sidecar: None,
+                format: None,
+            }],
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        crate::import::run_import(&config).unwrap();
+        config
+    }
+
+    async fn search_names(state: &Arc<AppState>, q: &str) -> (Vec<String>, bool) {
+        let response = handle_search(
+            State(Arc::clone(state)),
+            Query(SearchParams {
+                q: Some(q.to_string()),
+                limit: None,
+                offset: None,
+                include_pagination: None,
+                sort_by: None,
+                sort_order: None,
+                full: None,
+                count: None,
+                extra: HashMap::new(),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let names = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        (names, body["cached"].as_bool().unwrap_or(false))
+    }
+
+    /// The cache was built on "the index never changes while the process
+    /// runs". Incremental updates broke that: a query answered before a
+    /// delta kept replaying the pre-delta rows, cached: true, until restart.
+    #[tokio::test]
+    async fn search_cache_empties_when_the_index_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-cache-gen-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = imported_config(
+            &dir,
+            "org_number,company_name\n100,Acme Rockets\n200,Beta Bakery\n",
+        );
+        let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
+        // The reader's meta.json watcher treats its first poll as a change
+        // and reloads once right after open — a one-off generation bump
+        // that would race the first two calls here. Let it land, then pin
+        // the generation with an explicit reload.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.engine.reader.reload().unwrap();
+
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets".to_string()], false)
+        );
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets".to_string()], true),
+            "second call is served from cache"
+        );
+
+        std::fs::write(
+            dir.join("delta.csv"),
+            "org_number,company_name\n100,Acme Rockets International\n",
+        )
+        .unwrap();
+        crate::import::run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        state.engine.reader.reload().unwrap();
+
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets International".to_string()], false),
+            "a new generation must not replay the old rows"
+        );
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets International".to_string()], true),
+            "and caches again under the new generation"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn browse_page(state: &Arc<AppState>, limit: usize, offset: usize) -> serde_json::Value {
+        let response = handle_search(
+            State(Arc::clone(state)),
+            Query(SearchParams {
+                q: None,
+                limit: Some(limit),
+                offset: Some(offset),
+                include_pagination: Some(true),
+                sort_by: Some("org_number".to_string()),
+                sort_order: Some("asc".to_string()),
+                full: None,
+                count: None,
+                extra: HashMap::new(),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Paging through a sorted browse used to repeat the full-traversal
+    /// count on every page (the response key includes offset). The count
+    /// is now kept per query and spliced into later pages — with every
+    /// derived field right — and forgotten when the index moves.
+    #[tokio::test]
+    async fn browse_count_is_reused_across_pages_until_the_index_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-count-cache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut csv = String::from("org_number,company_name\n");
+        for i in 0..7 {
+            csv.push_str(&format!("{},Company {}\n", 100 + i, i));
+        }
+        let config = imported_config(&dir, &csv);
+        let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.engine.reader.reload().unwrap();
+
+        let first = browse_page(&state, 3, 0).await;
+        assert_eq!(first["count"], 7);
+        assert_eq!(state.count_cache.lock().unwrap().entries.len(), 1);
+
+        // Later pages: the engine skips its count pass; the response must
+        // not be able to tell.
+        let last = browse_page(&state, 3, 6).await;
+        assert_eq!(last["count"], 7);
+        assert_eq!(last["returned"], 1);
+        assert_eq!(last["has_more"], false);
+        assert_eq!(last["pagination"]["total"], 7);
+        assert_eq!(last["pagination"]["has_more"], false);
+        let middle = browse_page(&state, 3, 3).await;
+        assert_eq!(middle["has_more"], true);
+        assert_eq!(middle["pagination"]["returned"], 3);
+
+        // A delta changes the count; the cached one must not survive it.
+        std::fs::write(
+            dir.join("delta.csv"),
+            "org_number,company_name\n200,Newcomer\n",
+        )
+        .unwrap();
+        crate::import::run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        state.engine.reader.reload().unwrap();
+        let after = browse_page(&state, 3, 4).await;
+        assert_eq!(after["count"], 8);
+        assert_eq!(after["returned"], 3);
+        assert_eq!(after["has_more"], true, "4 + 3 < 8 now");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The hazard this endpoint exists to avoid. Everywhere else in the API an

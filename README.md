@@ -309,7 +309,7 @@ When `include_pagination=true`, `/search` also includes the legacy `pagination` 
 }
 ```
 
-The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`.
+The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Text searches (`q`) page within their first 1000 candidates, ranked by one similarity model throughout rather than quietly switching models deeper in; a window past 1000 is refused with a 400 — narrow the search with filters instead. A text search with `sort_by` lists *the best matches, sorted*: candidates below a similarity floor are dropped before sorting, so `q=berg&sort_by=revenue` is the Berg-like companies by revenue, not every name containing "ber" — and `count` on that path is the number of matches that passed the floor.
 
 ### `GET /fields`, `GET /docs`, `GET /openapi.json`
 
@@ -443,6 +443,8 @@ To be clear about what this is: a warm-up, not a cap. Residency is always the OS
 > current engine measures 2–8x faster on the fuzzy paths at 5M–20M docs and
 > its latency is flat in query length; run `cargo bench` or your own
 > dataset for current numbers.
+
+A text search under a *broad* exact filter (one matching 10% or more of the index — `country_code=NO` on a single-country dataset is the extreme) keeps block-WAND pruning by checking the filter per candidate against fast fields instead of intersecting; selective filters keep the intersection, which is cheaper for them. Sorted browses reuse their exact count across pages, and release builds use LTO. `cargo bench --bench search` reports each case; `RUZZ_BENCH_FILTER_STRATEGY=intersect|postfilter` forces either filter path for comparison.
 
 Tested on 1.15M records (single dataset):
 
