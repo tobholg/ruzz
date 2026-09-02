@@ -311,6 +311,16 @@ const QUERIES: &[Query] = &[
         sort: relevance,
         count: true,
     },
+    // Text query with a field sort: the whole match set (trigram
+    // membership) through the global sort collector, plus the exact count.
+    Query {
+        id: "fuzzy_sorted",
+        q: "bergsen",
+        filters: &[],
+        ranges: &[],
+        sort: || SortOrder::FieldDesc("revenue".to_string()),
+        count: true,
+    },
     // Typeahead: too short for a trigram, served by the edge-prefix field.
     Query {
         id: "typeahead_2char",
