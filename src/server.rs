@@ -50,6 +50,9 @@ pub struct AppState {
     /// them up — a response cached before a delta is wrong after it, so
     /// the cache empties itself whenever the generation moves.
     search_cache: std::sync::Mutex<SearchCache>,
+    /// Exact match counts per (query, filters, sort), so paging through a
+    /// browse does not repeat the full-traversal count on every page.
+    count_cache: std::sync::Mutex<CountCache>,
     /// Caps concurrent query threads at the core count. Excess requests
     /// queue on the semaphore instead of spawning ever more blocking
     /// threads that fight over the same CPUs.
@@ -66,24 +69,69 @@ impl AppState {
             started_at: Instant::now(),
             metrics: crate::metrics::Metrics::default(),
             search_cache: std::sync::Mutex::new(SearchCache::default()),
+            count_cache: std::sync::Mutex::new(CountCache::default()),
             query_permits: tokio::sync::Semaphore::new(permits),
         }
     }
 }
 
-#[derive(Default)]
-struct SearchCache {
+/// A cache valid for one searcher generation.
+struct GenerationCache<V> {
     generation: u64,
-    entries: HashMap<String, serde_json::Value>,
+    entries: HashMap<String, V>,
 }
 
-impl SearchCache {
+impl<V> Default for GenerationCache<V> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<V> GenerationCache<V> {
     /// Drop every entry when the index has moved on since they were made.
     fn ensure_generation(&mut self, generation: u64) {
         if self.generation != generation {
             self.entries.clear();
             self.generation = generation;
         }
+    }
+}
+
+type SearchCache = GenerationCache<serde_json::Value>;
+type CountCache = GenerationCache<usize>;
+
+/// Cached counts before the count cache resets. Entries are a usize each.
+const COUNT_CACHE_CAP: usize = 4096;
+
+/// Fill the count-derived response fields from a cached count, after the
+/// engine ran without its counting pass.
+fn splice_count(value: &mut serde_json::Value, count: usize, want_count: bool, pagination: bool) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let offset = obj.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = obj.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let returned = obj.get("returned").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let has_more = offset.saturating_add(returned) < count;
+    obj.insert("has_more".to_string(), serde_json::json!(has_more));
+    if want_count {
+        obj.insert("count".to_string(), serde_json::json!(count));
+    }
+    if pagination {
+        obj.insert(
+            "pagination".to_string(),
+            serde_json::json!({
+                "offset": offset,
+                "limit": limit,
+                "returned": returned,
+                "total": count,
+                "total_relation": "eq",
+                "has_more": has_more,
+            }),
+        );
     }
 }
 
@@ -251,17 +299,16 @@ async fn handle_search(
     }
 
     // Repeated identical requests are the norm for a dashboard (every
-    // keystroke re-fires, tabs re-open, several people watch one deploy).
-    // The index is immutable for the life of the process — imports build
-    // into a staging directory and swap, which a running server only picks
-    // up on restart — so a response can be replayed verbatim. Keyed on the
-    // raw request inputs, before any parsing, so every derived behavior
-    // (ignored parameters included) is covered by the key.
+    // keystroke re-fires, tabs re-open, several people watch one deploy),
+    // and within one searcher generation the index does not change, so a
+    // response can be replayed verbatim. Keyed on the raw request inputs,
+    // before any parsing, so every derived behavior (ignored parameters
+    // included) is covered by the key.
+    let mut extra: Vec<(&String, &String)> = params.extra.iter().collect();
+    extra.sort();
     let cache_key = if include_full || limit > 100 {
         None // bound entry size: no full documents, no thousand-row pages
     } else {
-        let mut extra: Vec<(&String, &String)> = params.extra.iter().collect();
-        extra.sort();
         Some(format!(
             "{}\x01{:?}\x01{:?}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
             query_text,
@@ -278,6 +325,20 @@ async fn handle_search(
     // acquires afterwards can only be this generation or newer, so tagging
     // the result with this value never marks a stale response as fresh.
     let generation = state.engine.reader.searcher().generation().generation_id();
+    // The exact count is the same on every page of a browse or a
+    // relevance search, and on a browse it is the expensive part — a full
+    // traversal of the matching set. Paging used to recompute it every
+    // time because the response key includes offset and limit. A sorted
+    // text search is left out: its count is the gated share of a candidate
+    // pool that grows with the window, so it is not page-invariant.
+    let count_key = if query_text.is_empty() || params.sort_by.is_none() {
+        Some(format!(
+            "{}\x01{:?}\x01{:?}\x01{:?}",
+            query_text, params.sort_by, params.sort_order, extra
+        ))
+    } else {
+        None
+    };
     if let Some(key) = &cache_key {
         let hit = {
             let mut cache = state.search_cache.lock().unwrap();
@@ -406,6 +467,15 @@ async fn handle_search(
         _ => crate::search::SortOrder::Relevance,
     };
 
+    let cached_count = count_key.as_ref().and_then(|key| {
+        let mut cache = state.count_cache.lock().unwrap();
+        cache.ensure_generation(generation);
+        cache.entries.get(key).copied()
+    });
+    // With the count in hand, the engine can skip its counting pass; the
+    // count-derived fields are filled in below from the cached value.
+    let need_engine_count = cached_count.is_none() && (want_count || include_pagination);
+
     let outcome = run_blocking(&state, move |app| {
         app.engine.search(
             &query_text,
@@ -414,8 +484,8 @@ async fn handle_search(
             &sort,
             limit,
             offset,
-            include_pagination,
-            want_count,
+            need_engine_count && include_pagination,
+            need_engine_count && want_count,
             include_full,
         )
     })
@@ -425,6 +495,20 @@ async fn handle_search(
     match outcome {
         Ok(result) => {
             let mut value = serde_json::to_value(result).unwrap();
+            match (cached_count, count_key) {
+                (Some(count), _) => splice_count(&mut value, count, want_count, include_pagination),
+                (None, Some(key)) => {
+                    if let Some(count) = value.get("count").and_then(|c| c.as_u64()) {
+                        let mut cache = state.count_cache.lock().unwrap();
+                        cache.ensure_generation(generation);
+                        if cache.entries.len() >= COUNT_CACHE_CAP {
+                            cache.entries.clear();
+                        }
+                        cache.entries.insert(key, count as usize);
+                    }
+                }
+                (None, None) => {}
+            }
             let ignored: Vec<String> = unknown_params
                 .iter()
                 .chain(invalid_params.iter())
@@ -1624,6 +1708,82 @@ mod tests {
             (vec!["Acme Rockets International".to_string()], true),
             "and caches again under the new generation"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn browse_page(state: &Arc<AppState>, limit: usize, offset: usize) -> serde_json::Value {
+        let response = handle_search(
+            State(Arc::clone(state)),
+            Query(SearchParams {
+                q: None,
+                limit: Some(limit),
+                offset: Some(offset),
+                include_pagination: Some(true),
+                sort_by: Some("org_number".to_string()),
+                sort_order: Some("asc".to_string()),
+                full: None,
+                count: None,
+                extra: HashMap::new(),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Paging through a sorted browse used to repeat the full-traversal
+    /// count on every page (the response key includes offset). The count
+    /// is now kept per query and spliced into later pages — with every
+    /// derived field right — and forgotten when the index moves.
+    #[tokio::test]
+    async fn browse_count_is_reused_across_pages_until_the_index_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-count-cache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut csv = String::from("org_number,company_name\n");
+        for i in 0..7 {
+            csv.push_str(&format!("{},Company {}\n", 100 + i, i));
+        }
+        let config = imported_config(&dir, &csv);
+        let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.engine.reader.reload().unwrap();
+
+        let first = browse_page(&state, 3, 0).await;
+        assert_eq!(first["count"], 7);
+        assert_eq!(state.count_cache.lock().unwrap().entries.len(), 1);
+
+        // Later pages: the engine skips its count pass; the response must
+        // not be able to tell.
+        let last = browse_page(&state, 3, 6).await;
+        assert_eq!(last["count"], 7);
+        assert_eq!(last["returned"], 1);
+        assert_eq!(last["has_more"], false);
+        assert_eq!(last["pagination"]["total"], 7);
+        assert_eq!(last["pagination"]["has_more"], false);
+        let middle = browse_page(&state, 3, 3).await;
+        assert_eq!(middle["has_more"], true);
+        assert_eq!(middle["pagination"]["returned"], 3);
+
+        // A delta changes the count; the cached one must not survive it.
+        std::fs::write(
+            dir.join("delta.csv"),
+            "org_number,company_name\n200,Newcomer\n",
+        )
+        .unwrap();
+        crate::import::run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        state.engine.reader.reload().unwrap();
+        let after = browse_page(&state, 3, 4).await;
+        assert_eq!(after["count"], 8);
+        assert_eq!(after["returned"], 3);
+        assert_eq!(after["has_more"], true, "4 + 3 < 8 now");
 
         let _ = std::fs::remove_dir_all(dir);
     }
