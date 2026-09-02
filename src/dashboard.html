@@ -27,6 +27,7 @@
     --accent-ring: rgba(193,95,60,0.5);
     --accent-contrast: #FAF9F5;
     --green: #4C7A5C;
+    --red: #B04A3C;
     --overlay: rgba(31,30,29,0.45);
     --shadow: 0 1px 2px rgba(31,30,29,0.05);
     --shadow-pop: 0 16px 44px rgba(31,30,29,0.16);
@@ -53,6 +54,7 @@
     --accent-ring: rgba(217,119,87,0.5);
     --accent-contrast: #1F1E1D;
     --green: #8FAF8C;
+    --red: #D9827A;
     --overlay: rgba(15,14,13,0.62);
     --shadow: none;
     --shadow-pop: 0 24px 64px rgba(0,0,0,0.5);
@@ -76,6 +78,7 @@
       --accent-ring: rgba(217,119,87,0.5);
       --accent-contrast: #1F1E1D;
       --green: #8FAF8C;
+    --red: #D9827A;
       --overlay: rgba(15,14,13,0.62);
       --shadow: none;
       --shadow-pop: 0 24px 64px rgba(0,0,0,0.5);
@@ -393,6 +396,77 @@
   .tab-content { display: none; }
   .tab-content.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   #tab-docs.active { display: block; flex: 1; min-height: 0; overflow-y: auto; }
+
+  /* ── Activity tab ── */
+  #tab-activity.active { display: block; flex: 1; min-height: 0; overflow-y: auto; }
+  .activity { max-width: 1020px; margin: 0 auto; padding: 26px 0 64px; }
+  .act-loading { color: var(--text-muted); padding: 40px 0; text-align: center; }
+  .act-banner { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 14px 18px; background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; box-shadow: var(--shadow); font-size: 14px; }
+  .act-banner .act-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); align-self: center; flex: none; }
+  .act-banner.failed .act-dot { background: var(--red); }
+  .act-banner b { font-weight: 600; }
+  .act-banner .act-sub { color: var(--text-muted); }
+  .act-banner .act-src { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .act-banner .act-error { flex-basis: 100%; color: var(--red); font-family: var(--mono); font-size: 11.5px; }
+  /* KPI rows spread their entries equally across the card's width. */
+  .act-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 16px; margin: 22px 2px; font-variant-numeric: tabular-nums; }
+  .act-tile .act-n { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; }
+  .act-tile .act-n.warn { color: var(--accent-strong); }
+  .act-tile .act-l { font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); margin-top: 2px; }
+  .act-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: stretch; }
+  .act-cols .act-card { margin-bottom: 0; }
+  @media (max-width: 860px) { .act-cols { grid-template-columns: 1fr; gap: 0; } .act-cols .act-card { margin-bottom: 22px; } }
+  .act-cols-wrap { margin-bottom: 22px; }
+  .rbar-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; margin: 14px 0 6px; }
+  .rbar-head:first-of-type { margin-top: 2px; }
+  .rbar-head b { font-weight: 600; }
+  .rbar-head .rbar-nums { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+  .rbar { position: relative; height: 10px; border-radius: 5px; background: color-mix(in srgb, var(--text) 7%, var(--bg)); }
+  .rbar .rbar-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 5px; background: var(--accent-fill); }
+  .rbar .rbar-seg { position: absolute; top: 0; bottom: 0; background: var(--text-dim); opacity: 0.55; }
+  .rbar .rbar-marker { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); border-radius: 1px; }
+  .rbar-note { font-size: 11.5px; color: var(--text-dim); margin-top: 6px; }
+  .rbar-legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); margin-top: 7px; flex-wrap: wrap; }
+  .rbar-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .act-mini { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 14px; font-variant-numeric: tabular-nums; }
+  .act-mini .act-n { font-size: 16px; font-weight: 600; }
+  .act-mini .act-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); margin-top: 1px; }
+  .act-mini-split { border-top: 1px solid var(--row-line); margin-top: 14px; padding-top: 12px; }
+  .act-sparks { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
+  .act-spark .act-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim); }
+  .act-spark .act-n { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 1px 0 4px; }
+  .act-spark svg { width: 100%; height: 34px; display: block; }
+  .act-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+  .act-spark polygon { fill: var(--accent-tint); }
+  .act-collect { height: 34px; display: flex; align-items: center; font-size: 11px; color: var(--text-dim); }
+  .act-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 22px; }
+  .act-card-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: baseline; }
+  .act-card-title .act-legend { display: inline-flex; align-items: center; gap: 3px; text-transform: none; letter-spacing: 0; }
+  .act-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .heat-scroll { overflow-x: auto; padding-bottom: 4px; }
+  .heat-months { position: relative; height: 14px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+  .heat-months span { position: absolute; top: 0; }
+  .heatmap { display: grid; grid-template-rows: repeat(7, 10px); grid-auto-flow: column; grid-auto-columns: 10px; gap: 3px; }
+  .heatmap i { border-radius: 2px; background: color-mix(in srgb, var(--text) 7%, var(--bg)); }
+  .heatmap i.h1, .act-legend i.h1 { background: color-mix(in srgb, var(--accent-fill) 30%, var(--bg)); }
+  .heatmap i.h2, .act-legend i.h2 { background: color-mix(in srgb, var(--accent-fill) 55%, var(--bg)); }
+  .heatmap i.h3, .act-legend i.h3 { background: color-mix(in srgb, var(--accent-fill) 80%, var(--bg)); }
+  .heatmap i.h4, .act-legend i.h4 { background: var(--accent-strong); }
+  .act-legend i.h0 { background: color-mix(in srgb, var(--text) 7%, var(--bg)); }
+  .heatmap i.err { outline: 1.5px solid var(--red); outline-offset: -1.5px; }
+  .act-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .act-table th { text-align: left; font-family: var(--mono); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; font-weight: 500; color: var(--text-muted); padding: 4px 14px 8px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .act-table td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--row-line); white-space: nowrap; vertical-align: top; }
+  .act-table td.num { text-align: right; }
+  .act-table th.num { text-align: right; }
+  .act-table .mono { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
+  .act-op { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 6px; background: var(--accent-tint); color: var(--accent-strong); }
+  .act-status { font-weight: 600; }
+  .act-status.ok { color: var(--green); }
+  .act-status.failed { color: var(--red); }
+  .act-errline td { color: var(--red); font-family: var(--mono); font-size: 11px; white-space: normal; padding-top: 0; }
+  .act-empty { color: var(--text-muted); padding: 8px 0 4px; }
+  .act-empty code { font-size: 0.9em; }
   .docs { max-width: 880px; padding: 1.5rem 0 4rem 0; line-height: 1.65; }
   .docs h2 { font-family: var(--serif); font-size: 1.35rem; margin: 2rem 0 0.75rem 0; }
   .docs h3 { font-size: 1rem; margin: 1.5rem 0 0.5rem 0; }
@@ -459,6 +533,7 @@
       <div class="index-chip" id="index-chip">—</div>
       <div class="tabs">
         <button class="tab active" data-tab="search" type="button">Search</button>
+        <button class="tab" data-tab="activity" type="button">Activity</button>
         <button class="tab" data-tab="docs" type="button">Docs</button>
       </div>
     </div>
@@ -476,6 +551,7 @@
 
   <div class="main">
     <div class="tab-content active" id="tab-search"></div>
+    <div class="tab-content" id="tab-activity"><div class="activity" id="activity-content"></div></div>
     <div class="tab-content" id="tab-docs"><div class="docs" id="docs-content"></div></div>
   </div>
 </div>
@@ -836,6 +912,7 @@ document.querySelectorAll('.topbar .tab').forEach(tab => {
     tab.classList.add('active');
     document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
     if (tab.dataset.tab === 'docs') buildDocs();
+    if (tab.dataset.tab === 'activity') buildActivity();
   });
 });
 
@@ -2614,6 +2691,265 @@ Number fields return as JSON numbers, or \`null\` when the source had no value. 
       setTimeout(() => setCopyButtonState('Copy for LLM'), 2000);
     }
   });
+}
+
+/* ── activity tab ── */
+function escAct(value) {
+  return String(value ?? '').replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+function actRelTime(ts) {
+  const then = Date.parse(ts);
+  if (!Number.isFinite(then)) return ts;
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 5400) return `${Math.round(s / 60)}m ago`;
+  if (s < 129600) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+function actDuration(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 120000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms / 60000)}m`;
+}
+
+function actDescribe(event) {
+  const n = value => Number(value || 0).toLocaleString();
+  if (event.op === 'delete') return `${n(event.deleted)} document${event.deleted === 1 ? '' : 's'} deleted`;
+  if (event.op === 'gc') return 'garbage collection';
+  const verb = event.op === 'update' ? 'upserted' : 'imported';
+  let text = `${n(event.rows)} row${event.rows === 1 ? '' : 's'} ${verb}`;
+  if (event.skipped) text += ` · ${n(event.skipped)} skipped`;
+  return text;
+}
+
+/* Trailing-year heatmap, colored by records touched per day (rows + deletes)
+   — one huge import and thirty tiny deltas must not look alike, so levels
+   follow a log scale against the busiest day. A red outline marks a day
+   with a failed operation. */
+function actHeatmap(days) {
+  const byDate = new Map(days.map(day => [day.date, day]));
+  const DAY = 86400000;
+  const today = new Date();
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  // Monday-first rows; the grid ends on today's column.
+  const end = todayUtc;
+  const endDow = (new Date(end).getUTCDay() + 6) % 7; // 0 = Monday
+  const start = end - endDow * DAY - 52 * 7 * DAY;
+  const max = Math.max(1, ...days.map(day => day.rows + day.deleted));
+  let cells = '';
+  let months = '';
+  let lastMonth = -1;
+  for (let i = 0; ; i++) {
+    const t = start + i * DAY;
+    if (t > end) break;
+    const date = new Date(t);
+    const iso = date.toISOString().slice(0, 10);
+    const day = byDate.get(iso);
+    const touched = day ? day.rows + day.deleted : 0;
+    let level = 0;
+    if (touched > 0) level = Math.min(4, 1 + Math.floor(3 * (Math.log(touched) / Math.log(Math.max(2, max)))));
+    else if (day) level = 1; // an op ran but touched nothing — still activity
+    const classes = [];
+    if (level) classes.push('h' + level);
+    if (day && day.errors) classes.push('err');
+    const label = day
+      ? `${iso} — ${Number(touched).toLocaleString()} records · ${day.events} op${day.events === 1 ? '' : 's'}${day.errors ? ` · ${day.errors} failed` : ''}`
+      : iso;
+    cells += `<i${classes.length ? ` class="${classes.join(' ')}"` : ''} title="${label}"></i>`;
+    if (i % 7 === 0) {
+      const month = date.getUTCMonth();
+      if (month !== lastMonth && date.getUTCDate() <= 7) {
+        months += `<span style="left:${(i / 7) * 13}px">${date.toLocaleString('en', { month: 'short', timeZone: 'UTC' })}</span>`;
+      }
+      lastMonth = month;
+    }
+  }
+  return `<div class="heat-scroll"><div class="heat-months">${months}</div><div class="heatmap">${cells}</div></div>`;
+}
+
+async function buildActivity() {
+  const el = document.getElementById('activity-content');
+  if (!el) return;
+  el.innerHTML = '<div class="act-loading">Loading activity…</div>';
+  let data;
+  try {
+    const res = await authFetch(`${API}/activity`);
+    data = await res.json();
+    if (data.error) throw new Error(data.error);
+  } catch (e) {
+    el.innerHTML = `<div class="act-loading">Could not load /activity — ${escAct(e.message || e)}</div>`;
+    return;
+  }
+
+  const latest = data.events?.[0];
+  const banner = latest
+    ? `<div class="act-banner${latest.ok ? '' : ' failed'}">
+        <span class="act-dot"></span>
+        <b>Last ${escAct(latest.op)} ${actRelTime(latest.ts)}</b>
+        <span class="act-sub">— ${latest.ok ? `${actDescribe(latest)} in ${actDuration(latest.duration_ms)}` : 'failed'}</span>
+        ${latest.sources?.length ? `<span class="act-src">${escAct(latest.sources.join(', '))}</span>` : ''}
+        ${latest.ok ? '' : `<span class="act-error">${escAct(latest.error || '')}</span>`}
+      </div>`
+    : `<div class="act-banner"><span class="act-sub">No activity recorded yet — the log starts with the next <code>ruzz import</code>, <code>update</code> or <code>delete</code>.</span></div>`;
+
+  const superseded = data.store
+    ? `<div class="act-tile"><div class="act-n${data.store.superseded_pct >= 15 ? ' warn' : ''}">${data.store.superseded_pct.toFixed(1)}%</div>
+       <div class="act-l" title="Store versions superseded by updates or deletes — a full import rewrites the store compactly">store superseded</div></div>`
+    : '';
+  const tiles = `<div class="act-tiles">
+      <div class="act-tile"><div class="act-n">${Number(data.documents).toLocaleString()}</div><div class="act-l">live docs</div></div>
+      ${data.store ? `<div class="act-tile"><div class="act-n">${Number(data.store.refs_issued).toLocaleString()}</div><div class="act-l">refs issued</div></div>` : ''}
+      ${superseded}
+      <div class="act-tile"><div class="act-n">${Number(data.total_events).toLocaleString()}</div><div class="act-l">operations logged</div></div>
+    </div>`;
+
+  const rows = (data.events || []).map(event => {
+    const main = `<tr>
+      <td class="mono" title="${escAct(event.ts)}">${actRelTime(event.ts)}</td>
+      <td><span class="act-op">${escAct(event.op)}</span></td>
+      <td class="num">${event.ok ? actDescribe(event) : '—'}</td>
+      <td class="num mono">${actDuration(event.duration_ms)}</td>
+      <td class="mono">${escAct((event.sources || []).join(', ')) || '—'}</td>
+      <td><span class="act-status ${event.ok ? 'ok' : 'failed'}">${event.ok ? 'ok' : 'failed'}</span></td>
+    </tr>`;
+    const err = event.ok ? '' : `<tr class="act-errline"><td></td><td colspan="5">${escAct(event.error || '')}</td></tr>`;
+    return main + err;
+  }).join('');
+
+  el.innerHTML = `
+    ${banner}
+    ${tiles}
+    <div class="act-card">
+      <div class="act-card-title"><span>Records touched · trailing year</span>
+        <span class="act-legend">less <i class="h0"></i><i class="h1"></i><i class="h2"></i><i class="h3"></i><i class="h4"></i> more</span>
+      </div>
+      ${actHeatmap(data.days || [])}
+    </div>
+    ${actResourceCards(data)}
+    ${actStoreCard(data)}
+    <div class="act-card">
+      <div class="act-card-title"><span>Recent operations</span></div>
+      ${rows
+        ? `<div style="overflow-x:auto"><table class="act-table">
+            <thead><tr><th>when</th><th>op</th><th class="num">records</th><th class="num">took</th><th>sources</th><th>status</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>`
+        : '<div class="act-empty">Nothing yet.</div>'}
+    </div>`;
+}
+
+function actBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function actSpark(samples, get, fmt, label) {
+  const vals = (samples || []).map(get).filter(v => v != null && Number.isFinite(v));
+  const current = vals.length ? fmt(vals[vals.length - 1]) : '—';
+  let body;
+  if (vals.length >= 2) {
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const span = (max - min) || 1;
+    const pts = vals.map((v, i) =>
+      `${((i / (vals.length - 1)) * 100).toFixed(2)},${(31 - ((v - min) / span) * 27).toFixed(2)}`);
+    body = `<svg viewBox="0 0 100 34" preserveAspectRatio="none">
+      <polygon points="0,34 ${pts.join(' ')} 100,34"></polygon>
+      <polyline points="${pts.join(' ')}"></polyline></svg>`;
+  } else {
+    body = '<div class="act-collect">collecting…</div>';
+  }
+  return `<div class="act-spark"><div class="act-l">${label}</div><div class="act-n">${current}</div>${body}</div>`;
+}
+
+/* Resources + search-load cards, side by side. Bar semantics are deliberate:
+   only disk gets a plain fill-toward-full bar (it has a real ceiling); the
+   memory bar is segmented with no alarm framing, because RSS here is mostly
+   reclaimable mmap page cache and memory_budget is a warm-up, not a cap. */
+function actResourceCards(data) {
+  const res = data.resources;
+  if (!res) return '';
+  const samples = data.search?.samples || [];
+
+  let diskBar = '';
+  if (res.disk_total > 0) {
+    const used = res.disk_total - res.disk_free;
+    const usedPct = (used / res.disk_total) * 100;
+    // A full import stages the new index beside the live one, so peak disk
+    // is roughly current usage plus one more index.
+    const peakPct = Math.min(100, ((used + (data.index_bytes || 0)) / res.disk_total) * 100);
+    diskBar = `
+      <div class="rbar-head"><b>Disk</b><span class="rbar-nums">${actBytes(used)} used · ${actBytes(res.disk_free)} free of ${actBytes(res.disk_total)}</span></div>
+      <div class="rbar"><div class="rbar-fill" style="width:${usedPct.toFixed(1)}%"></div>
+        <div class="rbar-marker" style="left:${peakPct.toFixed(1)}%" title="Peak during a full import: current usage + one index (staging + swap)"></div></div>
+      <div class="rbar-note">Marker: full-import peak — staging builds beside the live index, so keep ~one index (${escAct(data.index_human)}) of headroom.</div>`;
+  }
+
+  const rss = res.rss_bytes;
+  const procPct = res.total_mem > 0 ? (rss / res.total_mem) * 100 : 0;
+  // Some platforms (macOS via sysinfo) report no "available" figure; show
+  // only what is actually known rather than a full-looking "other" segment.
+  const hasAvail = res.available_mem > 0;
+  const otherUsed = hasAvail ? Math.max(0, res.total_mem - res.available_mem - rss) : 0;
+  const otherPct = res.total_mem > 0 ? (otherUsed / res.total_mem) * 100 : 0;
+  const memNums = hasAvail
+    ? `rss ${actBytes(rss)} · ${actBytes(res.available_mem)} available of ${actBytes(res.total_mem)}`
+    : `rss ${actBytes(rss)} of ${actBytes(res.total_mem)}`;
+  const memBar = `
+      <div class="rbar-head"><b>Memory</b><span class="rbar-nums">${memNums}</span></div>
+      <div class="rbar"><div class="rbar-fill" style="width:${procPct.toFixed(1)}%"></div>
+        ${hasAvail ? `<div class="rbar-seg" style="left:${procPct.toFixed(1)}%;width:${otherPct.toFixed(1)}%"></div>` : ''}</div>
+      <div class="rbar-legend">
+        <span><i style="background:var(--accent-fill)"></i>this process</span>
+        ${hasAvail ? `<span><i style="background:var(--text-dim);opacity:.55"></i>other</span>
+        <span><i style="background:color-mix(in srgb, var(--text) 7%, var(--bg))"></i>available</span>` : ''}
+      </div>
+      <div class="rbar-note">Mostly reclaimable index pages (mmap) — not a fill-toward-danger number.</div>`;
+
+  const miniStats = `
+      <div class="act-mini act-mini-split">
+        <div><div class="act-n">${escAct(res.uptime_human)}</div><div class="act-l">uptime</div></div>
+        <div><div class="act-n">${res.cpu_pct.toFixed(1)}%</div><div class="act-l">cpu</div></div>
+        <div><div class="act-n">${escAct(data.index_human)}</div><div class="act-l">index on disk</div></div>
+      </div>`;
+
+  const totalQueries = Number(data.search?.total_queries || 0);
+  const searchCard = `
+    <div class="act-card">
+      <div class="act-card-title"><span>Search load</span><span>${totalQueries.toLocaleString()} queries served</span></div>
+      <div class="act-sparks">
+        ${actSpark(samples, s => s.qps, v => v >= 10 ? Math.round(v).toLocaleString() : v.toFixed(1), 'queries / s')}
+        ${actSpark(samples, s => s.p95_ms, v => `${v >= 10 ? Math.round(v) : v.toFixed(1)} ms`, 'p95 latency')}
+        ${actSpark(samples, s => s.rss_bytes, actBytes, 'rss')}
+        ${actSpark(samples, s => s.disk_free, actBytes, 'disk free')}
+      </div>
+    </div>`;
+
+  return `<div class="act-cols act-cols-wrap">
+    <div class="act-card">
+      <div class="act-card-title"><span>Resources</span></div>
+      ${diskBar}${memBar}${miniStats}
+    </div>
+    ${searchCard}
+  </div>`;
+}
+
+function actStoreCard(data) {
+  if (!data.store) return '';
+  return `
+    <div class="act-card">
+      <div class="act-card-title"><span>Document store</span></div>
+      <div class="act-mini">
+        <div><div class="act-n">${escAct(data.store.size_human)}</div><div class="act-l">store on disk</div></div>
+        <div><div class="act-n">${data.store.compression_ratio.toFixed(1)}×</div><div class="act-l">compression</div></div>
+        <div><div class="act-n">${data.store.cache_hit_pct.toFixed(1)}%</div><div class="act-l">cache hit rate</div></div>
+        <div><div class="act-n">${Number(data.store.superseded).toLocaleString()}</div><div class="act-l">superseded refs</div></div>
+      </div>
+    </div>`;
 }
 
 /* ── boot ── */

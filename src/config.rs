@@ -240,6 +240,32 @@ pub enum SearchMode {
     Substring,
 }
 
+/// How a source file's records are encoded.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceFormat {
+    Csv,
+    /// One JSON document per line (NDJSON). Mapping values are dotted paths
+    /// into the document; a schema field with no mapping entry uses its own
+    /// name as the path.
+    Jsonl,
+}
+
+/// Format implied by a file name: `.jsonl` / `.ndjson` (optionally behind
+/// `.gz`) is JSONL, everything else is CSV.
+pub fn detect_format(path: &std::path::Path) -> SourceFormat {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
+    if name.ends_with(".jsonl") || name.ends_with(".ndjson") {
+        SourceFormat::Jsonl
+    } else {
+        SourceFormat::Csv
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SourceConfig {
     pub path: PathBuf,
@@ -252,6 +278,9 @@ pub struct SourceConfig {
     /// Aligned JSONL file with one full document per CSV row.
     /// Required for every source when [store] source = "sidecar".
     pub sidecar: Option<PathBuf>,
+    /// Record encoding. Defaults to what the file extension implies.
+    #[serde(default)]
+    pub format: Option<SourceFormat>,
 }
 
 impl SourceConfig {
@@ -266,6 +295,10 @@ impl SourceConfig {
             }
         }
         self.mapping.clone()
+    }
+
+    pub fn resolved_format(&self) -> SourceFormat {
+        self.format.unwrap_or_else(|| detect_format(&self.path))
     }
 }
 
@@ -460,6 +493,20 @@ mod tests {
         assert_eq!(config.resolve_store_path(), current);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_follows_the_extension_through_gz() {
+        use std::path::Path;
+        assert_eq!(detect_format(Path::new("data/a.csv")), SourceFormat::Csv);
+        assert_eq!(
+            detect_format(Path::new("data/a.jsonl")),
+            SourceFormat::Jsonl
+        );
+        assert_eq!(detect_format(Path::new("a.NDJSON")), SourceFormat::Jsonl);
+        assert_eq!(detect_format(Path::new("a.jsonl.gz")), SourceFormat::Jsonl);
+        assert_eq!(detect_format(Path::new("a.csv.gz")), SourceFormat::Csv);
+        assert_eq!(detect_format(Path::new("weird.txt")), SourceFormat::Csv);
     }
 
     /// A bare index name has no parent; the store must not end up at the
