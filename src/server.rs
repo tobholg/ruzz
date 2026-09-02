@@ -137,7 +137,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         }));
     }
 
+    // Outermost: JSON pages of a thousand rows and the /activity sample
+    // series compress several-fold, and only clients that ask
+    // (Accept-Encoding) pay the CPU for it.
     app.layer(CorsLayer::permissive())
+        .layer(tower_http::compression::CompressionLayer::new())
 }
 
 /// Constant-time byte equality: the comparison must not leak how much of
