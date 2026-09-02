@@ -3017,6 +3017,100 @@ pub mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Sorted browse pages must stitch together even when the sort value
+    /// ties across page boundaries: the segment heaps and the cross-segment
+    /// merge have to agree on which tied documents come first (lowest
+    /// address), whatever page size is asked for.
+    #[test]
+    fn sorted_browse_pages_stitch_under_ties() {
+        let dir = test_index_dir("sort-ties");
+        std::fs::create_dir_all(&dir).unwrap();
+        let keyword = |name: &str| FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Keyword,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.clone(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![keyword("city"), keyword("id")],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, fields) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(&dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        // Three sort values over 120 docs — ties everywhere — spread over
+        // several segments so the cross-segment merge is exercised too.
+        for i in 0..120u32 {
+            let city = ["Alta", "Bodø", "Cato"][(i % 3) as usize];
+            writer
+                .add_document(doc!(fields["city"] => city, fields["id"] => format!("{i:03}")))
+                .unwrap();
+            if i % 40 == 39 {
+                writer.commit().unwrap();
+            }
+        }
+        writer.commit().unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+
+        // Identity, not the (tied) sort value, is what must line up.
+        let page = |limit: usize, offset: usize| -> Vec<serde_json::Value> {
+            engine
+                .search(
+                    "",
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::FieldAsc("city".to_string()),
+                    limit,
+                    offset,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap()
+                .results
+                .iter()
+                .map(|r| r["id"].clone())
+                .collect()
+        };
+        let wide = page(120, 0);
+        assert_eq!(wide.len(), 120);
+        let mut unique = wide.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), 120, "every doc exactly once");
+        for size in [7usize, 40, 55] {
+            let mut stitched = Vec::new();
+            let mut offset = 0;
+            while offset < 120 {
+                stitched.extend(page(size, offset));
+                offset += size;
+            }
+            assert_eq!(stitched, wide, "page size {size}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn test_index_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)

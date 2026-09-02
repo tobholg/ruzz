@@ -202,8 +202,11 @@ impl PartialOrd for F64HeapEntry {
     }
 }
 impl Ord for F64HeapEntry {
+    /// Rank first; among equal ranks the higher doc id is the worse entry,
+    /// so eviction keeps the lower address — the same tiebreak
+    /// `merge_fruits` applies, which keeps page boundaries stable.
     fn cmp(&self, other: &Self) -> Ordering {
-        self.rank.cmp(&other.rank)
+        self.rank.cmp(&other.rank).then(self.doc.cmp(&other.doc))
     }
 }
 
@@ -217,7 +220,19 @@ impl SegmentCollector for TopByF64Segment {
             Some(v) => (false, !f64_rank_bits(v)),
             None => (true, 0),
         };
-        self.heap.push(F64HeapEntry { rank, value, doc });
+        let entry = F64HeapEntry { rank, value, doc };
+        // Once the heap is full, a doc placed no better than the current
+        // worst cannot enter: one comparison instead of a push and a pop —
+        // on a browse matching millions of rows, most of the collector's
+        // work.
+        if self.heap.len() >= self.k {
+            if let Some(worst) = self.heap.peek() {
+                if entry >= *worst {
+                    return;
+                }
+            }
+        }
+        self.heap.push(entry);
         if self.heap.len() > self.k {
             self.heap.pop();
         }
@@ -257,8 +272,9 @@ impl PartialOrd for HeapEntry {
     }
 }
 impl Ord for HeapEntry {
+    /// Rank first, then doc id — see `F64HeapEntry`.
     fn cmp(&self, other: &Self) -> Ordering {
-        self.rank.cmp(&other.rank)
+        self.rank.cmp(&other.rank).then(self.doc.cmp(&other.doc))
     }
 }
 
@@ -283,11 +299,19 @@ impl SegmentCollector for TopByStrSegment {
             Some(ord) => (false, !ord),
             None => (true, 0),
         };
-        self.heap.push(HeapEntry {
+        let entry = HeapEntry {
             rank,
             ord: ord.unwrap_or(0),
             doc,
-        });
+        };
+        if self.heap.len() >= self.k {
+            if let Some(worst) = self.heap.peek() {
+                if entry >= *worst {
+                    return;
+                }
+            }
+        }
+        self.heap.push(entry);
         if self.heap.len() > self.k {
             self.heap.pop();
         }
