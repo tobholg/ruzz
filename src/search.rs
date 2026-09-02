@@ -40,7 +40,11 @@ pub struct SearchEngine {
     pub schema: Schema,
     pub field_map: HashMap<String, Field>,
     pub field_configs: HashMap<String, crate::config::FieldConfig>,
-    pub field_metadata: HashMap<String, RuntimeFieldMetadata>,
+    /// Enum value lists and the like, read from the index's metadata file.
+    /// An incremental update rewrites that file, so this is reloaded when
+    /// the searcher generation moves — see `field_values`.
+    field_metadata: std::sync::RwLock<HashMap<String, RuntimeFieldMetadata>>,
+    metadata_generation: std::sync::atomic::AtomicU64,
     pub config: Arc<Config>,
     pub store: Option<StoreReader>,
     pub store_status: StoreStatus,
@@ -229,13 +233,8 @@ impl SearchEngine {
             .iter()
             .cloned()
             .collect();
-        let mut field_metadata = HashMap::new();
-        for fc in &config.schema.fields {
-            let meta = runtime_metadata_for_field(fc, stored_metadata.fields.get(&fc.name));
-            if !meta.values.is_empty() || meta.truncated {
-                field_metadata.insert(fc.name.clone(), meta);
-            }
-        }
+        let field_metadata = runtime_field_metadata(&config, &stored_metadata);
+        let metadata_generation = reader.searcher().generation().generation_id();
 
         let folded = stored_metadata.folded_fuzzy;
         let prefix_field_map: HashMap<String, Field> = if stored_metadata.prefix_fields {
@@ -275,7 +274,8 @@ impl SearchEngine {
             schema,
             field_map,
             field_configs,
-            field_metadata,
+            field_metadata: std::sync::RwLock::new(field_metadata),
+            metadata_generation: std::sync::atomic::AtomicU64::new(metadata_generation),
             config,
             store,
             store_status,
@@ -284,6 +284,30 @@ impl SearchEngine {
             folded,
             prefix_field_map,
         })
+    }
+
+    /// Runtime metadata for one field (enum values, truncation), current as
+    /// of the latest index generation. Values discovered by an incremental
+    /// update used to stay invisible until restart: the metadata was read
+    /// once at open, while the update had rewritten the file underneath.
+    pub fn field_values(&self, name: &str) -> Option<RuntimeFieldMetadata> {
+        self.refresh_field_metadata();
+        self.field_metadata.read().unwrap().get(name).cloned()
+    }
+
+    fn refresh_field_metadata(&self) {
+        use std::sync::atomic::Ordering;
+        let generation = self.reader.searcher().generation().generation_id();
+        if self.metadata_generation.load(Ordering::Relaxed) == generation {
+            return;
+        }
+        // Two threads may both reload after the same commit; the second
+        // just writes the same map again.
+        if let Ok(stored) = load_stored_field_metadata(&self.config.server.index_path) {
+            *self.field_metadata.write().unwrap() = runtime_field_metadata(&self.config, &stored);
+        }
+        self.metadata_generation
+            .store(generation, Ordering::Relaxed);
     }
 
     /// Normalize query text the way this index normalized its fuzzy terms.
@@ -1117,6 +1141,22 @@ impl SearchEngine {
             _ => serde_json::Value::Null,
         }
     }
+}
+
+/// Per-field runtime metadata worth carrying: only fields that have values
+/// (or a truncation flag) get an entry.
+fn runtime_field_metadata(
+    config: &Config,
+    stored: &crate::field_meta::StoredFieldMetadata,
+) -> HashMap<String, RuntimeFieldMetadata> {
+    let mut field_metadata = HashMap::new();
+    for fc in &config.schema.fields {
+        let meta = runtime_metadata_for_field(fc, stored.fields.get(&fc.name));
+        if !meta.values.is_empty() || meta.truncated {
+            field_metadata.insert(fc.name.clone(), meta);
+        }
+    }
+    field_metadata
 }
 
 /// Compose the top-level query from optional fuzzy clauses and filter MUSTs.

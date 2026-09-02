@@ -44,10 +44,12 @@ pub struct AppState {
     /// Query counters and the resource-sample ring behind /activity's
     /// search-load and resources views. Filled by `resource_sampler`.
     pub metrics: crate::metrics::Metrics,
-    /// Replayed /search responses — valid for the process lifetime because
-    /// the index is: imports swap directories, and a running server only
-    /// sees the new one on restart.
-    search_cache: std::sync::Mutex<HashMap<String, serde_json::Value>>,
+    /// Replayed /search responses, valid for one searcher generation. Full
+    /// imports swap directories and are only seen on restart, but
+    /// incremental updates commit into the live index and the reader picks
+    /// them up — a response cached before a delta is wrong after it, so
+    /// the cache empties itself whenever the generation moves.
+    search_cache: std::sync::Mutex<SearchCache>,
     /// Caps concurrent query threads at the core count. Excess requests
     /// queue on the semaphore instead of spawning ever more blocking
     /// threads that fight over the same CPUs.
@@ -63,8 +65,24 @@ impl AppState {
             engine,
             started_at: Instant::now(),
             metrics: crate::metrics::Metrics::default(),
-            search_cache: std::sync::Mutex::new(HashMap::new()),
+            search_cache: std::sync::Mutex::new(SearchCache::default()),
             query_permits: tokio::sync::Semaphore::new(permits),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SearchCache {
+    generation: u64,
+    entries: HashMap<String, serde_json::Value>,
+}
+
+impl SearchCache {
+    /// Drop every entry when the index has moved on since they were made.
+    fn ensure_generation(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.entries.clear();
+            self.generation = generation;
         }
     }
 }
@@ -252,8 +270,17 @@ async fn handle_search(
             extra
         ))
     };
+    // Read the generation before the search runs: the searcher the engine
+    // acquires afterwards can only be this generation or newer, so tagging
+    // the result with this value never marks a stale response as fresh.
+    let generation = state.engine.reader.searcher().generation().generation_id();
     if let Some(key) = &cache_key {
-        if let Some(mut value) = state.search_cache.lock().unwrap().get(key).cloned() {
+        let hit = {
+            let mut cache = state.search_cache.lock().unwrap();
+            cache.ensure_generation(generation);
+            cache.entries.get(key).cloned()
+        };
+        if let Some(mut value) = hit {
             if let Some(obj) = value.as_object_mut() {
                 let took = (started.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
                 obj.insert("took_ms".to_string(), serde_json::json!(took));
@@ -406,12 +433,13 @@ async fn handle_search(
             }
             if let Some(key) = cache_key {
                 let mut cache = state.search_cache.lock().unwrap();
+                cache.ensure_generation(generation);
                 // Crude but sufficient eviction: reset when full. Entries
                 // are pages of at most 1000 rows without full documents.
-                if cache.len() >= SEARCH_CACHE_CAP {
-                    cache.clear();
+                if cache.entries.len() >= SEARCH_CACHE_CAP {
+                    cache.entries.clear();
                 }
-                cache.insert(key, value.clone());
+                cache.entries.insert(key, value.clone());
             }
             state
                 .metrics
@@ -1196,14 +1224,14 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 },
                 "schema": {
                     "fields": state.engine.config.schema.fields.iter().map(|f| {
-                        let metadata = state.engine.field_metadata.get(&f.name);
+                        let metadata = state.engine.field_values(&f.name);
                         serde_json::json!({
                             "name": f.name,
                             "type": format!("{:?}", f.field_type).to_lowercase(),
                             "search": f.search.as_ref().map(|s| s.as_str()),
                             "description": f.description,
-                            "values": metadata.map(|m| m.values.clone()).unwrap_or_default(),
-                            "values_truncated": metadata.map(|m| m.truncated).unwrap_or(false),
+                            "values": metadata.as_ref().map(|m| m.values.clone()).unwrap_or_default(),
+                            "values_truncated": metadata.as_ref().map(|m| m.truncated).unwrap_or(false),
                         })
                     }).collect::<Vec<_>>(),
                 },
@@ -1447,6 +1475,152 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// A real imported index with a primary key, so an incremental update
+    /// can be run against it mid-test.
+    fn imported_config(dir: &std::path::Path, csv: &str) -> Arc<crate::config::Config> {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("data.csv"), csv).unwrap();
+        let keyword = |name: &str| FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Keyword,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(crate::config::Config {
+            server: crate::config::ServerConfig {
+                port: 0,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.join("index"),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: crate::config::SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: vec![
+                    FieldConfig {
+                        name: "name".to_string(),
+                        field_type: FieldType::Text,
+                        search: Some(crate::config::SearchMode::Fuzzy),
+                        values: None,
+                        max_values: None,
+                        case_sensitive: false,
+                        multi: false,
+                        separator: None,
+                        description: None,
+                    },
+                    keyword("org_number"),
+                ],
+            },
+            sources: vec![crate::config::SourceConfig {
+                path: dir.join("data.csv"),
+                defaults: HashMap::new(),
+                mapping: HashMap::from([
+                    ("name".to_string(), "company_name".to_string()),
+                    ("org_number".to_string(), "org_number".to_string()),
+                ]),
+                use_mapping: None,
+                sidecar: None,
+                format: None,
+            }],
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        crate::import::run_import(&config).unwrap();
+        config
+    }
+
+    async fn search_names(state: &Arc<AppState>, q: &str) -> (Vec<String>, bool) {
+        let response = handle_search(
+            State(Arc::clone(state)),
+            Query(SearchParams {
+                q: Some(q.to_string()),
+                limit: None,
+                offset: None,
+                include_pagination: None,
+                sort_by: None,
+                sort_order: None,
+                full: None,
+                count: None,
+                extra: HashMap::new(),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let names = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        (names, body["cached"].as_bool().unwrap_or(false))
+    }
+
+    /// The cache was built on "the index never changes while the process
+    /// runs". Incremental updates broke that: a query answered before a
+    /// delta kept replaying the pre-delta rows, cached: true, until restart.
+    #[tokio::test]
+    async fn search_cache_empties_when_the_index_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-cache-gen-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = imported_config(
+            &dir,
+            "org_number,company_name\n100,Acme Rockets\n200,Beta Bakery\n",
+        );
+        let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
+        // The reader's meta.json watcher treats its first poll as a change
+        // and reloads once right after open — a one-off generation bump
+        // that would race the first two calls here. Let it land, then pin
+        // the generation with an explicit reload.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.engine.reader.reload().unwrap();
+
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets".to_string()], false)
+        );
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets".to_string()], true),
+            "second call is served from cache"
+        );
+
+        std::fs::write(
+            dir.join("delta.csv"),
+            "org_number,company_name\n100,Acme Rockets International\n",
+        )
+        .unwrap();
+        crate::import::run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        state.engine.reader.reload().unwrap();
+
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets International".to_string()], false),
+            "a new generation must not replay the old rows"
+        );
+        assert_eq!(
+            search_names(&state, "acme").await,
+            (vec!["Acme Rockets International".to_string()], true),
+            "and caches again under the new generation"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The hazard this endpoint exists to avoid. Everywhere else in the API an

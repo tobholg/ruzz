@@ -2387,6 +2387,74 @@ org_number,company_name,city,secret_extra
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Enum values an update discovers are written to the metadata file;
+    /// a running engine must see them without a restart.
+    #[test]
+    fn enum_values_from_a_delta_show_without_restart() {
+        let dir = temp_dir("enum-refresh");
+        write_csv(
+            &dir.join("data.csv"),
+            "org_number,company_name,region\n100,Acme,Nord\n200,Beta,Vest\n",
+        );
+        let mut region_source = source(&dir, None);
+        region_source
+            .mapping
+            .insert("region".to_string(), "region".to_string());
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 0,
+                index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: vec![
+                    text_field("name", true),
+                    keyword_field("org_number"),
+                    keyword_field("country_code"),
+                    FieldConfig {
+                        name: "region".to_string(),
+                        field_type: FieldType::Enum,
+                        search: None,
+                        values: None,
+                        max_values: None,
+                        case_sensitive: false,
+                        multi: false,
+                        separator: None,
+                        description: None,
+                    },
+                ],
+            },
+            sources: vec![region_source],
+            mappings: HashMap::new(),
+            store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
+        });
+        run_import(&config).unwrap();
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(
+            engine.field_values("region").unwrap().values,
+            vec!["Nord", "Vest"]
+        );
+
+        write_csv(
+            &dir.join("delta.csv"),
+            "org_number,company_name,region\n300,Gamma,Sør\n",
+        );
+        run_update(&config, &[dir.join("delta.csv")], None, None, None).unwrap();
+        engine.reader.reload().unwrap();
+        assert_eq!(
+            engine.field_values("region").unwrap().values,
+            vec!["Nord", "Sør", "Vest"],
+            "reloaded on the new generation"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Gzipped sources stream through a decoder — no manual gunzip step.
     #[test]
     fn gzipped_sources_import_transparently() {
