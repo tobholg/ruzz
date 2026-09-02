@@ -444,6 +444,8 @@ To be clear about what this is: a warm-up, not a cap. Residency is always the OS
 > its latency is flat in query length; run `cargo bench` or your own
 > dataset for current numbers.
 
+A text search under a *broad* exact filter (one matching 10% or more of the index — `country_code=NO` on a single-country dataset is the extreme) keeps block-WAND pruning by checking the filter per candidate against fast fields instead of intersecting; selective filters keep the intersection, which is cheaper for them. Sorted browses reuse their exact count across pages, and release builds use LTO. `cargo bench --bench search` reports each case; `RUZZ_BENCH_FILTER_STRATEGY=intersect|postfilter` forces either filter path for comparison.
+
 Tested on 1.15M records (single dataset):
 
 | Metric | Value |
