@@ -146,6 +146,15 @@ pub struct CheckReport {
     pub problems: Vec<String>,
 }
 
+impl CheckReport {
+    /// Nothing to fix before importing. Duplicate and empty primary keys
+    /// count as problems: a full import keeps every row while an update by
+    /// key collapses them, so the two paths would disagree on the data.
+    pub fn is_clean(&self) -> bool {
+        self.problems.is_empty() && self.bad_rows == 0
+    }
+}
+
 /// Dry-run every configured source: parse all rows, exercise the same
 /// canonicalization the import would, and report what it finds — without
 /// writing a byte. This is also where duplicate primary keys get caught:
@@ -277,7 +286,14 @@ pub fn run_check(config: &Config) -> anyhow::Result<CheckReport> {
         }
         report.rows += rows;
         report.bad_number_cells += indexer.bad_number_cells;
-        indexer.report_bad_number_cells(&source.path);
+        report.problems.extend(indexer.array_problems(&source.path));
+        if indexer.bad_number_cells > 0 {
+            eprintln!(
+                "  note: {} skipped {} non-numeric cell(s) in numeric fields — those values are null, not 0",
+                source.path.display(),
+                indexer.bad_number_cells
+            );
+        }
     }
 
     println!(
@@ -290,8 +306,33 @@ pub fn run_check(config: &Config) -> anyhow::Result<CheckReport> {
             "  primary key '{}': {} empty, {} duplicate",
             pk_name, report.empty_keys, report.duplicate_keys
         );
+        // Counted above, but a verdict that ignored them said "no problems
+        // found" over 3.1M duplicates in a 5.7M-row source. A rate that
+        // high means the key does not identify a row in that source.
+        if report.duplicate_keys > 0 {
+            let rate = report.duplicate_keys as f64 / report.rows.max(1) as f64;
+            report.problems.push(format!(
+                "primary key '{}': {} duplicate value(s) ({:.1}% of rows) — a full import keeps \
+                 every row, an update by key collapses them{}",
+                pk_name,
+                report.duplicate_keys,
+                rate * 100.0,
+                if rate >= 0.05 {
+                    "; at this rate the key does not identify a row in this source"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if report.empty_keys > 0 {
+            report.problems.push(format!(
+                "primary key '{}': {} row(s) with an empty value — a full import indexes them, \
+                 an update skips them",
+                pk_name, report.empty_keys
+            ));
+        }
     }
-    if report.problems.is_empty() && report.bad_rows == 0 {
+    if report.is_clean() {
         println!("  no problems found");
     }
     for problem in &report.problems {
@@ -1192,6 +1233,10 @@ struct RowIndexer<'a> {
     ref_field: Option<tantivy::schema::Field>,
     prefix_fields: HashMap<String, tantivy::schema::Field>,
     bad_number_cells: u64,
+    /// JSON arrays met in fields not declared `multi`, per field. Only the
+    /// first element is indexed for those — a scalar field renders one
+    /// value, and a document must never match on a value it does not show.
+    arrays_in_scalar_fields: HashMap<String, u64>,
 }
 
 impl<'a> RowIndexer<'a> {
@@ -1247,6 +1292,7 @@ impl<'a> RowIndexer<'a> {
             ref_field,
             prefix_fields,
             bad_number_cells: 0,
+            arrays_in_scalar_fields: HashMap::new(),
         }
     }
 
@@ -1285,10 +1331,21 @@ impl<'a> RowIndexer<'a> {
     /// The indexable values a record contributes to a text-like field. A
     /// JSON array feeds a multi field its elements directly; a scalar (from
     /// either format) is split by the field's separator when `multi`.
-    fn text_values(&self, record: RecordRef, fc: &crate::config::FieldConfig) -> Vec<String> {
+    fn text_values(&mut self, record: RecordRef, fc: &crate::config::FieldConfig) -> Vec<String> {
         if let RecordRef::Json(root) = record {
             if let Some(serde_json::Value::Array(items)) = self.json_value(root, &fc.name) {
-                return items.iter().filter_map(json_scalar).collect();
+                if fc.multi {
+                    return items.iter().filter_map(json_scalar).collect();
+                }
+                // Not a multi field: index what will be rendered — the first
+                // element — and count the mismatch for the import notes and
+                // --check. Indexing every element here made a document match
+                // `tags=blue` while showing `tags: "red"`.
+                *self
+                    .arrays_in_scalar_fields
+                    .entry(fc.name.clone())
+                    .or_insert(0) += 1;
+                return items.iter().filter_map(json_scalar).take(1).collect();
             }
         }
         let value = self.raw_value(record, &fc.name).unwrap_or_default();
@@ -1378,6 +1435,27 @@ impl<'a> RowIndexer<'a> {
                 self.bad_number_cells
             );
         }
+        for problem in self.array_problems(path) {
+            eprintln!("  note: {}", problem);
+        }
+    }
+
+    /// One line per field that received JSON arrays without being `multi`.
+    fn array_problems(&self, path: &Path) -> Vec<String> {
+        let mut fields: Vec<(&String, &u64)> = self.arrays_in_scalar_fields.iter().collect();
+        fields.sort();
+        fields
+            .into_iter()
+            .map(|(field, count)| {
+                format!(
+                    "{}: {} array value(s) in field '{}', which is not multi — only the first \
+                     element is indexed; set multi = true to index and return every element",
+                    path.display(),
+                    count,
+                    field
+                )
+            })
+            .collect()
     }
 }
 
@@ -2455,6 +2533,83 @@ org_number,company_name,city,secret_extra
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A JSON array in a field that is not `multi` used to index every
+    /// element while rendering only the first, so `tags=blue` matched a
+    /// document that showed `tags: "red"`. Indexed and shown must agree;
+    /// the mismatch is reported by --check.
+    #[test]
+    fn json_arrays_in_scalar_fields_index_only_what_is_shown() {
+        let dir = temp_dir("json-array-scalar");
+        std::fs::write(
+            dir.join("data.jsonl"),
+            "{\"org_number\":\"1\",\"company_name\":\"Tagged\",\"tags\":[\"red\",\"blue\"]}\n\
+             {\"org_number\":\"2\",\"company_name\":\"Green\",\"tags\":[\"green\"]}\n",
+        )
+        .unwrap();
+        let mut src = source(&dir, None);
+        src.path = dir.join("data.jsonl");
+        src.mapping.insert("tags".to_string(), "tags".to_string());
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 0,
+                index_path: dir.join("index"),
+                bind: "0.0.0.0".to_string(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: Some("org_number".to_string()),
+                fields: vec![
+                    text_field("name", true),
+                    keyword_field("org_number"),
+                    keyword_field("country_code"),
+                    keyword_field("tags"), // not multi
+                ],
+            },
+            sources: vec![src],
+            mappings: HashMap::new(),
+            store: StoreConfig::default(),
+            dashboard: DashboardConfig::default(),
+        });
+
+        let report = run_check(&config).unwrap();
+        assert!(!report.is_clean());
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("field 'tags'") && p.contains("multi = true")),
+            "{:?}",
+            report.problems
+        );
+
+        run_import(&config).unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+        let by_tag = |tag: &str| {
+            engine
+                .search(
+                    "",
+                    &HashMap::from([("tags".to_string(), tag.to_string())]),
+                    &[],
+                    &SortOrder::Relevance,
+                    10,
+                    0,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+        assert_eq!(by_tag("blue").count, Some(0), "not shown, so not matched");
+        let red = by_tag("red");
+        assert_eq!(red.count, Some(1));
+        assert_eq!(red.results[0]["tags"], "red");
+        assert_eq!(by_tag("green").count, Some(1));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Gzipped sources stream through a decoder — no manual gunzip step.
     #[test]
     fn gzipped_sources_import_transparently() {
@@ -2515,6 +2670,21 @@ org_number,company_name,city,secret_extra
             report.problems
         );
         assert!(!config.server.index_path.exists(), "check writes nothing");
+        // Duplicate and empty keys are problems, not footnotes: the verdict
+        // used to say "no problems found" right under a duplicate count.
+        assert!(!report.is_clean());
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("1 duplicate value")),
+            "{:?}",
+            report.problems
+        );
+        assert!(report
+            .problems
+            .iter()
+            .any(|p| p.contains("1 row(s) with an empty value")));
 
         let _ = std::fs::remove_dir_all(dir);
     }

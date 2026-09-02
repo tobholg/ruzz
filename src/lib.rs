@@ -8,6 +8,7 @@ pub mod config;
 pub mod dashboard;
 pub mod field_meta;
 pub mod import;
+pub mod membership;
 pub mod memory;
 pub mod metrics;
 pub mod params;

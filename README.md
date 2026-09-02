@@ -166,13 +166,13 @@ defaults = { country_code = "NO" }
 mapping = { name = "navn", org_number = "organisasjonsnummer", city = "forretningsadresse.poststed" }
 ```
 
-JSON types map with less guessing than CSV strings: `null` is a missing value (not `""` or `0`), numbers and booleans canonicalize directly, and an array feeds a `multi` field its elements — no separator splitting needed. With the document store in row mode, the record *itself* is the stored full document (source `defaults` merged at the top level), so nested structures survive without a sidecar file — for nested documents, a JSONL source is the recommended replacement for the CSV + sidecar combination.
+JSON types map with less guessing than CSV strings: `null` is a missing value (not `""` or `0`), numbers and booleans canonicalize directly, and an array feeds a `multi` field its elements — no separator splitting needed. An array in a field that is *not* `multi` contributes only its first element (a scalar field shows one value, and a document never matches on a value it doesn't show); the import notes it and `--check` reports it, so declare the field `multi = true` if you meant all of them. With the document store in row mode, the record *itself* is the stored full document (source `defaults` merged at the top level), so nested structures survive without a sidecar file — for nested documents, a JSONL source is the recommended replacement for the CSV + sidecar combination.
 
 Gzipped input works for CSV too: any source or delta ending `.gz` streams through a decoder during import.
 
 ## Checking sources before importing
 
-`ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught. Exits non-zero if the real import would fail.
+`ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, JSON arrays landing in fields not declared `multi`, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught; it exits non-zero on any finding, duplicates included, because a full import keeps duplicate rows while an update by key collapses them and the two paths would disagree. A duplicate rate above a few percent almost always means the key doesn't identify a row in that source.
 
 ## Incremental updates
 
@@ -309,7 +309,7 @@ When `include_pagination=true`, `/search` also includes the legacy `pagination` 
 }
 ```
 
-The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Text searches (`q`) page within their first 1000 candidates, ranked by one similarity model throughout rather than quietly switching models deeper in; a window past 1000 is refused with a 400 — narrow the search with filters instead. A text search with `sort_by` lists *the best matches, sorted*: candidates below a similarity floor are dropped before sorting, so `q=berg&sort_by=revenue` is the Berg-like companies by revenue, not every name containing "ber" — and `count` on that path is the number of matches that passed the floor.
+The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Relevance-ranked text searches (`q` without `sort_by`) page within their first 1000 candidates, ranked by one similarity model throughout rather than quietly switching models deeper in; a window past 1000 is refused with a 400. A text search *with* `sort_by` is different: it sorts the query's whole match set, like a browse, up to the 100k window. A document matches when, for every query word, at least *n−3* of the word's *n* distinct trigrams appear in one fuzzy field (never fewer than two, so a short word must appear nearly whole) — one edit destroys at most three trigrams, so words of seven characters and up keep one-typo tolerance. `q=berg&sort_by=revenue` is therefore the companies with "berg" in the name by revenue, not every name containing "ber"; `count` is exact and independent of the page, `desc&limit=1` is the true maximum, and pages stitch. Note the relevance path's `count` is deliberately broader (documents sharing any of the query's informative trigrams), so the two numbers differ for the same `q`.
 
 ### `GET /fields`, `GET /docs`, `GET /openapi.json`
 
