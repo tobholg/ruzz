@@ -145,6 +145,12 @@ const WIDE_DRIVE_TERMS: usize = 7;
 /// values stays cheap.
 const RERANK_POOL_MIN: usize = 50;
 const RERANK_POOL_MAX: usize = 200;
+/// Deepest window relevance paging reaches. The pool grows to cover the
+/// requested window so every page is ranked by the same similarity model;
+/// past this the request is refused rather than quietly handed to BM25
+/// ordering, which used to happen at the pool size and reordered the whole
+/// list under a different score scale.
+pub const RERANK_POOL_HARD_CAP: usize = 1000;
 
 /// Wrap a filter clause so it matches without contributing to relevance.
 fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
@@ -829,12 +835,20 @@ impl SearchEngine {
         let start = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
-        // Relevance-sorted fuzzy queries go through the rerank path — unless
-        // the caller pages past the pool, where relevance order is the only
-        // one that can be produced incrementally.
-        let pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
-        if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) && offset + limit <= pool
-        {
+        // Relevance-sorted fuzzy queries go through the rerank path. The
+        // pool is a few pages deep by default and stretches to cover a
+        // deeper window, so paging never changes ranking model mid-list.
+        let default_pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
+        let pool = default_pool.max(offset.saturating_add(limit));
+        if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) {
+            if pool > RERANK_POOL_HARD_CAP {
+                anyhow::bail!(
+                    "cannot page relevance-ranked results past {}: offset + limit must be <= {} \
+                     — sort by a field to page deeper",
+                    RERANK_POOL_HARD_CAP,
+                    RERANK_POOL_HARD_CAP
+                );
+            }
             return self.search_reranked(
                 start,
                 &searcher,
@@ -1289,7 +1303,9 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 
 #[cfg(test)]
 pub mod tests {
-    use super::{build_pagination_info, RangeFilter, SearchEngine, SortOrder};
+    use super::{
+        build_pagination_info, RangeFilter, SearchEngine, SortOrder, RERANK_POOL_HARD_CAP,
+    };
     use crate::config::{
         Config, DashboardConfig, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig,
         StoreConfig,
@@ -2594,6 +2610,128 @@ pub mod tests {
             .commit()
             .unwrap();
         SearchEngine::open(config).unwrap()
+    }
+
+    pub fn fuzzy_field(name: &str) -> FieldConfig {
+        FieldConfig {
+            name: name.to_string(),
+            field_type: FieldType::Text,
+            search: Some(crate::config::SearchMode::Fuzzy),
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        }
+    }
+
+    /// An engine over an index holding one value of `field` per document.
+    pub fn engine_with_docs(
+        dir: &std::path::Path,
+        field: FieldConfig,
+        values: &[String],
+    ) -> SearchEngine {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.to_path_buf(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![field.clone()],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, field_map) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let tantivy_field = field_map[&field.name];
+        for value in values {
+            writer
+                .add_document(doc!(tantivy_field => value.as_str()))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        SearchEngine::open(config).unwrap()
+    }
+
+    /// Relevance paging used to switch ranking model at the rerank pool
+    /// (200): a window past it fell through to BM25 order with BM25 numbers
+    /// in _score, so the dashboard's "load more" reordered the list at 240
+    /// rows. The pool now stretches with the window up to a hard cap, and
+    /// past the cap the request is refused instead of silently degraded.
+    #[test]
+    fn relevance_paging_stays_on_one_ranking_model() {
+        let dir = test_index_dir("deep-paging");
+        let names: Vec<String> = (0..300).map(|i| format!("Bergsen Handel {i:03}")).collect();
+        let engine = engine_with_docs(&dir, fuzzy_field("name"), &names);
+        let page = |limit: usize, offset: usize| {
+            engine
+                .search(
+                    "bergsen",
+                    &HashMap::new(),
+                    &[],
+                    &SortOrder::Relevance,
+                    limit,
+                    offset,
+                    false,
+                    false,
+                    false,
+                )
+                .unwrap()
+        };
+
+        // A page past the old pool size is still similarity-scored (0..1).
+        let deep = page(30, 270);
+        assert_eq!(deep.results.len(), 30);
+        assert!(deep.results.iter().all(|r| {
+            let score = r["_score"].as_f64().unwrap();
+            (0.0..=1.0).contains(&score)
+        }));
+
+        // Pages stitch together into the single wide window, same order.
+        let wide: Vec<serde_json::Value> = page(300, 0)
+            .results
+            .iter()
+            .map(|r| r["name"].clone())
+            .collect();
+        let mut stitched = Vec::new();
+        for offset in (0..300).step_by(50) {
+            stitched.extend(page(50, offset).results.iter().map(|r| r["name"].clone()));
+        }
+        assert_eq!(stitched, wide);
+
+        // Past the cap: an explicit refusal, not a quiet fallback.
+        let err = engine
+            .search(
+                "bergsen",
+                &HashMap::new(),
+                &[],
+                &SortOrder::Relevance,
+                30,
+                RERANK_POOL_HARD_CAP,
+                false,
+                false,
+                false,
+            )
+            .err()
+            .expect("a window past the cap must be refused")
+            .to_string();
+        assert!(err.starts_with("cannot page"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn test_index_dir(prefix: &str) -> PathBuf {

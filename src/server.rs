@@ -697,10 +697,11 @@ fn top_margin(results: &[serde_json::Value]) -> Option<f64> {
 }
 
 /// An engine error is almost always the caller's (an unsortable field, an
-/// impossible parameter) — 400. Anything else is genuinely internal.
+/// impossible parameter) — 400. Anything else is genuinely internal. The
+/// engine phrases every caller-side refusal as "cannot …".
 fn engine_error(e: anyhow::Error) -> Response {
     let message = e.to_string();
-    let status = if message.starts_with("cannot sort by") {
+    let status = if message.starts_with("cannot ") {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR

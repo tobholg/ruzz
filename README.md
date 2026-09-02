@@ -309,7 +309,7 @@ When `include_pagination=true`, `/search` also includes the legacy `pagination` 
 }
 ```
 
-The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`.
+The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Relevance-ranked text searches (`q` without `sort_by`) page within the first 1000 results: every page is ranked by the same similarity model rather than quietly switching models deeper in, and a window past 1000 is refused with a 400 — sort by a field to page deeper.
 
 ### `GET /fields`, `GET /docs`, `GET /openapi.json`
 
