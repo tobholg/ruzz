@@ -20,10 +20,43 @@ use crate::store::{self, StoreReader};
 /// string term; numeric fields index an f64, and the two are not
 /// interchangeable — building a text term for a numeric field yields a term
 /// that exists nowhere in the index.
+#[derive(Clone)]
 enum FilterValue {
     Text(String),
     Number(f64),
 }
+
+/// How a text query's exact filters are applied. `Auto` post-filters when
+/// the filters are broad (see `plan_filters`); the other two force a path,
+/// for tests and benchmarks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterStrategy {
+    Auto,
+    Intersect,
+    PostFilter,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum FilterPlan {
+    /// Filters as MUST clauses beside the fuzzy union — no pruning.
+    Intersect,
+    /// The bare fuzzy union, pruned, with filters checked per candidate
+    /// against fast fields.
+    PostFilter(Vec<crate::prune::FastFilter>),
+}
+
+/// Fraction of the index a filter set must match before post-filtering is
+/// chosen. A selective filter makes the intersection cheap (few seeks into
+/// the union) while post-filtering would still traverse the union; a broad
+/// one is the reverse, and `country_code=NO` on a one-country dataset is
+/// the extreme — 100% of documents, for a full unpruned scoring pass.
+const POST_FILTER_MIN_SELECTIVITY: f64 = 0.1;
+
+/// Clauses past which a bare fuzzy union is no longer pruned: WAND pays
+/// per-clause bookkeeping on every block, and past a handful of trigrams
+/// that overhead outgrows the skipping it buys (measured crossover ~6 on a
+/// 5M-doc corpus).
+const WAND_MAX_CLAUSES: usize = 6;
 
 impl FilterValue {
     fn into_term(self, field: Field) -> Term {
@@ -59,6 +92,10 @@ pub struct SearchEngine {
     /// Fuzzy field name → its `_prefix_*` typeahead shadow field, present
     /// only on indexes that carry them.
     prefix_field_map: HashMap<String, Field>,
+    /// `FilterStrategy` as a u8 (0 Auto, 1 Intersect, 2 PostFilter).
+    filter_strategy: std::sync::atomic::AtomicU8,
+    /// Term ordinals resolved for post-filtering, per segment and value.
+    ord_cache: Arc<crate::prune::OrdCache>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,7 +337,126 @@ impl SearchEngine {
             case_insensitive_fields,
             folded,
             prefix_field_map,
+            filter_strategy: std::sync::atomic::AtomicU8::new(0),
+            ord_cache: Arc::new(crate::prune::OrdCache::default()),
         })
+    }
+
+    pub fn set_filter_strategy(&self, strategy: FilterStrategy) {
+        let code = match strategy {
+            FilterStrategy::Auto => 0,
+            FilterStrategy::Intersect => 1,
+            FilterStrategy::PostFilter => 2,
+        };
+        self.filter_strategy
+            .store(code, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn filter_strategy(&self) -> FilterStrategy {
+        match self
+            .filter_strategy
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            1 => FilterStrategy::Intersect,
+            2 => FilterStrategy::PostFilter,
+            _ => FilterStrategy::Auto,
+        }
+    }
+
+    /// Decide how this query's filters run. Post-filtering needs a shape
+    /// tantivy prunes (a bare union of at most WAND_MAX_CLAUSES terms), only
+    /// exact and range filters (a substring filter is itself a trigram
+    /// query), string columns small enough to resolve case-insensitively,
+    /// and — unless forced — filters broad enough that the intersection
+    /// would be the expensive choice.
+    pub(crate) fn plan_filters(
+        &self,
+        searcher: &tantivy::Searcher,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        fuzzy_clauses: usize,
+    ) -> FilterPlan {
+        let strategy = self.filter_strategy();
+        if strategy == FilterStrategy::Intersect
+            || fuzzy_clauses == 0
+            || fuzzy_clauses > WAND_MAX_CLAUSES
+            || (filters.is_empty() && range_filters.is_empty())
+        {
+            return FilterPlan::Intersect;
+        }
+
+        let num_docs = searcher.num_docs().max(1) as f64;
+        let mut fast: Vec<crate::prune::FastFilter> = Vec::new();
+        let mut min_fraction = 1.0f64;
+        for (key, value) in filters {
+            let (Some(&field), Some(field_config)) =
+                (self.field_map.get(key), self.field_configs.get(key))
+            else {
+                continue;
+            };
+            if field_config.search == Some(SearchMode::Substring) {
+                return FilterPlan::Intersect;
+            }
+            let Some(values) = self.resolve_filter_values(key, field_config, value) else {
+                continue;
+            };
+            let mut doc_freq = 0u64;
+            for v in &values {
+                doc_freq += searcher.doc_freq(&v.clone().into_term(field)).unwrap_or(0);
+            }
+            min_fraction = min_fraction.min(doc_freq as f64 / num_docs);
+
+            if field_config.field_type == FieldType::Number {
+                let numbers = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        FilterValue::Number(n) => Some(*n),
+                        FilterValue::Text(_) => None,
+                    })
+                    .collect();
+                fast.push(crate::prune::FastFilter::Num {
+                    field: key.clone(),
+                    values: numbers,
+                });
+            } else {
+                // Case-insensitive terms are found by scanning the column
+                // dictionary; refuse fields too large for that to be cheap.
+                for reader in searcher.segment_readers() {
+                    if let Ok(Some(column)) = reader.fast_fields().str(key) {
+                        if column.num_terms() > crate::prune::MAX_SCAN_TERMS {
+                            return FilterPlan::Intersect;
+                        }
+                    }
+                }
+                let texts = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        FilterValue::Text(t) => Some(t.clone()),
+                        FilterValue::Number(_) => None,
+                    })
+                    .collect();
+                fast.push(crate::prune::FastFilter::Str {
+                    field: key.clone(),
+                    values: texts,
+                    fold: self.case_insensitive_fields.contains(key),
+                });
+            }
+        }
+        for rf in range_filters {
+            if self.field_map.contains_key(&rf.field) {
+                fast.push(crate::prune::FastFilter::Range {
+                    field: rf.field.clone(),
+                    min: rf.min.unwrap_or(f64::MIN),
+                    max: rf.max.unwrap_or(f64::MAX),
+                });
+            }
+        }
+        if fast.is_empty()
+            || (strategy == FilterStrategy::Auto && min_fraction < POST_FILTER_MIN_SELECTIVITY)
+        {
+            return FilterPlan::Intersect;
+        }
+        FilterPlan::PostFilter(fast)
     }
 
     /// Runtime metadata for one field (enum values, truncation), current as
@@ -627,9 +783,38 @@ impl SearchEngine {
         need_count: bool,
     ) -> anyhow::Result<(RankedHits, Option<usize>, bool, usize)> {
         let (clauses, capped) = self.fuzzy_clauses(searcher, fuzzy_fields, query_text, drive);
-        let subqueries = self.filter_clauses(filters, range_filters);
-        let (query, prunable) = compose_query(Some(clauses), subqueries);
-        let (docs, total) = collect_relevance(searcher, &*query, prunable, pool, 0, need_count)?;
+        let (docs, total) = match self.plan_filters(searcher, filters, range_filters, clauses.len())
+        {
+            FilterPlan::PostFilter(fast_filters) => {
+                // The bare union is the only shape tantivy prunes; the
+                // filters ride along as per-candidate fast-field checks.
+                let union: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                let top = crate::prune::FilteredTopDocs::new(
+                    pool,
+                    0,
+                    fast_filters.clone(),
+                    Arc::clone(&self.ord_cache),
+                );
+                let docs: Hits = searcher
+                    .search(&*union, &top)?
+                    .into_iter()
+                    .map(|(score, addr)| (score as f64, addr))
+                    .collect();
+                let total = if need_count {
+                    let count =
+                        crate::prune::FilteredCount::new(fast_filters, Arc::clone(&self.ord_cache));
+                    Some(searcher.search(&*union, &count)?)
+                } else {
+                    None
+                };
+                (docs, total)
+            }
+            FilterPlan::Intersect => {
+                let subqueries = self.filter_clauses(filters, range_filters);
+                let (query, prunable) = compose_query(Some(clauses), subqueries);
+                collect_relevance(searcher, &*query, prunable, pool, 0, need_count)?
+            }
+        };
         let fetched = docs.len();
 
         let mut scored: RankedHits = Vec::with_capacity(docs.len());
@@ -1354,7 +1539,6 @@ fn compose_query(
     fuzzy: Option<Vec<(Occur, Box<dyn Query>)>>,
     mut subqueries: Vec<(Occur, Box<dyn Query>)>,
 ) -> (Box<dyn Query>, bool) {
-    const WAND_MAX_CLAUSES: usize = 6;
     match fuzzy {
         Some(clauses) if clauses.is_empty() => {
             subqueries.push((Occur::Must, Box::new(EmptyQuery)));
@@ -1467,7 +1651,8 @@ fn generate_ngrams(text: &str, min_n: usize, max_n: usize) -> Vec<String> {
 #[cfg(test)]
 pub mod tests {
     use super::{
-        build_pagination_info, RangeFilter, SearchEngine, SortOrder, RERANK_POOL_HARD_CAP,
+        build_pagination_info, FilterPlan, FilterStrategy, RangeFilter, SearchEngine, SortOrder,
+        RERANK_POOL_HARD_CAP,
     };
     use crate::config::{
         Config, DashboardConfig, FieldConfig, FieldType, SchemaConfig, ServerConfig, SourceConfig,
@@ -3108,6 +3293,288 @@ pub mod tests {
             }
             assert_eq!(stitched, wide, "page size {size}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A mixed index for the filter-path tests: fuzzy name, case-insensitive
+    /// keyword city (stored in several casings), multi-valued roles, a
+    /// number with gaps, a boolean, an id — over several segments, with a
+    /// few documents deleted.
+    fn mixed_engine(dir: &std::path::Path) -> SearchEngine {
+        std::fs::create_dir_all(dir).unwrap();
+        let field = |name: &str, field_type: FieldType, multi: bool| FieldConfig {
+            name: name.to_string(),
+            field_type,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.to_path_buf(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![
+                    fuzzy_field("name"),
+                    field("city", FieldType::Keyword, false),
+                    field("roles", FieldType::Keyword, true),
+                    field("revenue", FieldType::Number, false),
+                    field("bankrupt", FieldType::Boolean, false),
+                    field("id", FieldType::Keyword, false),
+                ],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, f) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let names = [
+            "Bergsen Handel",
+            "Bergson Bygg",
+            "Bergen Kraft",
+            "Liberty Oil",
+            "Bergsen Nord",
+            "Aberdeen Fish",
+        ];
+        let cities = ["Oslo", "BERGEN", "Bergen", "Tromsø"];
+        let roles = ["LEDE,DAGL", "DAGL", "", "NEST"];
+        for i in 0..72u32 {
+            let mut d = tantivy::TantivyDocument::new();
+            d.add_text(f["name"], names[(i % 6) as usize]);
+            d.add_text(f["city"], cities[(i % 4) as usize]);
+            for role in roles[(i % 4) as usize].split(',').filter(|r| !r.is_empty()) {
+                d.add_text(f["roles"], role);
+            }
+            if i % 5 != 0 {
+                d.add_f64(f["revenue"], (i * 10) as f64);
+            }
+            d.add_text(f["bankrupt"], if i % 7 == 0 { "TRUE" } else { "FALSE" });
+            d.add_text(f["id"], format!("{i:03}"));
+            writer.add_document(d).unwrap();
+            if i % 24 == 23 {
+                writer.commit().unwrap();
+            }
+        }
+        for gone in ["005", "017", "033", "070"] {
+            writer.delete_term(tantivy::Term::from_field_text(f["id"], gone));
+        }
+        writer.commit().unwrap();
+        // What a real import records: keyword terms were lowercased on the
+        // way in, so filters (and fast-field predicates) must fold to match.
+        crate::field_meta::write_stored_field_metadata(
+            dir,
+            &crate::field_meta::StoredFieldMetadata {
+                case_insensitive_fields: vec![
+                    "city".to_string(),
+                    "roles".to_string(),
+                    "id".to_string(),
+                ],
+                folded_fuzzy: true,
+                prefix_fields: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        SearchEngine::open(config).unwrap()
+    }
+
+    /// The post-filtered WAND path must return exactly what the intersection
+    /// returns — same documents in the same order, same count — across
+    /// case-insensitive terms, multi-valued fields, numbers, ranges,
+    /// booleans, OR'ed values, deleted documents and several segments.
+    #[test]
+    fn post_filtered_search_matches_the_intersection() {
+        let dir = test_index_dir("post-filter");
+        let engine = mixed_engine(&dir);
+        let f = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let range = |min: Option<f64>, max: Option<f64>| RangeFilter {
+            field: "revenue".to_string(),
+            min,
+            max,
+        };
+        let cases: Vec<(&str, HashMap<String, String>, Vec<RangeFilter>)> = vec![
+            ("bergsen", f(&[("city", "bergen")]), vec![]),
+            ("bergsen", f(&[("city", "OSLO,bergen")]), vec![]),
+            ("bergsen", f(&[("roles", "DAGL")]), vec![]),
+            ("bergsen", f(&[("roles", "lede")]), vec![]),
+            ("bergsen", f(&[("bankrupt", "true")]), vec![]),
+            ("bergsen", f(&[("revenue", "100")]), vec![]),
+            ("bergsen", f(&[]), vec![range(Some(100.0), Some(300.0))]),
+            ("bergsen", f(&[]), vec![range(None, Some(50.0))]),
+            (
+                "bergsen",
+                f(&[("city", "bergen"), ("roles", "DAGL")]),
+                vec![range(Some(50.0), None)],
+            ),
+            ("bergsen", f(&[("city", "nowhere")]), vec![]),
+            ("liberty", f(&[("bankrupt", "false")]), vec![]),
+            ("aberdeen", f(&[("city", "tromsø")]), vec![]),
+        ];
+        // A window wide enough that nothing is truncated: the full match
+        // set must be identical. Order among exactly-tied BM25 scores is
+        // not compared — see post_filtered_pool_admits_the_same_top_scores.
+        for (q, filters, ranges) in &cases {
+            let run = |strategy: FilterStrategy| {
+                engine.set_filter_strategy(strategy);
+                let result = engine
+                    .search(
+                        q,
+                        filters,
+                        ranges,
+                        &SortOrder::Relevance,
+                        100,
+                        0,
+                        false,
+                        true,
+                        false,
+                    )
+                    .unwrap();
+                let mut ids: Vec<String> = result
+                    .results
+                    .iter()
+                    .map(|r| r["id"].as_str().unwrap().to_string())
+                    .collect();
+                assert!(
+                    result.results.windows(2).all(|w| {
+                        w[0]["_score"].as_f64().unwrap() >= w[1]["_score"].as_f64().unwrap()
+                    }),
+                    "similarity order"
+                );
+                ids.sort();
+                (ids, result.count)
+            };
+            let via_intersection = run(FilterStrategy::Intersect);
+            let via_post_filter = run(FilterStrategy::PostFilter);
+            assert_eq!(
+                via_post_filter,
+                via_intersection,
+                "q={q} filters={filters:?} ranges={}",
+                ranges.len()
+            );
+        }
+        engine.set_filter_strategy(FilterStrategy::Auto);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Auto picks post-filtering only where it pays: broad filters over a
+    /// prunable union. Selective filters, substring filters, long unions
+    /// and filter-less queries keep the intersection.
+    #[test]
+    fn filter_planner_chooses_by_selectivity_and_shape() {
+        let dir = test_index_dir("planner");
+        let engine = mixed_engine(&dir);
+        let searcher = engine.reader.searcher();
+        let one = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+
+        // city=bergen matches half the index: broad, post-filtered.
+        assert!(matches!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 5),
+            FilterPlan::PostFilter(_)
+        ));
+        // id=010 matches one document: selective, intersection.
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("id", "010"), &[], 5),
+            FilterPlan::Intersect
+        );
+        // No fuzzy clauses or too many for WAND: nothing to prune.
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 0),
+            FilterPlan::Intersect
+        );
+        assert_eq!(
+            engine.plan_filters(&searcher, &one("city", "bergen"), &[], 7),
+            FilterPlan::Intersect
+        );
+        // No filters at all: the plain pruned path already applies.
+        assert_eq!(
+            engine.plan_filters(&searcher, &HashMap::new(), &[], 5),
+            FilterPlan::Intersect
+        );
+        // Forcing overrides selectivity.
+        engine.set_filter_strategy(FilterStrategy::PostFilter);
+        assert!(matches!(
+            engine.plan_filters(&searcher, &one("id", "010"), &[], 5),
+            FilterPlan::PostFilter(_)
+        ));
+        engine.set_filter_strategy(FilterStrategy::Auto);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// When the pool is smaller than the match set, the pruned path must
+    /// admit the same top-k *scores* as the intersection. Which of several
+    /// exactly-tied documents fills the last slots is not a contract — the
+    /// two union scorers sum term scores in different orders and can differ
+    /// in the last f32 bit — so scores are compared, rounded, as a multiset.
+    #[test]
+    fn post_filtered_pool_admits_the_same_top_scores() {
+        let dir = test_index_dir("post-filter-pool");
+        let engine = mixed_engine(&dir);
+        let searcher = engine.reader.searcher();
+        let fields = engine.fuzzy_field_handles();
+        let ranges = [RangeFilter {
+            field: "revenue".to_string(),
+            min: Some(0.0),
+            max: None,
+        }];
+        let scores = |strategy: FilterStrategy| {
+            engine.set_filter_strategy(strategy);
+            let (scored, total, _, fetched) = engine
+                .rerank_attempt(
+                    &searcher,
+                    &fields,
+                    "bergsen",
+                    "bergsen",
+                    &HashMap::new(),
+                    &ranges,
+                    4,
+                    20,
+                    true,
+                )
+                .unwrap();
+            // Relative to the best score: the intersection path carries a
+            // uniform +1.0 per const-scored filter clause, the bare union
+            // does not, and only the shape of the top-k matters here.
+            let best = scored
+                .iter()
+                .map(|(_, bm25, _)| *bm25)
+                .fold(f64::MIN, f64::max);
+            let mut bm25: Vec<i64> = scored
+                .iter()
+                .map(|(_, bm25, _)| ((bm25 - best) * 1000.0).round() as i64)
+                .collect();
+            bm25.sort_unstable();
+            (bm25, total, fetched)
+        };
+        let intersection = scores(FilterStrategy::Intersect);
+        let post_filter = scores(FilterStrategy::PostFilter);
+        assert!(
+            intersection.1.unwrap() > 20,
+            "the case must truncate: {} matches",
+            intersection.1.unwrap()
+        );
+        assert_eq!(post_filter, intersection);
+        engine.set_filter_strategy(FilterStrategy::Auto);
         let _ = std::fs::remove_dir_all(dir);
     }
 
