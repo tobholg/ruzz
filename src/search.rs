@@ -152,6 +152,17 @@ const RERANK_POOL_MAX: usize = 200;
 /// list under a different score scale.
 pub const RERANK_POOL_HARD_CAP: usize = 1000;
 
+/// Best similarity below which a reranked result set counts as weak, so
+/// the adaptive wide pass is worth trying.
+const WEAK_SIM: f64 = 0.55;
+/// Membership floor for a text search that is then sorted by a field: a
+/// candidate must look like the query to be listed at all. Higher than
+/// WEAK_SIM on purpose — that is the point where the *best* hit is
+/// doubtful, which is far too lenient as a test of every hit. Jaro-Winkler
+/// puts "liberty" against "bergsen" (one shared trigram) at 0.62 and a
+/// one-letter typo at 0.94; 0.7 separates them.
+const SORT_SIMILARITY_FLOOR: f64 = 0.7;
+
 /// Wrap a filter clause so it matches without contributing to relevance.
 fn const_score(query: Box<dyn Query>) -> Box<dyn Query> {
     Box::new(ConstScoreQuery::new(query, 1.0))
@@ -650,10 +661,10 @@ impl SearchEngine {
         Ok((scored, total, capped, fetched))
     }
 
-    /// Relevance-sorted fuzzy search with reranking: retrieve a candidate
-    /// pool by trigram BM25 (cheap recall), re-order it by true string
-    /// similarity against the stored values (precision), and page from
-    /// that. `_score` on this path is the similarity, 0..1.
+    /// The reranked candidate set for a text query: a pool retrieved by
+    /// trigram BM25 (cheap recall), re-ordered by true string similarity
+    /// against the stored values (precision). Returns the ranked hits, the
+    /// exact count when asked for, and how many candidates the pool yielded.
     ///
     /// When the best candidate is still weak and the rare-trigram driving
     /// was capped, retry once with a wider drive: four driving terms
@@ -661,23 +672,15 @@ impl SearchEngine {
     /// trigrams), seven guarantee it at two — the adaptive pass buys
     /// edit-distance-2 tolerance only on the queries that need it, instead
     /// of taxing every query with the wider union.
-    #[allow(clippy::too_many_arguments)]
-    fn search_reranked(
+    fn reranked_candidates(
         &self,
-        start: std::time::Instant,
         searcher: &tantivy::Searcher,
         query_text: &str,
         filters: &HashMap<String, String>,
         range_filters: &[RangeFilter],
-        limit: usize,
-        offset: usize,
         pool: usize,
-        include_pagination: bool,
-        want_count: bool,
-        include_full: bool,
-    ) -> anyhow::Result<SearchResult> {
-        const WEAK_SIM: f64 = 0.55;
-        let need_count = want_count || include_pagination;
+        need_count: bool,
+    ) -> anyhow::Result<(RankedHits, Option<usize>, usize)> {
         let fuzzy_fields = self.fuzzy_field_handles();
         let normalized_query = self.normalize(query_text);
 
@@ -712,6 +715,35 @@ impl SearchEngine {
                 fetched = wide_fetched;
             }
         }
+        Ok((scored, total, fetched))
+    }
+
+    /// Relevance-sorted fuzzy search: page through the reranked candidates.
+    /// `_score` on this path is the similarity, 0..1.
+    #[allow(clippy::too_many_arguments)]
+    fn search_reranked(
+        &self,
+        start: std::time::Instant,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        limit: usize,
+        offset: usize,
+        pool: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        let need_count = want_count || include_pagination;
+        let (scored, total, fetched) = self.reranked_candidates(
+            searcher,
+            query_text,
+            filters,
+            range_filters,
+            pool,
+            need_count,
+        )?;
 
         let page: Vec<(f64, DocAddress)> = scored
             .iter()
@@ -741,6 +773,66 @@ impl SearchEngine {
             limit,
             has_more,
             pagination,
+            results,
+        })
+    }
+
+    /// A text search sorted by a field. This used to run the fuzzy union as
+    /// a bare filter — a document qualified by sharing one driving trigram
+    /// with one query word — so `q=berg&sort_by=revenue` listed every name
+    /// containing "ber" or "erg", richest first, and the dashboard's column
+    /// headers took exactly that path. Now: the reranked candidate pool,
+    /// gated on similarity, sorted by the field's fast value. "The best
+    /// matches, sorted" — which is what clicking a column header means.
+    /// `count` is the number of gated matches; `_score` the similarity.
+    #[allow(clippy::too_many_arguments)]
+    fn search_sorted_fuzzy(
+        &self,
+        start: std::time::Instant,
+        searcher: &tantivy::Searcher,
+        query_text: &str,
+        filters: &HashMap<String, String>,
+        range_filters: &[RangeFilter],
+        sort_field: &str,
+        numeric: bool,
+        ascending: bool,
+        limit: usize,
+        offset: usize,
+        pool: usize,
+        include_pagination: bool,
+        want_count: bool,
+        include_full: bool,
+    ) -> anyhow::Result<SearchResult> {
+        let (scored, _, _) =
+            self.reranked_candidates(searcher, query_text, filters, range_filters, pool, false)?;
+        let mut gated: Vec<(f64, Option<SortKey>, DocAddress)> = scored
+            .into_iter()
+            .filter(|&(sim, _, _)| sim >= SORT_SIMILARITY_FLOOR)
+            .map(|(sim, _, addr)| Ok((sim, sort_key(searcher, addr, sort_field, numeric)?, addr)))
+            .collect::<anyhow::Result<_>>()?;
+        // Deterministic page boundaries under ties, as in the collectors.
+        gated.sort_by(|a, b| compare_sort_keys(&a.1, &b.1, ascending).then_with(|| a.2.cmp(&b.2)));
+        let matched = gated.len();
+
+        let page: Vec<(f64, DocAddress)> = gated
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|&(sim, _, addr)| (sim, addr))
+            .collect();
+        let results = self.render_hits(searcher, &page, include_full)?;
+        let returned = results.len();
+        let took = start.elapsed().as_secs_f64() * 1000.0;
+        Ok(SearchResult {
+            took_ms: (took * 100.0).round() / 100.0,
+            total: returned,
+            returned,
+            count: want_count.then_some(matched),
+            offset,
+            limit,
+            has_more: offset.saturating_add(returned) < matched,
+            pagination: include_pagination
+                .then(|| build_pagination_info(matched, limit, offset, returned)),
             results,
         })
     }
@@ -840,15 +932,15 @@ impl SearchEngine {
         // deeper window, so paging never changes ranking model mid-list.
         let default_pool = (limit * 3).clamp(RERANK_POOL_MIN, RERANK_POOL_MAX);
         let pool = default_pool.max(offset.saturating_add(limit));
+        if !query_text.is_empty() && pool > RERANK_POOL_HARD_CAP {
+            anyhow::bail!(
+                "cannot page text-search results past {}: offset + limit must be <= {} \
+                 — add filters to narrow the search instead",
+                RERANK_POOL_HARD_CAP,
+                RERANK_POOL_HARD_CAP
+            );
+        }
         if !query_text.is_empty() && matches!(sort, SortOrder::Relevance) {
-            if pool > RERANK_POOL_HARD_CAP {
-                anyhow::bail!(
-                    "cannot page relevance-ranked results past {}: offset + limit must be <= {} \
-                     — sort by a field to page deeper",
-                    RERANK_POOL_HARD_CAP,
-                    RERANK_POOL_HARD_CAP
-                );
-            }
             return self.search_reranked(
                 start,
                 &searcher,
@@ -863,18 +955,6 @@ impl SearchEngine {
                 include_full,
             );
         }
-
-        let fuzzy_fields = self.fuzzy_field_handles();
-        let subqueries = self.filter_clauses(filters, range_filters);
-        let fuzzy = if query_text.is_empty() {
-            None
-        } else {
-            Some(
-                self.fuzzy_clauses(&searcher, &fuzzy_fields, query_text, RARE_DRIVE_TERMS)
-                    .0,
-            )
-        };
-        let (query, prunable) = compose_query(fuzzy, subqueries);
 
         // Determine sort field for fast-field sorting
         let sort_field_name = match sort {
@@ -903,6 +983,30 @@ impl SearchEngine {
                 );
             }
         }
+
+        // A text query with a field sort: the best matches, sorted.
+        if let (false, Some(name)) = (query_text.is_empty(), sort_field_name) {
+            return self.search_sorted_fuzzy(
+                start,
+                &searcher,
+                query_text,
+                filters,
+                range_filters,
+                name,
+                is_numeric_sort,
+                matches!(sort, SortOrder::FieldAsc(_)),
+                limit,
+                offset,
+                pool,
+                include_pagination,
+                want_count,
+                include_full,
+            );
+        }
+
+        // From here on the query text is empty: a browse over filters.
+        let subqueries = self.filter_clauses(filters, range_filters);
+        let (query, prunable) = compose_query(None, subqueries);
 
         let need_count = want_count || include_pagination;
 
@@ -1153,6 +1257,65 @@ impl SearchEngine {
                 serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
             }),
             _ => serde_json::Value::Null,
+        }
+    }
+}
+
+/// A fast-field value used to order gated text-search candidates.
+enum SortKey {
+    Num(f64),
+    Str(String),
+}
+
+fn sort_key(
+    searcher: &tantivy::Searcher,
+    addr: DocAddress,
+    field: &str,
+    numeric: bool,
+) -> anyhow::Result<Option<SortKey>> {
+    let reader = searcher.segment_reader(addr.segment_ord);
+    if numeric {
+        let column = reader.fast_fields().f64(field)?;
+        return Ok(column.first(addr.doc_id).map(SortKey::Num));
+    }
+    let Some(column) = reader.fast_fields().str(field)? else {
+        return Ok(None);
+    };
+    let Some(ord) = column.term_ords(addr.doc_id).next() else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    Ok(if column.ord_to_bytes(ord, &mut bytes)? {
+        Some(SortKey::Str(String::from_utf8_lossy(&bytes).into_owned()))
+    } else {
+        None
+    })
+}
+
+/// Missing values last in both directions — the same contract as the
+/// global sort collectors, so a sorted text search and a sorted browse
+/// agree on where a document without a value goes.
+fn compare_sort_keys(
+    a: &Option<SortKey>,
+    b: &Option<SortKey>,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => {
+            let ord = match (a, b) {
+                (SortKey::Num(x), SortKey::Num(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+                (SortKey::Str(x), SortKey::Str(y)) => x.cmp(y),
+                _ => Ordering::Equal,
+            };
+            if ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
         }
     }
 }
@@ -2730,6 +2893,126 @@ pub mod tests {
             .expect("a window past the cap must be refused")
             .to_string();
         assert!(err.starts_with("cannot page"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `q=berg&sort_by=revenue` used to list every document sharing one
+    /// driving trigram with the query, richest first — the fuzzy union ran
+    /// as a bare filter. A sorted text search must be the best matches,
+    /// sorted, with missing sort values last as everywhere else.
+    #[test]
+    fn sorted_text_search_is_gated_by_similarity() {
+        let dir = test_index_dir("sorted-fuzzy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let revenue = FieldConfig {
+            name: "revenue".to_string(),
+            field_type: FieldType::Number,
+            search: None,
+            values: None,
+            max_values: None,
+            case_sensitive: false,
+            multi: false,
+            separator: None,
+            description: None,
+        };
+        let config = Arc::new(Config {
+            server: ServerConfig {
+                port: 8888,
+                bind: "0.0.0.0".to_string(),
+                index_path: dir.clone(),
+                memory_budget: "100%".to_string(),
+                auth_token: None,
+                strict_params: false,
+            },
+            schema: SchemaConfig {
+                primary_key: None,
+                fields: vec![fuzzy_field("name"), revenue],
+            },
+            sources: Vec::new(),
+            mappings: HashMap::new(),
+            store: crate::config::StoreConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
+        });
+        let (schema, fields) = crate::schema::build_schema(&config.schema, false);
+        let index = Index::create_in_dir(&dir, schema).unwrap();
+        crate::import::register_trigram_tokenizer_pub(&index);
+        let mut writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let (name, revenue) = (fields["name"], fields["revenue"]);
+        // "Liberty" shares the trigram "ber" with the query and has the top
+        // revenue: under the old semantics it led the list.
+        for (n, r) in [
+            ("Bergsen Handel", Some(100.0)),
+            ("Bergsen Bygg", Some(900.0)),
+            ("Bergson Kraft", Some(500.0)),
+            ("Liberty Oil", Some(999.0)),
+            ("Bergsen Nord", None),
+        ] {
+            let mut d = doc!(name => n);
+            if let Some(r) = r {
+                d.add_f64(revenue, r);
+            }
+            writer.add_document(d).unwrap();
+        }
+        writer.commit().unwrap();
+        let engine = SearchEngine::open(config).unwrap();
+
+        let sorted = |order: SortOrder, limit: usize, offset: usize| {
+            engine
+                .search(
+                    "bergsen",
+                    &HashMap::new(),
+                    &[],
+                    &order,
+                    limit,
+                    offset,
+                    false,
+                    true,
+                    false,
+                )
+                .unwrap()
+        };
+        let names = |r: &super::SearchResult| -> Vec<String> {
+            r.results
+                .iter()
+                .map(|row| row["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let desc = sorted(SortOrder::FieldDesc("revenue".to_string()), 10, 0);
+        assert_eq!(
+            names(&desc),
+            vec![
+                "Bergsen Bygg",
+                "Bergson Kraft",
+                "Bergsen Handel",
+                "Bergsen Nord"
+            ],
+            "best matches by revenue, missing last, no trigram hitchhikers"
+        );
+        assert_eq!(desc.count, Some(4), "count is the gated match count");
+        assert!(desc
+            .results
+            .iter()
+            .all(|row| (0.0..=1.0).contains(&row["_score"].as_f64().unwrap())));
+
+        let asc = sorted(SortOrder::FieldAsc("revenue".to_string()), 10, 0);
+        assert_eq!(
+            names(&asc),
+            vec![
+                "Bergsen Handel",
+                "Bergson Kraft",
+                "Bergsen Bygg",
+                "Bergsen Nord"
+            ]
+        );
+
+        // Paging inside the gated set.
+        let page = sorted(SortOrder::FieldDesc("revenue".to_string()), 2, 2);
+        assert_eq!(names(&page), vec!["Bergsen Handel", "Bergsen Nord"]);
+        assert!(!page.has_more);
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -309,7 +309,7 @@ When `include_pagination=true`, `/search` also includes the legacy `pagination` 
 }
 ```
 
-The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Relevance-ranked text searches (`q` without `sort_by`) page within the first 1000 results: every page is ranked by the same similarity model rather than quietly switching models deeper in, and a window past 1000 is refused with a 400 — sort by a field to page deeper.
+The maximum pagination window is `offset + limit <= 100000` — that bounds deep paging, not `count`. Text searches (`q`) page within their first 1000 candidates, ranked by one similarity model throughout rather than quietly switching models deeper in; a window past 1000 is refused with a 400 — narrow the search with filters instead. A text search with `sort_by` lists *the best matches, sorted*: candidates below a similarity floor are dropped before sorting, so `q=berg&sort_by=revenue` is the Berg-like companies by revenue, not every name containing "ber" — and `count` on that path is the number of matches that passed the floor.
 
 ### `GET /fields`, `GET /docs`, `GET /openapi.json`
 
