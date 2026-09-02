@@ -166,13 +166,13 @@ defaults = { country_code = "NO" }
 mapping = { name = "navn", org_number = "organisasjonsnummer", city = "forretningsadresse.poststed" }
 ```
 
-JSON types map with less guessing than CSV strings: `null` is a missing value (not `""` or `0`), numbers and booleans canonicalize directly, and an array feeds a `multi` field its elements — no separator splitting needed. With the document store in row mode, the record *itself* is the stored full document (source `defaults` merged at the top level), so nested structures survive without a sidecar file — for nested documents, a JSONL source is the recommended replacement for the CSV + sidecar combination.
+JSON types map with less guessing than CSV strings: `null` is a missing value (not `""` or `0`), numbers and booleans canonicalize directly, and an array feeds a `multi` field its elements — no separator splitting needed. An array in a field that is *not* `multi` contributes only its first element (a scalar field shows one value, and a document never matches on a value it doesn't show); the import notes it and `--check` reports it, so declare the field `multi = true` if you meant all of them. With the document store in row mode, the record *itself* is the stored full document (source `defaults` merged at the top level), so nested structures survive without a sidecar file — for nested documents, a JSONL source is the recommended replacement for the CSV + sidecar combination.
 
 Gzipped input works for CSV too: any source or delta ending `.gz` streams through a decoder during import.
 
 ## Checking sources before importing
 
-`ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught. Exits non-zero if the real import would fail.
+`ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, JSON arrays landing in fields not declared `multi`, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught; it exits non-zero on any finding, duplicates included, because a full import keeps duplicate rows while an update by key collapses them and the two paths would disagree. A duplicate rate above a few percent almost always means the key doesn't identify a row in that source.
 
 ## Incremental updates
 

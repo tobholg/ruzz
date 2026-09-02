@@ -81,9 +81,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Import { check } => {
             if check {
                 let report = import::run_check(&config)?;
-                if report.bad_rows > 0 {
+                if !report.is_clean() {
                     anyhow::bail!(
-                        "--check found {} row(s) the import would reject",
+                        "--check found {} problem(s) and {} row(s) the import would reject — see above",
+                        report.problems.len(),
                         report.bad_rows
                     );
                 }
