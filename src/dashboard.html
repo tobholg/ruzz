@@ -796,7 +796,9 @@ function getSearchParams(limitOverride = resultLimit) {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   params.set('limit', String(clampResultLimit(limitOverride)));
-  if (!countEnabled) params.set('count', 'false');
+  // Always explicit: the server's own default_count must not decide for a
+  // browser that chose the other way.
+  params.set('count', countEnabled ? 'true' : 'false');
   let hasAnyFilter = false;
   // Filter controls live in the strip normally and inside the search
   // settings modal while it is open — same nodes, either home counts.
