@@ -61,16 +61,20 @@ pub fn dir_size(path: &Path) -> u64 {
 }
 
 /// Which file to warm first when the budget cannot hold everything. Term
-/// dictionaries and fast fields are touched by every query; posting lists
-/// next; stored documents only when a hit is rendered.
+/// dictionaries, fast fields and fieldnorms are small and touched by every
+/// query. Stored documents come next, not last: since the rerank stage,
+/// every fuzzy query reads 50–1000 of them for its candidate pool, and a
+/// budget that ran out before the store left exactly that cold — measured
+/// at ~135µs per candidate from disk against ~15µs warm. Posting lists
+/// follow; the rare-trigram driving keeps their hot part small.
 fn warm_priority(path: &Path) -> u8 {
     match path.extension().and_then(|e| e.to_str()) {
         Some("term") => 0,
         Some("fast") => 1,
         Some("fieldnorm") => 2,
-        Some("idx") => 3,
-        Some("store") => 5,
-        _ => 4,
+        Some("store") => 3,
+        Some("idx") => 4,
+        _ => 5,
     }
 }
 
@@ -191,7 +195,9 @@ mod tests {
     fn hot_structures_warm_first() {
         assert!(warm_priority(Path::new("x.term")) < warm_priority(Path::new("x.idx")));
         assert!(warm_priority(Path::new("x.fast")) < warm_priority(Path::new("x.idx")));
-        assert!(warm_priority(Path::new("x.idx")) < warm_priority(Path::new("x.store")));
-        assert!(warm_priority(Path::new("meta.json")) < warm_priority(Path::new("x.store")));
+        // The rerank reads stored documents on every fuzzy query: the store
+        // must be warm before the bulk of the postings.
+        assert!(warm_priority(Path::new("x.store")) < warm_priority(Path::new("x.idx")));
+        assert!(warm_priority(Path::new("x.fast")) < warm_priority(Path::new("x.store")));
     }
 }

@@ -65,6 +65,64 @@ fn collect_garbage_inner(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Merge every segment into one, in place. What a full import does at its
+/// end — repeated here for an index whose merge failed (or one grown to
+/// many segments by deltas). A running server keeps serving throughout and
+/// picks the merged segment up through its reader; the superseded segment
+/// files are collected afterwards. Needs roughly one index of free disk.
+pub fn merge_segments(config: &Config) -> anyhow::Result<()> {
+    logged(config, "merge", &[], |_event| merge_segments_inner(config))
+}
+
+fn merge_segments_inner(config: &Config) -> anyhow::Result<()> {
+    let index_path = &config.server.index_path;
+    let index = tantivy::Index::open_in_dir(index_path)
+        .with_context(|| format!("opening index at {}", index_path.display()))?;
+    register_trigram_tokenizer_pub(&index);
+    let segment_ids = index.searchable_segment_ids()?;
+    if segment_ids.len() < 2 {
+        println!("✓ index already has a single segment — nothing to merge");
+        return Ok(());
+    }
+    let before = dir_bytes(index_path);
+    println!(
+        "  merging {} segments ({} docs) — this rewrites the index once; the server keeps serving",
+        segment_ids.len(),
+        index.reader()?.searcher().num_docs()
+    );
+    let start = Instant::now();
+    merge_all(&index, &segment_ids)?;
+    let collector: IndexWriter = index.writer(15_000_000)?;
+    let outcome = collector
+        .garbage_collect_files()
+        .wait()
+        .map_err(|e| anyhow::anyhow!("garbage collection failed: {}", e))?;
+    let after = dir_bytes(index_path);
+    println!(
+        "✓ merged into one segment in {:.0}s; removed {} superseded files, {} → {} on disk",
+        start.elapsed().as_secs_f64(),
+        outcome.deleted_files.len(),
+        human_bytes(before),
+        human_bytes(after),
+    );
+    println!("  a running server picks the merged segment up within a moment — no restart needed");
+    Ok(())
+}
+
+/// Merge the given segments into one, with a writer whose merge policy is
+/// disabled so nothing else touches the segment set meanwhile. Returns
+/// once the merged segment is committed to meta.json.
+fn merge_all(index: &tantivy::Index, segment_ids: &[tantivy::SegmentId]) -> anyhow::Result<()> {
+    let mut merger: IndexWriter = index.writer(50_000_000)?;
+    merger.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+    merger
+        .merge(segment_ids)
+        .wait()
+        .map_err(|e| anyhow::anyhow!("merge failed: {}", e))?;
+    merger.wait_merging_threads()?;
+    Ok(())
+}
+
 fn dir_bytes(path: &Path) -> u64 {
     std::fs::read_dir(path)
         .map(|entries| {
@@ -482,19 +540,32 @@ fn run_import_inner(config: &Config) -> anyhow::Result<ImportStats> {
     writer.commit()?;
     commit_pb.finish_with_message("Index committed.");
 
-    // Merge segments for faster queries — use the same writer.
-    // The store writer thread keeps compressing in parallel with this.
+    // Merge segments for faster queries. The store writer thread keeps
+    // compressing in parallel with this.
     let merge_pb = multi.add(ProgressBar::new_spinner());
     merge_pb.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
     merge_pb.set_message("Merging segments (this improves query speed)...");
+    // The commit hands the merge policy's background merges to the thread
+    // pool; a forced merge issued on top of them used to race them — its
+    // segment ids vanished under it ("could not be found in the
+    // SegmentManager") and it failed, with the result dropped unread. The
+    // index then kept whatever the policy's merges produced: eight
+    // segments on a 62M-doc import, every query paying per segment. So:
+    // drain the policy's merges first, then merge what is left with a
+    // writer whose policy cannot interfere.
+    writer.wait_merging_threads()?;
     let segment_ids = index.searchable_segment_ids()?;
+    println!("  segments after indexing: {}", segment_ids.len());
     if segment_ids.len() > 1 {
-        // merge() hands the work to the merge thread pool and returns a handle
-        // to the result. We do not need the resulting SegmentMeta, and dropping
-        // the handle does not cancel the merge — wait_merging_threads() below is
-        // what blocks until the pool has finished.
-        drop(writer.merge(&segment_ids));
-        writer.wait_merging_threads()?;
+        match merge_all(&index, &segment_ids) {
+            Ok(()) => println!("  merged {} segments into one", segment_ids.len()),
+            Err(e) => eprintln!(
+                "  ⚠ final merge failed: {} — the index serves from {} segments, slower than one; \
+                 run `ruzz merge` to retry in place",
+                e,
+                segment_ids.len()
+            ),
+        }
 
         // Merging leaves the pre-merge segments on disk. Tantivy only removes
         // files no longer referenced by meta.json during a garbage collect,
@@ -1731,6 +1802,7 @@ mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: primary_key.map(String::from),
@@ -1923,6 +1995,7 @@ org_number,company_name,city,secret_extra
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2373,6 +2446,7 @@ org_number,company_name,city,secret_extra
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2486,6 +2560,7 @@ org_number,company_name,city,secret_extra
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2557,6 +2632,7 @@ org_number,company_name,city,secret_extra
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2607,6 +2683,54 @@ org_number,company_name,city,secret_extra
         assert_eq!(red.results[0]["tags"], "red");
         assert_eq!(by_tag("green").count, Some(1));
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A full import ends in one segment, and `ruzz merge` brings an index
+    /// that deltas have grown to several back to one — in place.
+    #[test]
+    fn import_ends_in_one_segment_and_merge_restores_it() {
+        let dir = temp_dir("merge");
+        write_csv(&dir.join("data.csv"), CSV);
+        let config = test_config_pk(
+            &dir,
+            vec![source(&dir, None)],
+            StoreConfig::default(),
+            Some("org_number"),
+        );
+        run_import(&config).unwrap();
+        let segments = |config: &Config| {
+            tantivy::Index::open_in_dir(&config.server.index_path)
+                .unwrap()
+                .searchable_segment_ids()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(segments(&config), 1, "a full import merges to one segment");
+
+        // Every delta commits a segment of its own.
+        for (i, name) in ["Delta One", "Delta Two", "Delta Three"].iter().enumerate() {
+            let path = dir.join(format!("delta{i}.csv"));
+            write_csv(
+                &path,
+                &format!(
+                    "org_number,company_name,city,secret_extra\n{},{},Oslo,x\n",
+                    500 + i,
+                    name
+                ),
+            );
+            run_update(&config, &[path], None, None, None).unwrap();
+        }
+        assert!(segments(&config) > 1, "deltas add segments");
+
+        merge_segments(&config).unwrap();
+        assert_eq!(segments(&config), 1);
+        let engine = SearchEngine::open(config.clone()).unwrap();
+        assert_eq!(count_of(&engine, ""), 6, "nothing lost in the merge");
+        assert_eq!(count_of(&engine, "delta"), 3);
+
+        // Idempotent: nothing to do is not an error.
+        merge_segments(&config).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2832,6 +2956,7 @@ org_number,company_name,city,secret_extra
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),

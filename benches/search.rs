@@ -192,6 +192,7 @@ fn bench_config(dir: &std::path::Path) -> Arc<Config> {
             memory_budget: "100%".to_string(),
             auth_token: None,
             strict_params: false,
+            doc_cache: None,
         },
         schema: SchemaConfig {
             primary_key: None,

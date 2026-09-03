@@ -138,6 +138,26 @@ pub struct ServerConfig {
     /// `ignored_parameters` so mistakes surface either way.
     #[serde(default)]
     pub strict_params: bool,
+    /// Memory for decompressed stored-document blocks, kept in the process
+    /// (not the page cache). The rerank stage fetches 50–1000 stored
+    /// documents per fuzzy query and each costs an LZ4 decode of its 16KB
+    /// block; this keeps the hot blocks decoded. Default "128MB". tantivy's
+    /// own default is 100 blocks (~1.6MB).
+    #[serde(default)]
+    pub doc_cache: Option<String>,
+}
+
+impl ServerConfig {
+    /// Stored-document block cache size in tantivy blocks (16KB each).
+    pub fn doc_cache_blocks(&self) -> usize {
+        const BLOCK: u64 = 16 * 1024;
+        let bytes = self
+            .doc_cache
+            .as_deref()
+            .and_then(crate::store::parse_size)
+            .unwrap_or(128 * 1024 * 1024);
+        (bytes / BLOCK).max(1) as usize
+    }
 }
 
 fn default_memory_budget() -> String {
@@ -423,6 +443,7 @@ mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: SchemaConfig {
                 fields: Vec::new(),

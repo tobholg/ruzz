@@ -62,6 +62,14 @@ enum Command {
     Serve,
     /// Import then serve
     Run,
+    /// Merge every segment into one, in place
+    ///
+    /// A full import ends with this merge; if it failed (the import now
+    /// says so) or deltas have grown the index to many segments, every
+    /// query pays per segment. Rewrites the index once — needs about one
+    /// index of free disk — while a running server keeps serving and picks
+    /// the result up on its own.
+    Merge,
     /// Delete index files no longer referenced by the current commit
     ///
     /// Merging supersedes segments but does not remove them, and until
@@ -120,6 +128,9 @@ async fn main() -> anyhow::Result<()> {
             import::run_import(&config)?;
             println!();
             serve(config).await?;
+        }
+        Command::Merge => {
+            import::merge_segments(&config)?;
         }
         Command::Gc => {
             import::collect_garbage(&config)?;

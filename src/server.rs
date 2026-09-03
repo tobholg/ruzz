@@ -1590,6 +1590,7 @@ mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
             },
             schema: crate::config::SchemaConfig {
                 primary_key: Some("org_number".to_string()),

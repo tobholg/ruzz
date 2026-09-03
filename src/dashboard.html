@@ -103,8 +103,13 @@
   /* ── Top bar ── */
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--border); }
   .topbar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
-  .wordmark { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; white-space: nowrap; }
-  .wordmark span { color: var(--accent); }
+  /* The wordmark reads as a path: "ruzz. / <instance>" — same face and
+     size, the instance name in a faint ink so the product name leads. */
+  .wordmark { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; white-space: nowrap; display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+  .wordmark .dot { color: var(--accent); }
+  .wordmark .path-sep { color: var(--text-dim); font-weight: 400; }
+  .wordmark .instance { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+  .wordmark [hidden] { display: none; }
   /* The dataset title: same type size and box metrics as the tabs beside
      it (their 5px padding = our 4px + 1px border), so the row reads as one
      flush, centered line. */
@@ -129,7 +134,16 @@
   .search-wrap:focus-within svg { color: var(--accent); }
   .search-input { flex: 1; border: none; background: none; outline: none; font-size: 15px; min-width: 0; }
   .kbd { font-family: var(--mono); font-size: 10px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 5px; padding: 2px 7px; flex-shrink: 0; }
-  .count-block { display: flex; flex-direction: column; align-items: flex-end; min-width: 90px; }
+  .count-block { display: flex; flex-direction: column; align-items: flex-end; min-width: 90px; cursor: pointer; user-select: none; }
+  .count-block:hover .count-num { color: var(--accent-strong); }
+  /* Header row is always present — with no rows, one placeholder row
+     carries the message so the headers stay clickable for browsing. */
+  .results-table tbody tr.placeholder-row { cursor: default; }
+  .results-table tbody tr.placeholder-row:hover td { background: none; }
+  .results-table td.placeholder { padding: 56px 10px; text-align: center; color: var(--text-dim); border-bottom: none; white-space: normal; font-size: 13px; }
+  .results-table td.placeholder .empty-icon { font-size: 22px; margin-bottom: 6px; }
+  .count-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+  .count-toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
   .count-num { font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.1; }
   .count-sub { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
   .count-sub em { color: var(--accent); font-style: normal; }
@@ -506,7 +520,7 @@
     .count-block { display: none; }
     .main { padding: 0 12px; }
     .topbar { padding: 0 12px; }
-    .index-chip { display: none; }
+    .wordmark .path-sep, .wordmark .instance { display: none; }
     .query-bar { padding: 10px 0 8px 0; }
     .search-wrap { height: 42px; }
     /* The strip stacks: search-in-fields row, then the action row. */
@@ -529,8 +543,11 @@
 <div class="app">
   <div class="topbar">
     <div class="topbar-left">
-      <div class="wordmark">ruzz<span>.</span></div>
-      <div class="index-chip" id="index-chip">—</div>
+      <div class="wordmark">
+        <span>ruzz<span class="dot">.</span></span>
+        <span class="path-sep" id="index-sep" hidden>/</span>
+        <span class="instance" id="index-chip" hidden></span>
+      </div>
       <div class="tabs">
         <button class="tab active" data-tab="search" type="button">Search</button>
         <button class="tab" data-tab="activity" type="button">Activity</button>
@@ -656,6 +673,13 @@
         </div>
       </div>
       <div class="settings-section">
+        <div class="export-panel-title">MATCH COUNT</div>
+        <div class="settings-limit-row">
+          <label class="count-toggle"><input type="checkbox" id="settings-count-toggle"> Count every match</label>
+        </div>
+        <div class="settings-note">Off by default: an exact count walks every candidate, and on tens of millions of rows that is most of a keystroke's latency. With counts off the headline number is the query time — click it to switch either way.</div>
+      </div>
+      <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
         <div class="settings-limit-row">
           <input class="limit-input" id="settings-limit-input" type="number" min="1" max="1000" step="1" inputmode="numeric">
@@ -691,6 +715,22 @@ const MIN_RESULT_LIMIT = 1;
 const MAX_RESULT_LIMIT = 1000;
 const DEFAULT_COLUMN_CAP = 7;
 let resultLimit = clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
+// Exact counts are off by default: they traverse every candidate, which
+// on a large index is most of a keystroke's latency. Remembered per browser.
+let countEnabled = false;
+try { countEnabled = localStorage.getItem('ruzz_count') === 'on'; } catch {}
+function setCountEnabled(on) {
+  countEnabled = Boolean(on);
+  try { localStorage.setItem('ruzz_count', countEnabled ? 'on' : 'off'); } catch {}
+  syncCountUI();
+  scheduleSearch();
+}
+function syncCountUI() {
+  const box = document.getElementById('settings-count-toggle');
+  if (box) box.checked = countEnabled;
+  const block = document.getElementById('count-block');
+  if (block) block.title = countEnabled ? 'Counting every match — click to show query time instead' : 'Counts are off — click to count every match';
+}
 let lastSearchData = null;
 let sortBy = '';
 let sortOrder = 'desc';
@@ -745,6 +785,7 @@ function getSearchParams(limitOverride = resultLimit) {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   params.set('limit', String(clampResultLimit(limitOverride)));
+  if (!countEnabled) params.set('count', 'false');
   let hasAnyFilter = false;
   // Filter controls live in the strip normally and inside the search
   // settings modal while it is open — same nodes, either home counts.
@@ -1001,6 +1042,8 @@ function bindSearchTabEvents() {
     });
   });
   document.getElementById('copy-json-btn')?.addEventListener('click', copySlideoutJson);
+  document.getElementById('count-block')?.addEventListener('click', () => setCountEnabled(!countEnabled));
+  syncCountUI();
   updateLimitControls();
 }
 
@@ -1153,6 +1196,8 @@ function updateStats(d) {
     // means nothing to the people the dashboard is for.
     const name = d.dashboard?.name;
     chip.hidden = !name;
+    const sep = document.getElementById('index-sep');
+    if (sep) sep.hidden = !name;
     if (name) {
       chip.textContent = name;
       chip.title = String(d.index?.path || '');
@@ -1539,6 +1584,8 @@ function bindSettingsModalEvents() {
   // A fixed-position picker menu would drift from its trigger as the
   // filters grid scrolls under it — close instead, the standard behavior.
   document.querySelector('.settings-filters-scroll')?.addEventListener('scroll', closeAllPickers);
+  document.getElementById('settings-count-toggle')?.addEventListener('change', event => setCountEnabled(event.target.checked));
+  syncCountUI();
 }
 
 /* ── pickers ── */
@@ -1749,11 +1796,27 @@ let debounceTimer = null;
 function scheduleSearch() { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 30); }
 
 function renderIdleResultsState() {
-  document.getElementById('results').innerHTML =
-    `<div class="empty"><div class="empty-icon">⚡</div><div class="empty-text">Start typing to search ${Number(statsData?.documents || 0).toLocaleString()} records</div></div>`;
+  renderTable([], '⚡', `Start typing to search ${Number(statsData?.documents || 0).toLocaleString()} records — or click a column header to browse by it`);
   document.getElementById('count-block').style.visibility = 'hidden';
   document.getElementById('table-footer').style.display = 'none';
   closeSlideout();
+}
+
+function renderCountBlock(data) {
+  const countNum = document.getElementById('result-count');
+  const countSub = document.getElementById('result-count-sub');
+  const time = document.getElementById('query-time');
+  const ms = `${data.took_ms} ms`;
+  if (data.count !== undefined && data.count !== null) {
+    countNum.textContent = Number(data.count).toLocaleString();
+    countSub.textContent = data.count === data.returned ? 'matches' : `matches · showing ${data.returned}`;
+    time.textContent = ms;
+  } else {
+    // Counts off: the query time is the headline number.
+    countNum.textContent = ms;
+    countSub.textContent = `${data.returned} shown${data.has_more ? ', more available' : ''}`;
+    time.textContent = 'counts off';
+  }
 }
 
 async function doSearch() {
@@ -1772,16 +1835,7 @@ async function doSearch() {
     selectedIndex = -1;
     closeSlideout();
     document.getElementById('count-block').style.visibility = 'visible';
-    const countNum = document.getElementById('result-count');
-    const countSub = document.getElementById('result-count-sub');
-    if (data.count !== undefined && data.count !== null) {
-      countNum.textContent = Number(data.count).toLocaleString();
-      countSub.textContent = data.count === data.returned ? 'matches' : `matches · showing ${data.returned}`;
-    } else {
-      countNum.textContent = String(data.returned ?? data.total ?? 0);
-      countSub.textContent = 'returned';
-    }
-    document.getElementById('query-time').textContent = data.took_ms + ' ms';
+    renderCountBlock(data);
     renderResults(data);
   } catch {
     lastSearchData = null;
@@ -1821,35 +1875,44 @@ function cellFor(field, record, isPrimary) {
   return `<td class="${cls}" title="${esc(text)}">${esc(text)}</td>`;
 }
 
-function renderResults(data) {
+/* The table always has its header row: with nothing to show, one
+   placeholder row carries the message, and the headers stay clickable so a
+   sort can start a browse before any query is typed. */
+function renderTable(records, emptyIcon, emptyText) {
   const container = document.getElementById('results');
-  const footer = document.getElementById('table-footer');
-  if (!data.results || data.results.length === 0) {
-    container.innerHTML = '<div class="empty"><div class="empty-icon">∅</div><div class="empty-text">No matches found</div></div>';
-    footer.style.display = 'none';
-    return;
-  }
   const primary = getPrimaryFieldName();
   const columns = visibleColumns.filter(name => schema.some(f => f.name === name));
   const fields = columns.map(name => schema.find(f => f.name === name));
   const head = columns.map(headerFor).join('');
-  const body = data.results.map((record, index) => {
-    const cells = fields.map(field => cellFor(field, record, field.name === primary)).join('');
-    return `<tr data-index="${index}"${index === selectedIndex ? ' class="selected"' : ''}>${cells}</tr>`;
-  }).join('');
+  const body = records.length
+    ? records.map((record, index) => {
+        const cells = fields.map(field => cellFor(field, record, field.name === primary)).join('');
+        return `<tr data-index="${index}"${index === selectedIndex ? ' class="selected"' : ''}>${cells}</tr>`;
+      }).join('')
+    : `<tr class="placeholder-row"><td class="placeholder" colspan="${Math.max(1, columns.length)}"><div class="empty-icon">${emptyIcon}</div>${esc(emptyText)}</td></tr>`;
   container.innerHTML = `<table class="results-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-
   container.querySelectorAll('th.sortable').forEach(th => {
     th.addEventListener('click', () => cycleSort(th.dataset.col));
   });
-  container.querySelectorAll('tbody tr').forEach(tr => {
+  container.querySelectorAll('tbody tr[data-index]').forEach(tr => {
     tr.addEventListener('click', () => selectResult(Number.parseInt(tr.dataset.index || '', 10), { open: true }));
   });
+}
+
+function renderResults(data) {
+  const footer = document.getElementById('table-footer');
+  if (!data.results || data.results.length === 0) {
+    renderTable([], '∅', 'No matches found');
+    footer.style.display = 'none';
+    return;
+  }
+  renderTable(data.results);
 
   footer.style.display = 'flex';
   const range = document.getElementById('footer-range');
-  const total = data.count ?? data.returned;
-  range.textContent = `1–${data.returned} of ${Number(total).toLocaleString()}`;
+  range.textContent = data.count != null
+    ? `1–${data.returned} of ${Number(data.count).toLocaleString()}`
+    : `1–${data.returned}${data.has_more ? ' · more available' : ''}`;
   const loadMore = document.getElementById('load-more-btn');
   loadMore.hidden = !(data.has_more && resultLimit < MAX_RESULT_LIMIT);
 }
