@@ -105,10 +105,13 @@
   .topbar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
   /* The wordmark reads as a path: "ruzz. / <instance>" — same face and
      size, the instance name in a faint ink so the product name leads. */
-  .wordmark { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; white-space: nowrap; display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+  .wordmark { font-family: var(--serif); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; white-space: nowrap; display: flex; align-items: center; gap: 9px; min-width: 0; }
   .wordmark .dot { color: var(--accent); }
-  .wordmark .path-sep { color: var(--text-dim); font-weight: 400; }
-  .wordmark .instance { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+  /* The instance name is set like the tabs beside it — the UI face, a
+     step below the logo — and centred on the logo's and tabs' midline. */
+  .wordmark .path-sep, .wordmark .instance { font-family: var(--sans); font-size: 16px; letter-spacing: 0; color: var(--text-dim); }
+  .wordmark .path-sep { font-weight: 400; }
+  .wordmark .instance { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
   .wordmark [hidden] { display: none; }
   /* The dataset title: same type size and box metrics as the tabs beside
      it (their 5px padding = our 4px + 1px border), so the row reads as one
