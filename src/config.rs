@@ -149,7 +149,7 @@ pub struct ServerConfig {
     /// say. An exact count traverses every candidate — tens of milliseconds
     /// per query on tens of millions of rows — so a large instance may
     /// default it off while smaller ones keep it. The `count` parameter
-    /// always overrides; the dashboard follows this until a user chooses.
+    /// always overrides (the dashboard always sends it, off by default).
     #[serde(default = "default_default_count")]
     pub default_count: bool,
 }

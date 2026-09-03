@@ -456,6 +456,15 @@
   .act-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
   .act-spark polygon { fill: var(--accent-tint); }
   .act-collect { height: 34px; display: flex; align-items: center; font-size: 11px; color: var(--text-dim); }
+  /* Hover details: one floating tip shared by the heatmap and the sparklines. */
+  .act-tip { position: fixed; z-index: 60; pointer-events: none; display: none; background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-pop); padding: 7px 10px; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .act-tip .t { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); margin-bottom: 2px; }
+  .act-tip .err { color: var(--red); }
+  .heatmap i { cursor: default; }
+  .heatmap i:hover { outline: 1.5px solid var(--text); outline-offset: -1.5px; }
+  .act-spark .spark-wrap { position: relative; cursor: crosshair; }
+  .act-spark .spark-guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-dim); opacity: 0.8; pointer-events: none; }
+  .act-spark .spark-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong); border: 1.5px solid var(--surface); transform: translate(-50%, -50%); pointer-events: none; }
   .act-card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 22px; }
   .act-card-title { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: baseline; }
   .act-card-title .act-legend { display: inline-flex; align-items: center; gap: 3px; text-transform: none; letter-spacing: 0; }
@@ -682,7 +691,7 @@
         <div class="settings-limit-row">
           <label class="count-toggle"><input type="checkbox" id="settings-count-toggle"> Count every match</label>
         </div>
-        <div class="settings-note">Follows this server's <code>default_count</code> setting until you choose here. An exact count walks every candidate, and on tens of millions of rows that is most of a keystroke's latency; with counts off the headline number is the query time — click it to switch either way.</div>
+        <div class="settings-note">Off by default: an exact count walks every candidate, and on tens of millions of rows that is most of a keystroke's latency. With counts off the headline number is the query time — click it to switch either way. Your choice is remembered in this browser.</div>
       </div>
       <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
@@ -723,13 +732,11 @@ const MAX_RESULT_LIMIT = 20000;
 const DEFAULT_COLUMN_CAP = 7;
 let resultLimit = clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
 // Exact counts traverse every candidate — on a large index most of a
-// keystroke's latency. The choice follows the server's default_count until
-// this browser picks one; then it is remembered here.
-let countEnabled = true;
-try { countEnabled = localStorage.getItem('ruzz_count') !== 'off'; } catch {}
-function countPreferenceChosen() {
-  try { const v = localStorage.getItem('ruzz_count'); return v === 'on' || v === 'off'; } catch { return false; }
-}
+// keystroke's latency — so the app starts with them off whatever the
+// server's own default is (that governs API callers). Remembered per
+// browser once toggled.
+let countEnabled = false;
+try { countEnabled = localStorage.getItem('ruzz_count') === 'on'; } catch {}
 function setCountEnabled(on) {
   countEnabled = Boolean(on);
   try { localStorage.setItem('ruzz_count', countEnabled ? 'on' : 'off'); } catch {}
@@ -1170,7 +1177,6 @@ async function init() {
     }
     statsData = await res.json();
     updateStats(statsData);
-    if (!countPreferenceChosen()) countEnabled = statsData.dashboard?.count !== false;
     syncCountUI();
     schema = statsData.schema?.fields || [];
     fuzzyField = schema.find(f => f.search === 'fuzzy');
@@ -2834,10 +2840,10 @@ function actHeatmap(days) {
     const classes = [];
     if (level) classes.push('h' + level);
     if (day && day.errors) classes.push('err');
-    const label = day
-      ? `${iso} — ${Number(touched).toLocaleString()} records · ${day.events} op${day.events === 1 ? '' : 's'}${day.errors ? ` · ${day.errors} failed` : ''}`
-      : iso;
-    cells += `<i${classes.length ? ` class="${classes.join(' ')}"` : ''} title="${label}"></i>`;
+    const detail = day
+      ? ` data-touched="${touched}" data-events="${day.events}" data-errors="${day.errors}"`
+      : '';
+    cells += `<i${classes.length ? ` class="${classes.join(' ')}"` : ''} data-date="${iso}"${detail}></i>`;
     if (i % 7 === 0) {
       const month = date.getUTCMonth();
       if (month !== lastMonth && date.getUTCDate() <= 7) {
@@ -2917,6 +2923,7 @@ async function buildActivity() {
             <tbody>${rows}</tbody></table></div>`
         : '<div class="act-empty">Nothing yet.</div>'}
     </div>`;
+  bindActivityHover(el);
 }
 
 function actBytes(bytes) {
@@ -2928,22 +2935,106 @@ function actBytes(bytes) {
 }
 
 function actSpark(samples, get, fmt, label) {
-  const vals = (samples || []).map(get).filter(v => v != null && Number.isFinite(v));
-  const current = vals.length ? fmt(vals[vals.length - 1]) : '—';
+  const series = (samples || [])
+    .map(s => [s.t, get(s)])
+    .filter(([, v]) => v != null && Number.isFinite(v));
+  const current = series.length ? fmt(series[series.length - 1][1]) : '—';
   let body;
-  if (vals.length >= 2) {
+  let points = '';
+  if (series.length >= 2) {
+    const vals = series.map(([, v]) => v);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     const span = (max - min) || 1;
-    const pts = vals.map((v, i) =>
-      `${((i / (vals.length - 1)) * 100).toFixed(2)},${(31 - ((v - min) / span) * 27).toFixed(2)}`);
-    body = `<svg viewBox="0 0 100 34" preserveAspectRatio="none">
+    // viewBox coordinates for the line; the same points as percentages
+    // drive the hover marker, which sits in HTML so it is not stretched
+    // with the non-uniform SVG scaling.
+    const coords = series.map(([t, v], i) => {
+      const x = (i / (series.length - 1)) * 100;
+      const y = 31 - ((v - min) / span) * 27;
+      return { x: Number(x.toFixed(2)), y: Number(((y / 34) * 100).toFixed(2)), t, f: fmt(v) };
+    });
+    const pts = coords.map((c, i) => `${c.x},${(31 - ((vals[i] - min) / span) * 27).toFixed(2)}`);
+    points = escAct(JSON.stringify(coords));
+    body = `<div class="spark-wrap"><svg viewBox="0 0 100 34" preserveAspectRatio="none">
       <polygon points="0,34 ${pts.join(' ')} 100,34"></polygon>
-      <polyline points="${pts.join(' ')}"></polyline></svg>`;
+      <polyline points="${pts.join(' ')}"></polyline></svg>
+      <div class="spark-guide" hidden></div><div class="spark-dot" hidden></div></div>`;
   } else {
     body = '<div class="act-collect">collecting…</div>';
   }
-  return `<div class="act-spark"><div class="act-l">${label}</div><div class="act-n">${current}</div>${body}</div>`;
+  return `<div class="act-spark" data-label="${escAct(label)}"${points ? ` data-points="${points}"` : ''}><div class="act-l">${label}</div><div class="act-n">${current}</div>${body}</div>`;
+}
+
+function actTip() {
+  let tip = document.getElementById('act-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'act-tip';
+    tip.className = 'act-tip';
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+function showActTip(html, x, y) {
+  const tip = actTip();
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x + 14, window.innerWidth - r.width - 8));
+  const top = y - r.height - 14 < 8 ? y + 18 : y - r.height - 14;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+function hideActTip() {
+  const tip = document.getElementById('act-tip');
+  if (tip) tip.style.display = 'none';
+}
+
+/* Hover details: heatmap cells show the day; sparklines snap to the
+   nearest sample and show its time and value. */
+function bindActivityHover(root) {
+  root.querySelectorAll('.heatmap').forEach(heat => {
+    heat.addEventListener('mousemove', event => {
+      const cell = event.target.closest('i');
+      if (!cell) { hideActTip(); return; }
+      const d = cell.dataset;
+      const date = new Date(`${d.date}T00:00:00Z`)
+        .toLocaleDateString([], { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const body = d.events
+        ? `<b>${Number(d.touched).toLocaleString()}</b> records · ${d.events} op${d.events === '1' ? '' : 's'}${Number(d.errors) ? ` · <span class="err">${d.errors} failed</span>` : ''}`
+        : 'no activity';
+      showActTip(`<div class="t">${date}</div>${body}`, event.clientX, event.clientY);
+    });
+    heat.addEventListener('mouseleave', hideActTip);
+  });
+  root.querySelectorAll('.act-spark[data-points]').forEach(spark => {
+    const points = JSON.parse(spark.dataset.points);
+    const wrap = spark.querySelector('.spark-wrap');
+    const guide = spark.querySelector('.spark-guide');
+    const dot = spark.querySelector('.spark-dot');
+    wrap.addEventListener('mousemove', event => {
+      const r = wrap.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (event.clientX - r.left) / r.width));
+      const p = points[Math.round(frac * (points.length - 1))];
+      guide.hidden = false;
+      guide.style.left = `${p.x}%`;
+      dot.hidden = false;
+      dot.style.left = `${p.x}%`;
+      dot.style.top = `${p.y}%`;
+      const when = new Date(p.t * 1000);
+      const recent = Date.now() - p.t * 1000 < 86400000;
+      const label = recent
+        ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      showActTip(`<div class="t">${label}</div><b>${escAct(p.f)}</b> ${escAct(spark.dataset.label)}`, event.clientX, event.clientY);
+    });
+    wrap.addEventListener('mouseleave', () => {
+      guide.hidden = true;
+      dot.hidden = true;
+      hideActTip();
+    });
+  });
 }
 
 /* Resources + search-load cards, side by side. Bar semantics are deliberate:
