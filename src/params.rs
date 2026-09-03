@@ -52,7 +52,7 @@ pub fn control_params(store_enabled: bool) -> Vec<ParamSpec> {
         control("offset", "integer", "Rows to skip for paging. offset + limit must be <= 100000.", Some("offset=100")),
         control("sort_by", "string", "Field to sort by (keyword, enum, boolean or number fields). Omit for relevance order.", Some("sort_by=revenue")),
         control("sort_order", "string", "\"asc\" or \"desc\" (default desc). Only meaningful with sort_by.", Some("sort_order=desc")),
-        control("count", "boolean", "Include `count`, the exact number of matches for this search state (default true). Pass false to skip it on broad filter-only browses.", Some("count=false")),
+        control("count", "boolean", "Include `count`, the exact number of matches for this search state. The default is this deployment's `default_count` setting; pass true or false to decide per request — counting traverses every candidate, so skip it where only the page matters.", Some("count=false")),
         control("include_pagination", "boolean", "Also emit the legacy `pagination` object (default false).", None),
     ];
     if store_enabled {

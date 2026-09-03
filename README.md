@@ -64,6 +64,8 @@ Create a `ruzz.toml`:
 port = 8888
 index_path = "./data/index"
 memory_budget = "2GB"  # or "50%", "100%", "unlimited"
+# doc_cache = "128MB"  # decompressed stored-document blocks kept in-process (default 128MB)
+# default_count = false  # /search omits the exact count unless asked (default true); see `count` below
 # bind = "127.0.0.1"   # default "0.0.0.0"; loopback when a proxy fronts it
 
 # Optional dashboard presentation — cosmetic only, the API is unaffected
@@ -174,6 +176,10 @@ Gzipped input works for CSV too: any source or delta ending `.gz` streams throug
 
 `ruzz import --check` parses every configured source and reports without writing anything: row counts, rows the import would reject, mapping entries that name no column, sidecar alignment, JSON arrays landing in fields not declared `multi`, and — when `primary_key` is set — empty and duplicate keys. A full import deliberately doesn't pay for per-row dedup at scale, so the check is where duplicate keys get caught; it exits non-zero on any finding, duplicates included, because a full import keeps duplicate rows while an update by key collapses them and the two paths would disagree. A duplicate rate above a few percent almost always means the key doesn't identify a row in that source.
 
+## Segments
+
+A full import ends by merging the index into a single segment — every query pays a little per segment, so one is fastest. Incremental updates each commit a segment of their own, folded together over time by tantivy's merge policy; if an index has grown to many (check `segments` in `/stats`), or an import reported that its final merge failed, `ruzz merge` merges everything into one segment in place. It rewrites the index once, so it needs roughly one index of free disk; a running server keeps serving throughout and picks the merged segment up on its own.
+
 ## Incremental updates
 
 A full import rebuilds everything. When only some rows changed, name a primary key and ship a delta instead:
@@ -283,7 +289,7 @@ Every response reports how many documents match — exactly, with no cap:
 }
 ```
 
-`count` is the number of documents matching the current search state (query plus every filter), independent of `limit`/`offset`. It is nearly free on text searches, which already traverse the whole matching set; pass `count=false` to skip it on broad filter-only browses. `returned` is the number of rows in the response. `total` is a deprecated alias of `returned`, kept so existing clients keep working.
+`count` is the number of documents matching the current search state (query plus every filter), independent of `limit`/`offset`. Computing it traverses every candidate — on a text search that is every document sharing the query's driving trigrams, tens of milliseconds per query at tens of millions of rows — so pass `count=false` wherever only the page matters (typeahead, lookups). Whether it is computed when the caller doesn't say is the deployment's `default_count` (default `true`); a large instance can default it off while smaller ones keep it, and the dashboard follows that default until a user toggles counts there. `returned` is the number of rows in the response. `total` is a deprecated alias of `returned`, kept so existing clients keep working.
 
 Comma-separated values are OR'ed within a parameter, and filters never influence ranking — only `q` does:
 
@@ -432,7 +438,7 @@ memory_budget = "50%"       # Warm half the index
 memory_budget = "50MB"      # Minimal warm-up, queries still work
 ```
 
-When budget < index size, ruzz warms the structures every query touches first — term dictionaries and fast fields, then posting lists — and lets the OS page the rest in via mmap on demand. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
+When budget < index size, ruzz warms the structures every query touches first — term dictionaries, fast fields and fieldnorms, then the stored documents (the rerank stage reads 50–1000 of them per fuzzy query, so a cold store is the most expensive thing to leave out), then posting lists — and lets the OS page the rest in via mmap on demand. Separately, `doc_cache` (default 128MB) keeps the hottest stored-document blocks *decompressed* in the process, saving the LZ4 decode on repeated candidates. Queries that hit cold pages cost a disk read (~100μs on SSD) instead of a memory lookup (~100ns). Still fast. Just not _absurdly_ fast.
 
 To be clear about what this is: a warm-up, not a cap. Residency is always the OS's call — to actually bound the process's memory, use your platform's mechanism (cgroups, container limits).
 

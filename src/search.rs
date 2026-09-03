@@ -262,6 +262,7 @@ impl SearchEngine {
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .doc_store_cache_num_blocks(config.server.doc_cache_blocks())
             .try_into()?;
 
         let schema = index.schema();
@@ -1626,6 +1627,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2656,6 +2659,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2876,6 +2881,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2925,6 +2932,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3120,6 +3129,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3212,6 +3223,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3495,6 +3508,8 @@ pub mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,

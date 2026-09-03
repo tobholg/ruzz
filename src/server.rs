@@ -273,7 +273,9 @@ async fn handle_search(
         .clamp(1, MAX_SEARCH_LIMIT);
     let offset = params.offset.unwrap_or(0);
     let include_pagination = params.include_pagination.unwrap_or(false);
-    let want_count = params.count.unwrap_or(true);
+    let want_count = params
+        .count
+        .unwrap_or(state.engine.config.server.default_count);
     let include_full = params.full.unwrap_or(false);
 
     if offset.saturating_add(limit) > crate::search::MAX_PAGINATION_WINDOW {
@@ -1310,6 +1312,7 @@ async fn handle_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                     "name": state.engine.config.dashboard.name,
                     "columns": state.engine.config.dashboard.columns,
                     "filters": state.engine.config.dashboard.filters,
+                    "count": state.engine.config.server.default_count,
                 },
                 "schema": {
                     "fields": state.engine.config.schema.fields.iter().map(|f| {
@@ -1568,7 +1571,11 @@ mod tests {
 
     /// A real imported index with a primary key, so an incremental update
     /// can be run against it mid-test.
-    fn imported_config(dir: &std::path::Path, csv: &str) -> Arc<crate::config::Config> {
+    fn imported_config(
+        dir: &std::path::Path,
+        csv: &str,
+        default_count: bool,
+    ) -> Arc<crate::config::Config> {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("data.csv"), csv).unwrap();
         let keyword = |name: &str| FieldConfig {
@@ -1590,6 +1597,8 @@ mod tests {
                 memory_budget: "100%".to_string(),
                 auth_token: None,
                 strict_params: false,
+                doc_cache: None,
+                default_count,
             },
             schema: crate::config::SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -1671,6 +1680,7 @@ mod tests {
         let config = imported_config(
             &dir,
             "org_number,company_name\n100,Acme Rockets\n200,Beta Bakery\n",
+            true,
         );
         let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
         // The reader's meta.json watcher treats its first poll as a change
@@ -1751,7 +1761,7 @@ mod tests {
         for i in 0..7 {
             csv.push_str(&format!("{},Company {}\n", 100 + i, i));
         }
-        let config = imported_config(&dir, &csv);
+        let config = imported_config(&dir, &csv, true);
         let state = Arc::new(AppState::new(SearchEngine::open(config.clone()).unwrap()));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         state.engine.reader.reload().unwrap();
@@ -1784,6 +1794,63 @@ mod tests {
         assert_eq!(after["count"], 8);
         assert_eq!(after["returned"], 3);
         assert_eq!(after["has_more"], true, "4 + 3 < 8 now");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `default_count = false` makes /search skip the exact count unless the
+    /// caller asks; the parameter overrides in both directions, and /stats
+    /// reports the default so the dashboard can follow it.
+    #[tokio::test]
+    async fn default_count_false_omits_the_count_unless_asked() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruzz-default-count-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = imported_config(
+            &dir,
+            "org_number,company_name\n100,Acme Rockets\n200,Beta Bakery\n",
+            false,
+        );
+        let state = Arc::new(AppState::new(SearchEngine::open(config).unwrap()));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.engine.reader.reload().unwrap();
+
+        let search = |count: Option<bool>| {
+            let state = Arc::clone(&state);
+            async move {
+                let response = handle_search(
+                    State(state),
+                    Query(SearchParams {
+                        q: Some("acme".to_string()),
+                        limit: None,
+                        offset: None,
+                        include_pagination: None,
+                        sort_by: None,
+                        sort_order: None,
+                        full: None,
+                        count,
+                        extra: HashMap::new(),
+                    }),
+                )
+                .await;
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+        let silent = search(None).await;
+        assert!(silent.get("count").is_none(), "{silent}");
+        assert_eq!(silent["returned"], 1);
+        let asked = search(Some(true)).await;
+        assert_eq!(asked["count"], 1);
+
+        let stats = handle_stats(State(Arc::clone(&state))).await.0;
+        assert_eq!(stats["dashboard"]["count"], false);
 
         let _ = std::fs::remove_dir_all(dir);
     }
