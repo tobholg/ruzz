@@ -15,7 +15,7 @@ use tower_http::cors::CorsLayer;
 use crate::search::{SearchEngine, StoreStatus};
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
-const MAX_SEARCH_LIMIT: usize = 1000;
+const MAX_SEARCH_LIMIT: usize = 20_000;
 /// Max results that may be hydrated inline with full=true
 const MAX_FULL_LIMIT: usize = 100;
 /// Max refs per /docs batch request

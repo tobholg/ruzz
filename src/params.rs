@@ -48,7 +48,7 @@ fn control(
 pub fn control_params(store_enabled: bool) -> Vec<ParamSpec> {
     let mut specs = vec![
         control("q", "string", "Fuzzy full-text query across all fuzzy-search fields. Typo tolerant and diacritic-folding (\"cafe\" matches \"Café\"); one- and two-character queries match word prefixes for typeahead.", Some("q=amazn")),
-        control("limit", "integer", "Rows to return (1-1000, default 20).", Some("limit=50")),
+        control("limit", "integer", "Rows to return (1-20000, default 20).", Some("limit=50")),
         control("offset", "integer", "Rows to skip for paging. offset + limit must be <= 100000.", Some("offset=100")),
         control("sort_by", "string", "Field to sort by (keyword, enum, boolean or number fields). Omit for relevance order.", Some("sort_by=revenue")),
         control("sort_order", "string", "\"asc\" or \"desc\" (default desc). Only meaningful with sort_by.", Some("sort_order=desc")),

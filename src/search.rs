@@ -186,8 +186,10 @@ const RERANK_POOL_MAX: usize = 200;
 /// requested window so every page is ranked by the same similarity model;
 /// past this the request is refused rather than quietly handed to BM25
 /// ordering, which used to happen at the pool size and reordered the whole
-/// list under a different score scale.
-pub const RERANK_POOL_HARD_CAP: usize = 1000;
+/// list under a different score scale. Matches the API's largest `limit`:
+/// a 20k-candidate rerank is a few hundred milliseconds warm, bounded and
+/// opt-in by the caller.
+pub const RERANK_POOL_HARD_CAP: usize = 20_000;
 
 /// Best similarity below which a reranked result set counts as weak, so
 /// the adaptive wide pass is worth trying.

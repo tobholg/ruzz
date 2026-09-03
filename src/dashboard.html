@@ -605,16 +605,18 @@
         <div>
           <div class="export-setting-title">EXPORT SIZE</div>
           <div class="export-limit-row">
-            <input class="export-limit-input" id="export-limit-input" type="number" min="1" max="1000" step="1" value="30" inputmode="numeric">
+            <input class="export-limit-input" id="export-limit-input" type="number" min="1" max="20000" step="1" value="30" inputmode="numeric">
             <button class="limit-apply" id="export-preview-refresh" type="button">Refresh preview</button>
           </div>
-          <div class="export-limit-note">Exports the current query, filters, and sort order. Maximum <span id="export-limit-max">1000</span> rows per file.</div>
+          <div class="export-limit-note">Exports the current query, filters, and sort order. Maximum <span id="export-limit-max">20000</span> rows per file.</div>
           <div class="preset-row" id="export-limit-presets">
             <button class="preset" type="button" data-limit="30">30</button>
             <button class="preset" type="button" data-limit="100">100</button>
             <button class="preset" type="button" data-limit="250">250</button>
             <button class="preset" type="button" data-limit="500">500</button>
             <button class="preset" type="button" data-limit="1000">1000</button>
+            <button class="preset" type="button" data-limit="5000">5000</button>
+            <button class="preset" type="button" data-limit="20000">20000</button>
           </div>
         </div>
         <div>
@@ -685,7 +687,7 @@
       <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
         <div class="settings-limit-row">
-          <input class="limit-input" id="settings-limit-input" type="number" min="1" max="1000" step="1" inputmode="numeric">
+          <input class="limit-input" id="settings-limit-input" type="number" min="1" max="20000" step="1" inputmode="numeric">
           <button class="limit-apply" id="settings-limit-apply" type="button">Apply</button>
           <div class="preset-row" id="settings-limit-presets">
             <button class="preset" type="button" data-limit="10">10</button>
@@ -693,6 +695,8 @@
             <button class="preset" type="button" data-limit="100">100</button>
             <button class="preset" type="button" data-limit="250">250</button>
             <button class="preset" type="button" data-limit="1000">1000</button>
+            <button class="preset" type="button" data-limit="5000">5000</button>
+            <button class="preset" type="button" data-limit="20000">20000</button>
           </div>
         </div>
       </div>
@@ -715,7 +719,7 @@ let statsData = null;
 let authToken = sessionStorage.getItem('ruzz_token') || '';
 const DEFAULT_RESULT_LIMIT = 30;
 const MIN_RESULT_LIMIT = 1;
-const MAX_RESULT_LIMIT = 1000;
+const MAX_RESULT_LIMIT = 20000;
 const DEFAULT_COLUMN_CAP = 7;
 let resultLimit = clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
 // Exact counts traverse every candidate — on a large index most of a
@@ -882,7 +886,7 @@ function searchTabMarkup() {
               <div class="limit-menu" id="limit-menu" hidden>
                 <div class="limit-title">RESULTS PER SEARCH</div>
                 <div class="limit-input-row">
-                  <input class="limit-input" id="limit-input" type="number" min="1" max="1000" step="1" value="30" inputmode="numeric">
+                  <input class="limit-input" id="limit-input" type="number" min="1" max="20000" step="1" value="30" inputmode="numeric">
                   <button class="limit-apply" id="limit-apply" type="button">Apply</button>
                 </div>
                 <div class="preset-row" id="limit-presets">
@@ -893,6 +897,8 @@ function searchTabMarkup() {
                   <button class="preset" type="button" data-limit="100">100</button>
                   <button class="preset" type="button" data-limit="250">250</button>
                   <button class="preset" type="button" data-limit="1000">1000</button>
+            <button class="preset" type="button" data-limit="5000">5000</button>
+            <button class="preset" type="button" data-limit="20000">20000</button>
                 </div>
               </div>
             </div>
@@ -2615,7 +2621,7 @@ Content-Type: application/json
       <thead><tr><th>Param</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>q</code></td><td>Fuzzy search query (searches: ${fuzzyFields.join(', ')})</td></tr>
-        <tr><td><code>limit</code></td><td>Max results (default 20, max 1000)</td></tr>
+        <tr><td><code>limit</code></td><td>Max results (default 20, max 20000)</td></tr>
         <tr><td><code>offset</code></td><td>Number of matches to skip before returning results. Best used with numeric sorts and exact/range filters.</td></tr>
         <tr><td><code>include_pagination</code></td><td>When <code>true</code>, include pagination metadata. Off by default to avoid unnecessary work.</td></tr>
         <tr><td><code>sort_by</code></td><td>Field to sort by (keyword, enum, boolean and number fields)</td></tr>
@@ -2683,7 +2689,7 @@ Fuzzy search with optional filters, range queries, and sorting.
 | Param | Description |
 |-------|-------------|
 | \`q\` | Fuzzy search query (searches: ${fuzzyFields.join(', ')}) |
-| \`limit\` | Max results (default 20, max 1000) |
+| \`limit\` | Max results (default 20, max 20000) |
 | \`offset\` | Number of matches to skip before returning results. |
 | \`include_pagination\` | When \`true\`, include pagination metadata. |
 | \`sort_by\` | Field to sort by (keyword, enum, boolean and number fields) |
