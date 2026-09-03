@@ -65,6 +65,7 @@ port = 8888
 index_path = "./data/index"
 memory_budget = "2GB"  # or "50%", "100%", "unlimited"
 # doc_cache = "128MB"  # decompressed stored-document blocks kept in-process (default 128MB)
+# default_count = false  # /search omits the exact count unless asked (default true); see `count` below
 # bind = "127.0.0.1"   # default "0.0.0.0"; loopback when a proxy fronts it
 
 # Optional dashboard presentation — cosmetic only, the API is unaffected
@@ -288,7 +289,7 @@ Every response reports how many documents match — exactly, with no cap:
 }
 ```
 
-`count` is the number of documents matching the current search state (query plus every filter), independent of `limit`/`offset`. It is nearly free on text searches, which already traverse the whole matching set; pass `count=false` to skip it on broad filter-only browses. `returned` is the number of rows in the response. `total` is a deprecated alias of `returned`, kept so existing clients keep working.
+`count` is the number of documents matching the current search state (query plus every filter), independent of `limit`/`offset`. Computing it traverses every candidate — on a text search that is every document sharing the query's driving trigrams, tens of milliseconds per query at tens of millions of rows — so pass `count=false` wherever only the page matters (typeahead, lookups). Whether it is computed when the caller doesn't say is the deployment's `default_count` (default `true`); a large instance can default it off while smaller ones keep it, and the dashboard follows that default until a user toggles counts there. `returned` is the number of rows in the response. `total` is a deprecated alias of `returned`, kept so existing clients keep working.
 
 Comma-separated values are OR'ed within a parameter, and filters never influence ranking — only `q` does:
 

@@ -1628,6 +1628,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2659,6 +2660,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2880,6 +2882,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2930,6 +2933,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3126,6 +3130,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3219,6 +3224,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -3503,6 +3509,7 @@ pub mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,

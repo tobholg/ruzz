@@ -145,6 +145,17 @@ pub struct ServerConfig {
     /// own default is 100 blocks (~1.6MB).
     #[serde(default)]
     pub doc_cache: Option<String>,
+    /// Whether /search computes the exact `count` when the caller does not
+    /// say. An exact count traverses every candidate — tens of milliseconds
+    /// per query on tens of millions of rows — so a large instance may
+    /// default it off while smaller ones keep it. The `count` parameter
+    /// always overrides; the dashboard follows this until a user chooses.
+    #[serde(default = "default_default_count")]
+    pub default_count: bool,
+}
+
+fn default_default_count() -> bool {
+    true
 }
 
 impl ServerConfig {
@@ -444,6 +455,7 @@ mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 fields: Vec::new(),

@@ -680,7 +680,7 @@
         <div class="settings-limit-row">
           <label class="count-toggle"><input type="checkbox" id="settings-count-toggle"> Count every match</label>
         </div>
-        <div class="settings-note">Off by default: an exact count walks every candidate, and on tens of millions of rows that is most of a keystroke's latency. With counts off the headline number is the query time — click it to switch either way.</div>
+        <div class="settings-note">Follows this server's <code>default_count</code> setting until you choose here. An exact count walks every candidate, and on tens of millions of rows that is most of a keystroke's latency; with counts off the headline number is the query time — click it to switch either way.</div>
       </div>
       <div class="settings-section">
         <div class="export-panel-title">RESULTS PER SEARCH</div>
@@ -718,10 +718,14 @@ const MIN_RESULT_LIMIT = 1;
 const MAX_RESULT_LIMIT = 1000;
 const DEFAULT_COLUMN_CAP = 7;
 let resultLimit = clampResultLimit(sessionStorage.getItem('ruzz_result_limit') || DEFAULT_RESULT_LIMIT);
-// Exact counts are off by default: they traverse every candidate, which
-// on a large index is most of a keystroke's latency. Remembered per browser.
-let countEnabled = false;
-try { countEnabled = localStorage.getItem('ruzz_count') === 'on'; } catch {}
+// Exact counts traverse every candidate — on a large index most of a
+// keystroke's latency. The choice follows the server's default_count until
+// this browser picks one; then it is remembered here.
+let countEnabled = true;
+try { countEnabled = localStorage.getItem('ruzz_count') !== 'off'; } catch {}
+function countPreferenceChosen() {
+  try { const v = localStorage.getItem('ruzz_count'); return v === 'on' || v === 'off'; } catch { return false; }
+}
 function setCountEnabled(on) {
   countEnabled = Boolean(on);
   try { localStorage.setItem('ruzz_count', countEnabled ? 'on' : 'off'); } catch {}
@@ -1158,6 +1162,8 @@ async function init() {
     }
     statsData = await res.json();
     updateStats(statsData);
+    if (!countPreferenceChosen()) countEnabled = statsData.dashboard?.count !== false;
+    syncCountUI();
     schema = statsData.schema?.fields || [];
     fuzzyField = schema.find(f => f.search === 'fuzzy');
     visibleColumns = loadVisibleColumns();

@@ -1803,6 +1803,7 @@ mod tests {
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: primary_key.map(String::from),
@@ -1996,6 +1997,7 @@ org_number,company_name,city,secret_extra
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: None,
@@ -2447,6 +2449,7 @@ org_number,company_name,city,secret_extra
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2561,6 +2564,7 @@ org_number,company_name,city,secret_extra
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2633,6 +2637,7 @@ org_number,company_name,city,secret_extra
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),
@@ -2957,6 +2962,7 @@ org_number,company_name,city,secret_extra
                 auth_token: None,
                 strict_params: false,
                 doc_cache: None,
+                default_count: true,
             },
             schema: SchemaConfig {
                 primary_key: Some("org_number".to_string()),

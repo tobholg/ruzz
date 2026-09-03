@@ -193,6 +193,7 @@ fn bench_config(dir: &std::path::Path) -> Arc<Config> {
             auth_token: None,
             strict_params: false,
             doc_cache: None,
+            default_count: true,
         },
         schema: SchemaConfig {
             primary_key: None,
