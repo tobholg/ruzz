@@ -3704,6 +3704,194 @@ pub mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Real-data check of the relevance path. RUZZ_AB_CONFIG names a
+    /// ruzz.toml (paths resolve from the working directory, as for the
+    /// binary); RUZZ_AB_NAMES a file with one sampled name per line. Not
+    /// pass/fail — prints recall and latency per query kind, so a ranking
+    /// change can be measured on a real index before it ships:
+    ///   RUZZ_AB_CONFIG=… RUZZ_AB_NAMES=… cargo test --release ab_real -- --ignored --nocapture
+    /// RUZZ_AB_DEBUG=1 prints the misses.
+    #[test]
+    #[ignore]
+    fn ab_real() {
+        let (Ok(config_path), Ok(names_path)) = (
+            std::env::var("RUZZ_AB_CONFIG"),
+            std::env::var("RUZZ_AB_NAMES"),
+        ) else {
+            eprintln!("set RUZZ_AB_CONFIG and RUZZ_AB_NAMES");
+            return;
+        };
+        let config =
+            Arc::new(crate::config::Config::load(std::path::Path::new(&config_path)).unwrap());
+        let engine = SearchEngine::open(config).unwrap();
+        let names: Vec<String> = std::fs::read_to_string(&names_path)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+
+        let words = |n: &str| -> Vec<String> {
+            crate::analyze::fold(n)
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(String::from)
+                .collect()
+        };
+        // One substitution in the middle of the longest word.
+        let typo = |name: &str| -> Option<String> {
+            let ws = words(name);
+            let longest = ws.iter().max_by_key(|w| w.chars().count())?;
+            if longest.chars().count() < 5 {
+                return None;
+            }
+            let mut out: Vec<String> = Vec::new();
+            for w in &ws {
+                if w == longest {
+                    let mut chars: Vec<char> = w.chars().collect();
+                    let pos = chars.len() / 2;
+                    chars[pos] = if chars[pos] == 'x' { 'q' } else { 'x' };
+                    out.push(chars.into_iter().collect());
+                } else {
+                    out.push(w.clone());
+                }
+            }
+            Some(out.join(" "))
+        };
+        let kinds: Vec<(&str, Vec<(String, String)>)> = vec![
+            (
+                "exact",
+                names.iter().map(|n| (n.clone(), n.clone())).collect(),
+            ),
+            (
+                "typo-1",
+                names
+                    .iter()
+                    .filter_map(|n| typo(n).map(|q| (n.clone(), q)))
+                    .collect(),
+            ),
+            (
+                "typo-1 + prefix",
+                names
+                    .iter()
+                    .filter_map(|n| {
+                        let t = typo(n)?;
+                        let cut = t.chars().count().saturating_sub(3).max(4);
+                        Some((n.clone(), t.chars().take(cut).collect()))
+                    })
+                    .collect(),
+            ),
+            (
+                "first two words",
+                names
+                    .iter()
+                    .filter(|n| words(n).len() >= 3)
+                    .map(|n| (n.clone(), words(n)[..2].join(" ")))
+                    .collect(),
+            ),
+            (
+                "one word + prefix",
+                names
+                    .iter()
+                    .filter_map(|n| {
+                        let ws = words(n);
+                        if ws.len() < 2 || ws[1].chars().count() < 5 {
+                            return None;
+                        }
+                        let p: String = ws[1].chars().take(3).collect();
+                        Some((n.clone(), format!("{} {}", ws[0], p)))
+                    })
+                    .collect(),
+            ),
+            // The tail of a long word ("banken" of "sparebanken"), scored
+            // by containment: recall@1 is "the top hit contains it",
+            // recall@10 "all ten do".
+            (
+                "infix",
+                names
+                    .iter()
+                    .filter_map(|n| {
+                        let ws = words(n);
+                        let longest = ws.iter().max_by_key(|w| w.chars().count())?;
+                        let len = longest.chars().count();
+                        if len < 9 {
+                            return None;
+                        }
+                        let tail: String = longest.chars().skip(len - 6).collect();
+                        Some((n.clone(), tail))
+                    })
+                    .collect(),
+            ),
+        ];
+
+        println!(
+            "\n{:<18} {:>5} {:>9} {:>9} {:>9} {:>9}",
+            "kind", "n", "recall@1", "recall@10", "mean ms", "p95 ms"
+        );
+        for (kind, queries) in &kinds {
+            let (mut at1, mut at10) = (0usize, 0usize);
+            let mut times: Vec<f64> = Vec::new();
+            for (target, q) in queries {
+                let t = std::time::Instant::now();
+                let r = engine
+                    .search(
+                        q,
+                        &HashMap::new(),
+                        &[],
+                        &SortOrder::Relevance,
+                        10,
+                        0,
+                        false,
+                        false,
+                        false,
+                    )
+                    .unwrap();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                let got: Vec<&str> = r
+                    .results
+                    .iter()
+                    .filter_map(|x| x["name"].as_str())
+                    .collect();
+                let hit1;
+                if *kind == "infix" {
+                    let contains: Vec<bool> = got
+                        .iter()
+                        .map(|n| crate::analyze::fold(n).contains(q.as_str()))
+                        .collect();
+                    hit1 = contains.first() == Some(&true);
+                    at10 += usize::from(!contains.is_empty() && contains.iter().all(|c| *c));
+                } else {
+                    hit1 = got.first() == Some(&target.as_str());
+                    at10 += usize::from(got.contains(&target.as_str()));
+                }
+                if hit1 {
+                    at1 += 1;
+                } else if std::env::var_os("RUZZ_AB_DEBUG").is_some() {
+                    println!(
+                        "  miss [{kind}] {q:?} wanted {target:?} got {:?}",
+                        got.iter().take(3).collect::<Vec<_>>()
+                    );
+                }
+            }
+            if times.is_empty() {
+                continue;
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean = times.iter().sum::<f64>() / times.len() as f64;
+            let p95 = times[(times.len() as f64 * 0.95) as usize];
+            println!(
+                "{:<18} {:>5} {:>8.1}% {:>8.1}% {:>9.2} {:>9.2}",
+                kind,
+                queries.len(),
+                100.0 * at1 as f64 / queries.len() as f64,
+                100.0 * at10 as f64 / queries.len() as f64,
+                mean,
+                p95
+            );
+        }
+    }
+
     fn test_index_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
